@@ -78,6 +78,53 @@ TOOL_DEFINITIONS = [
     },
     {
         "type": "function",
+        "name": "resumen_notas_credito",
+        "description": (
+            "Obtiene el resumen de notas de crédito de ventas emitidas por "
+            "un cliente para un año y mes determinados. Usa esta herramienta "
+            "para cantidad, bases, IVA e ICE de las notas de crédito."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "anio": {"type": "integer", "description": "Año tributario."},
+                "mes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12,
+                    "description": "Mes tributario, de 1 a 12.",
+                },
+            },
+            "required": ["anio", "mes"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "listar_notas_credito",
+        "description": (
+            "Obtiene el detalle de notas de crédito de ventas emitidas por "
+            "un cliente para un año y mes, incluyendo la factura modificada."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "anio": {"type": "integer", "description": "Año tributario."},
+                "mes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12,
+                    "description": "Mes tributario, de 1 a 12.",
+                },
+            },
+            "required": ["anio", "mes"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "listar_compras",
         "description": (
             "Obtiene el detalle de comprobantes de compra de un cliente "
@@ -141,6 +188,27 @@ class ContaTools:
             "registros": self._json_safe(registros[:limite]),
         }
 
+    def resumen_notas_credito(self, anio: int, mes: int) -> dict[str, Any]:
+        resultado = TributarioService.resumen_notas_credito(
+            ruc=self.ruc,
+            anio=anio,
+            mes=mes,
+        )
+        return self._json_safe(resultado)
+
+    def listar_notas_credito(self, anio: int, mes: int) -> dict[str, Any]:
+        registros = TributarioService.listar_notas_credito(
+            ruc=self.ruc,
+            anio=anio,
+            mes=mes,
+        )
+        limite = 100
+        return {
+            "total": len(registros),
+            "limitado": len(registros) > limite,
+            "registros": self._json_safe(registros[:limite]),
+        }
+
     def listar_compras(
         self,
         anio: int,
@@ -173,6 +241,16 @@ class ContaTools:
             )
         if nombre == "listar_ventas":
             return self.listar_ventas(
+                anio=int(argumentos["anio"]),
+                mes=int(argumentos["mes"]),
+            )
+        if nombre == "resumen_notas_credito":
+            return self.resumen_notas_credito(
+                anio=int(argumentos["anio"]),
+                mes=int(argumentos["mes"]),
+            )
+        if nombre == "listar_notas_credito":
+            return self.listar_notas_credito(
                 anio=int(argumentos["anio"]),
                 mes=int(argumentos["mes"]),
             )
