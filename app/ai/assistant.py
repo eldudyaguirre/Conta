@@ -3,8 +3,24 @@ from typing import Any
 from app.ai.context import ContaContextManager
 from app.ai.gemini_provider import ContaGeminiProvider
 from app.ai.openai_provider import ContaOpenAIProvider
-from app.ai.tools import ContaTools
+from app.ai.tools import ContaTools, TOOL_DEFINITIONS
 from app.core.config import settings
+
+
+ADMIN_TOOL_NAMES = {
+    "buscar_cliente",
+    "consultar_clave_sri",
+    "consultar_estado_cliente",
+    "activar_cliente",
+    "desactivar_cliente",
+    "cambiar_clave_sri",
+}
+
+ADMIN_TOOL_DEFINITIONS = [
+    definition
+    for definition in TOOL_DEFINITIONS
+    if definition["name"] in ADMIN_TOOL_NAMES
+]
 
 
 class ContaAssistant:
@@ -98,6 +114,50 @@ class ContaAssistant:
             **resultado,
             "contexto": self.context.serializar(contexto),
             "ai_disponible": False,
+        }
+
+    def responder_admin(
+        self,
+        pregunta: str,
+        usuario: str,
+        conversation_id: str | None = None,
+    ) -> dict[str, Any]:
+        pregunta = pregunta.strip()
+        if not pregunta:
+            raise ValueError("La pregunta no puede estar vacía.")
+
+        contexto = self.context.obtener(
+            ruc="ADMIN",
+            conversation_id=conversation_id,
+            cliente=f"Administración - {usuario}",
+        )
+
+        if self.provider is None:
+            raise RuntimeError("La IA no está disponible.")
+
+        resultado = self.provider.responder(
+            pregunta=pregunta,
+            ruc="ADMIN",
+            cliente=f"Administración - {usuario}",
+            anio=None,
+            mes=None,
+            historial=contexto.historial,
+            tools=ContaTools(""),
+            tool_definitions=ADMIN_TOOL_DEFINITIONS,
+        )
+
+        self.context.guardar(
+            contexto=contexto,
+            pregunta=pregunta,
+            respuesta=resultado["respuesta"],
+        )
+
+        return {
+            "tipo": "admin_ai",
+            "respuesta": resultado["respuesta"],
+            "modelo": resultado["modelo"],
+            "tool_calls": resultado["tool_calls"],
+            "contexto": self.context.serializar(contexto),
         }
 
     def limpiar_conversacion(self, ruc: str, conversation_id: str) -> None:
