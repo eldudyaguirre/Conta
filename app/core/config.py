@@ -10,9 +10,16 @@ class Settings(BaseSettings):
 
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
-    DB_NAME: str = "Conta"
+    DB_NAME: str = "BdTotal"
     DB_USER: str = "postgres"
     DB_PASSWORD: str = ""
+
+    OPENAI_API_KEY: str | None = None
+    OPENAI_MODEL: str = "gpt-6-luna"
+
+    AI_ENABLED: bool = True
+    AI_MAX_TOOL_CALLS: int = 5
+    AI_MAX_HISTORY_MESSAGES: int = 20
 
     model_config = SettingsConfigDict(
         env_file=".env",
