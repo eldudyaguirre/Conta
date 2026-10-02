@@ -544,17 +544,9 @@ class TributarioService:
         mes: int | None = None,
     ):
         condiciones = [
-            """
-            CASE
-                WHEN TRIM(fecfactur) ~ '^\\d{2}/\\d{2}/\\d{4}$'
-                    THEN EXTRACT(YEAR FROM TO_DATE(TRIM(fecfactur), 'DD/MM/YYYY'))::integer
-                WHEN TRIM(fecfactur) ~ '^\\d{4}-\\d{2}-\\d{2}'
-                    THEN EXTRACT(YEAR FROM TO_DATE(LEFT(TRIM(fecfactur), 10), 'YYYY-MM-DD'))::integer
-                ELSE NULL
-            END = :anio
-            """
+            "RIGHT(TRIM(fecfactur), 4) = :anio_texto"
         ]
-        parametros = {"anio": anio}
+        parametros = {"anio_texto": str(anio)}
 
         if mes is not None:
             condiciones.append("TRIM(mes) = :mes")
@@ -586,13 +578,7 @@ class TributarioService:
             FROM ventas
             WHERE {where}
             ORDER BY
-                CASE
-                    WHEN TRIM(fecfactur) ~ '^\\d{2}/\\d{2}/\\d{4}$'
-                        THEN TO_DATE(TRIM(fecfactur), 'DD/MM/YYYY')
-                    WHEN TRIM(fecfactur) ~ '^\\d{4}-\\d{2}-\\d{2}'
-                        THEN TO_DATE(LEFT(TRIM(fecfactur), 10), 'YYYY-MM-DD')
-                    ELSE NULL
-                END,
+                TO_DATE(TRIM(fecfactur), 'DD/MM/YYYY'),
                 numfactur
         """)
 
@@ -645,17 +631,9 @@ class TributarioService:
         mes: int | None = None,
     ):
         condiciones = [
-            """
-            CASE
-                WHEN TRIM(fecfactur) ~ '^\\d{2}/\\d{2}/\\d{4}$'
-                    THEN EXTRACT(YEAR FROM TO_DATE(TRIM(fecfactur), 'DD/MM/YYYY'))::integer
-                WHEN TRIM(fecfactur) ~ '^\\d{4}-\\d{2}-\\d{2}'
-                    THEN EXTRACT(YEAR FROM TO_DATE(LEFT(TRIM(fecfactur), 10), 'YYYY-MM-DD'))::integer
-                ELSE NULL
-            END = :anio
-            """
+            "RIGHT(TRIM(fecfactur), 4) = :anio_texto"
         ]
-        parametros = {"anio": anio}
+        parametros = {"anio_texto": str(anio)}
 
         if mes is not None:
             condiciones.append("TRIM(mes) = :mes")
