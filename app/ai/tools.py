@@ -296,6 +296,7 @@ TOOL_DEFINITIONS.extend([
 class ContaTools:
     def __init__(self, ruc: str):
         self.ruc = ruc
+        self._rucs_resueltos: set[str] = set()
 
     def resumen_compras(self, anio: int, mes: int) -> dict[str, Any]:
         resultado = TributarioService.resumen_compras(
@@ -369,36 +370,62 @@ class ContaTools:
 
     def buscar_cliente(self, nombre: str) -> dict[str, Any]:
         resultados = ClienteAdminService.buscar_clientes(nombre)
+
+        # Solo se considera resuelto automáticamente un RUC cuando
+        # la búsqueda devuelve exactamente un cliente. Si hay varios,
+        # el modelo debe pedir una aclaración al usuario.
+        if len(resultados) == 1:
+            self._rucs_resueltos.add(str(resultados[0]["ruc"]))
+
         return {
             "total": len(resultados),
             "clientes": self._json_safe(resultados),
         }
 
+    def _validar_ruc_resuelto(self, ruc: str) -> str:
+        ruc = str(ruc).strip()
+
+        if not ruc.isdigit() or len(ruc) != 13:
+            raise ValueError("RUC inválido.")
+
+        if ruc not in self._rucs_resueltos:
+            raise ValueError(
+                "Primero debes identificar al cliente mediante buscar_cliente "
+                "y usar únicamente el RUC devuelto por esa búsqueda."
+            )
+
+        return ruc
+
     def consultar_clave_sri(self, ruc: str) -> dict[str, Any]:
+        ruc = self._validar_ruc_resuelto(ruc)
         resultado = ClienteAdminService.consultar_clave_sri(ruc)
         if not resultado:
             raise ValueError("Cliente no encontrado.")
         return self._json_safe(resultado)
 
     def consultar_estado_cliente(self, ruc: str) -> dict[str, Any]:
+        ruc = self._validar_ruc_resuelto(ruc)
         resultado = ClienteAdminService.obtener_cliente(ruc)
         if not resultado:
             raise ValueError("Cliente no encontrado.")
         return self._json_safe(resultado)
 
     def activar_cliente(self, ruc: str) -> dict[str, Any]:
+        ruc = self._validar_ruc_resuelto(ruc)
         resultado = ClienteAdminService.cambiar_estado(ruc, True)
         if not resultado:
             raise ValueError("Cliente no encontrado.")
         return self._json_safe(resultado)
 
     def desactivar_cliente(self, ruc: str) -> dict[str, Any]:
+        ruc = self._validar_ruc_resuelto(ruc)
         resultado = ClienteAdminService.cambiar_estado(ruc, False)
         if not resultado:
             raise ValueError("Cliente no encontrado.")
         return self._json_safe(resultado)
 
     def cambiar_clave_sri(self, ruc: str, nueva_clave: str) -> dict[str, Any]:
+        ruc = self._validar_ruc_resuelto(ruc)
         resultado = ClienteAdminService.cambiar_clave_sri(
             ruc=ruc,
             nueva_clave=nueva_clave,
