@@ -13,17 +13,17 @@ class ContaGeminiProvider:
     def __init__(self):
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
         self.model = settings.GEMINI_MODEL
-        self.function_declarations = [
+
+    def _build_tool(self, definitions):
+        function_declarations = [
             types.FunctionDeclaration(
                 name=definition["name"],
                 description=definition.get("description", ""),
                 parameters_json_schema=definition["parameters"],
             )
-            for definition in TOOL_DEFINITIONS
+            for definition in definitions
         ]
-        self.tool = types.Tool(
-            function_declarations=self.function_declarations
-        )
+        return types.Tool(function_declarations=function_declarations)
 
     def responder(
         self,
@@ -34,6 +34,7 @@ class ContaGeminiProvider:
         mes: int | None,
         historial: list[dict[str, str]],
         tools: ContaTools,
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         instrucciones = build_system_prompt(
             ruc=ruc,
@@ -41,6 +42,9 @@ class ContaGeminiProvider:
             anio=anio,
             mes=mes,
         )
+
+        definitions = tool_definitions or TOOL_DEFINITIONS
+        tool = self._build_tool(definitions)
 
         contents: list[Any] = []
         for mensaje in historial:
@@ -67,7 +71,7 @@ class ContaGeminiProvider:
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=instrucciones,
-                    tools=[self.tool],
+                    tools=[tool],
                 ),
             )
 
