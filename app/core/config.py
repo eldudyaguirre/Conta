@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-6-luna"
     GEMINI_API_KEY: str | None = None
-    GEMINI_MODEL: str = "gemini-2.5-flash-lite"
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
 
     AI_ENABLED: bool = True
     AI_MAX_TOOL_CALLS: int = 5
