@@ -38,6 +38,7 @@ REGLAS FUNDAMENTALES
 ALCANCE ACTUAL
 Por ahora Conta trabaja con información tributaria, especialmente:
 - compras y comprobantes recibidos;
+- ventas y comprobantes emitidos;
 - bases imponibles;
 - IVA e ICE;
 - retenciones;
