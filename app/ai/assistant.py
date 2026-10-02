@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.ai.context import ContaContextManager
+from app.ai.gemini_provider import ContaGeminiProvider
 from app.ai.openai_provider import ContaOpenAIProvider
 from app.ai.tools import ContaTools
 from app.core.config import settings
@@ -11,15 +12,27 @@ class ContaAssistant:
         self.context = ContaContextManager(
             max_history_messages=settings.AI_MAX_HISTORY_MESSAGES
         )
-        self.provider = (
-            ContaOpenAIProvider()
-            if settings.AI_ENABLED and settings.OPENAI_API_KEY
-            else None
-        )
+
+        self.provider = None
+
+        if settings.AI_ENABLED:
+            provider_name = settings.AI_PROVIDER.strip().lower()
+
+            if provider_name == "gemini" and settings.GEMINI_API_KEY:
+                self.provider = ContaGeminiProvider()
+
+            elif provider_name == "openai" and settings.OPENAI_API_KEY:
+                self.provider = ContaOpenAIProvider()
 
     @property
     def ai_disponible(self) -> bool:
         return self.provider is not None
+
+    @property
+    def provider_name(self) -> str | None:
+        if self.provider is None:
+            return None
+        return settings.AI_PROVIDER.strip().lower()
 
     def responder(
         self,
