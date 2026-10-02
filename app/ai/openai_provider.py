@@ -22,6 +22,7 @@ class ContaOpenAIProvider:
         mes: int | None,
         historial: list[dict[str, str]],
         tools: ContaTools,
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         instrucciones = build_system_prompt(
             ruc=ruc,
@@ -30,6 +31,8 @@ class ContaOpenAIProvider:
             mes=mes,
         )
 
+        definitions = tool_definitions or TOOL_DEFINITIONS
+
         response = self.client.responses.create(
             model=self.model,
             instructions=instrucciones,
@@ -37,7 +40,7 @@ class ContaOpenAIProvider:
                 *historial,
                 {"role": "user", "content": pregunta},
             ],
-            tools=TOOL_DEFINITIONS,
+            tools=definitions,
         )
 
         tool_calls = 0
@@ -83,7 +86,7 @@ class ContaOpenAIProvider:
                 instructions=instrucciones,
                 previous_response_id=response.id,
                 input=outputs,
-                tools=TOOL_DEFINITIONS,
+                tools=definitions,
             )
 
         respuesta = response.output_text.strip()
