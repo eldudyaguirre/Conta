@@ -31,7 +31,7 @@ def ai_status():
     return {
         "app": "Conta",
         "ai_enabled": assistant.ai_disponible,
-        "provider": "openai" if assistant.ai_disponible else None,
+        "provider": assistant.provider_name,
     }
 
 
