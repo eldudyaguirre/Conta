@@ -678,3 +678,139 @@ class TributarioService:
                     "mes": mes,
                 },
             }
+
+
+    @staticmethod
+    def listar_notas_credito(
+        ruc: str,
+        anio: int,
+        mes: int | None = None,
+    ):
+        condiciones = [
+            'TRIM("año") = :anio'
+        ]
+        parametros = {"anio": str(anio)}
+
+        if mes is not None:
+            condiciones.append("TRIM(mes) = :mes")
+            parametros["mes"] = f"{mes:02d}"
+
+        where = " AND ".join(condiciones)
+
+        sql = text(f"""
+            SELECT
+                numnc,
+                autorizacion,
+                fenc,
+                ruccedcli,
+                nomcli,
+                tipid,
+                codcomp,
+                numemi,
+                basenoobj,
+                baseiva0,
+                baseiva12,
+                iva,
+                ice,
+                numfac,
+                autfac,
+                fecfac,
+                mes,
+                "año",
+                numasiento
+            FROM ncventas
+            WHERE {where}
+            ORDER BY
+                TO_DATE(NULLIF(TRIM(fenc), ''), 'DD/MM/YYYY'),
+                numnc
+        """)
+
+        with cliente_session(ruc) as db:
+            resultado = db.execute(sql, parametros)
+            notas = []
+
+            for row in resultado.mappings():
+                notas.append({
+                    "numero": row["numnc"],
+                    "fecha": TributarioService.fecha(row["fenc"]),
+                    "cliente": {
+                        "ruc": row["ruccedcli"],
+                        "nombre": row["nomcli"],
+                        "tipo_identificacion": row["tipid"],
+                    },
+                    "comprobante": {
+                        "codigo": row["codcomp"],
+                        "numero": row["numemi"],
+                        "autorizacion": row["autorizacion"],
+                    },
+                    "bases": {
+                        "no_objeto": TributarioService.decimal(row["basenoobj"]),
+                        "iva_0": TributarioService.decimal(row["baseiva0"]),
+                        "iva_12": TributarioService.decimal(row["baseiva12"]),
+                    },
+                    "impuestos": {
+                        "iva": TributarioService.decimal(row["iva"]),
+                        "ice": TributarioService.decimal(row["ice"]),
+                    },
+                    "factura_modificada": {
+                        "numero": row["numfac"],
+                        "autorizacion": row["autfac"],
+                        "fecha": TributarioService.fecha(row["fecfac"]),
+                    },
+                    "periodo": {
+                        "mes": row["mes"],
+                        "anio": row["año"],
+                    },
+                    "asiento": row["numasiento"],
+                })
+
+            return notas
+
+    @staticmethod
+    def resumen_notas_credito(
+        ruc: str,
+        anio: int,
+        mes: int | None = None,
+    ):
+        condiciones = [
+            'TRIM("año") = :anio'
+        ]
+        parametros = {"anio": str(anio)}
+
+        if mes is not None:
+            condiciones.append("TRIM(mes) = :mes")
+            parametros["mes"] = f"{mes:02d}"
+
+        where = " AND ".join(condiciones)
+
+        sql = text(f"""
+            SELECT
+                COUNT(*) AS total_comprobantes,
+                COALESCE(SUM(CAST(NULLIF(TRIM(basenoobj), '') AS NUMERIC)), 0) AS base_no_objeto,
+                COALESCE(SUM(CAST(NULLIF(TRIM(baseiva0), '') AS NUMERIC)), 0) AS base_iva_0,
+                COALESCE(SUM(CAST(NULLIF(TRIM(baseiva12), '') AS NUMERIC)), 0) AS base_iva_12,
+                COALESCE(SUM(CAST(NULLIF(TRIM(iva), '') AS NUMERIC)), 0) AS iva,
+                COALESCE(SUM(CAST(NULLIF(TRIM(ice), '') AS NUMERIC)), 0) AS ice
+            FROM ncventas
+            WHERE {where}
+        """)
+
+        with cliente_session(ruc) as db:
+            row = db.execute(sql, parametros).mappings().first()
+
+            return {
+                "total_comprobantes": row["total_comprobantes"],
+                "bases": {
+                    "no_objeto": TributarioService.decimal(row["base_no_objeto"]),
+                    "iva_0": TributarioService.decimal(row["base_iva_0"]),
+                    "iva_12": TributarioService.decimal(row["base_iva_12"]),
+                },
+                "impuestos": {
+                    "iva": TributarioService.decimal(row["iva"]),
+                    "ice": TributarioService.decimal(row["ice"]),
+                },
+                "periodo": {
+                    "anio": anio,
+                    "mes": mes,
+                },
+            }
