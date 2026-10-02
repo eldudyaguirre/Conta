@@ -536,3 +536,167 @@ class TributarioService:
                     "mes": mes,
                 },
             }        
+
+    @staticmethod
+    def listar_ventas(
+        ruc: str,
+        anio: int,
+        mes: int | None = None,
+    ):
+        condiciones = [
+            """
+            CASE
+                WHEN TRIM(fecfactur) ~ '^\\d{2}/\\d{2}/\\d{4}$'
+                    THEN EXTRACT(YEAR FROM TO_DATE(TRIM(fecfactur), 'DD/MM/YYYY'))::integer
+                WHEN TRIM(fecfactur) ~ '^\\d{4}-\\d{2}-\\d{2}'
+                    THEN EXTRACT(YEAR FROM TO_DATE(LEFT(TRIM(fecfactur), 10), 'YYYY-MM-DD'))::integer
+                ELSE NULL
+            END = :anio
+            """
+        ]
+        parametros = {"anio": anio}
+
+        if mes is not None:
+            condiciones.append("TRIM(mes) = :mes")
+            parametros["mes"] = f"{mes:02d}"
+
+        where = " AND ".join(condiciones)
+
+        sql = text(f"""
+            SELECT
+                numfactur,
+                autorizacion,
+                fecfactur,
+                ruccedcli,
+                nomcli,
+                tipid,
+                codcomp,
+                numemi,
+                basenoobj,
+                baseiva0,
+                baseiva12,
+                iva,
+                ice,
+                numret,
+                autret,
+                fecret,
+                retiva,
+                retrenta,
+                mes
+            FROM ventas
+            WHERE {where}
+            ORDER BY
+                CASE
+                    WHEN TRIM(fecfactur) ~ '^\\d{2}/\\d{2}/\\d{4}$'
+                        THEN TO_DATE(TRIM(fecfactur), 'DD/MM/YYYY')
+                    WHEN TRIM(fecfactur) ~ '^\\d{4}-\\d{2}-\\d{2}'
+                        THEN TO_DATE(LEFT(TRIM(fecfactur), 10), 'YYYY-MM-DD')
+                    ELSE NULL
+                END,
+                numfactur
+        """)
+
+        with cliente_session(ruc) as db:
+            resultado = db.execute(sql, parametros)
+            ventas = []
+
+            for row in resultado.mappings():
+                ventas.append({
+                    "numero": row["numfactur"],
+                    "fecha": TributarioService.fecha(row["fecfactur"]),
+                    "cliente": {
+                        "ruc": row["ruccedcli"],
+                        "nombre": row["nomcli"],
+                        "tipo_identificacion": row["tipid"],
+                    },
+                    "comprobante": {
+                        "codigo": row["codcomp"],
+                        "numero": row["numemi"],
+                        "autorizacion": row["autorizacion"],
+                    },
+                    "bases": {
+                        "no_objeto": TributarioService.decimal(row["basenoobj"]),
+                        "iva_0": TributarioService.decimal(row["baseiva0"]),
+                        "iva_12": TributarioService.decimal(row["baseiva12"]),
+                    },
+                    "impuestos": {
+                        "iva": TributarioService.decimal(row["iva"]),
+                        "ice": TributarioService.decimal(row["ice"]),
+                    },
+                    "retencion": {
+                        "numero": row["numret"],
+                        "autorizacion": row["autret"],
+                        "fecha": TributarioService.fecha(row["fecret"]),
+                        "iva": TributarioService.decimal(row["retiva"]),
+                        "renta": TributarioService.decimal(row["retrenta"]),
+                    },
+                    "periodo": {
+                        "mes": row["mes"],
+                        "anio": anio,
+                    },
+                })
+
+            return ventas
+
+    @staticmethod
+    def resumen_ventas(
+        ruc: str,
+        anio: int,
+        mes: int | None = None,
+    ):
+        condiciones = [
+            """
+            CASE
+                WHEN TRIM(fecfactur) ~ '^\\d{2}/\\d{2}/\\d{4}$'
+                    THEN EXTRACT(YEAR FROM TO_DATE(TRIM(fecfactur), 'DD/MM/YYYY'))::integer
+                WHEN TRIM(fecfactur) ~ '^\\d{4}-\\d{2}-\\d{2}'
+                    THEN EXTRACT(YEAR FROM TO_DATE(LEFT(TRIM(fecfactur), 10), 'YYYY-MM-DD'))::integer
+                ELSE NULL
+            END = :anio
+            """
+        ]
+        parametros = {"anio": anio}
+
+        if mes is not None:
+            condiciones.append("TRIM(mes) = :mes")
+            parametros["mes"] = f"{mes:02d}"
+
+        where = " AND ".join(condiciones)
+
+        sql = text(f"""
+            SELECT
+                COUNT(*) AS total_comprobantes,
+                COALESCE(SUM(CAST(NULLIF(TRIM(basenoobj), '') AS NUMERIC)), 0) AS base_no_objeto,
+                COALESCE(SUM(CAST(NULLIF(TRIM(baseiva0), '') AS NUMERIC)), 0) AS base_iva_0,
+                COALESCE(SUM(CAST(NULLIF(TRIM(baseiva12), '') AS NUMERIC)), 0) AS base_iva_12,
+                COALESCE(SUM(CAST(NULLIF(TRIM(iva), '') AS NUMERIC)), 0) AS iva,
+                COALESCE(SUM(CAST(NULLIF(TRIM(ice), '') AS NUMERIC)), 0) AS ice,
+                COALESCE(SUM(CAST(NULLIF(TRIM(retiva), '') AS NUMERIC)), 0) AS retencion_iva,
+                COALESCE(SUM(CAST(NULLIF(TRIM(retrenta), '') AS NUMERIC)), 0) AS retencion_renta
+            FROM ventas
+            WHERE {where}
+        """)
+
+        with cliente_session(ruc) as db:
+            row = db.execute(sql, parametros).mappings().first()
+
+            return {
+                "total_comprobantes": row["total_comprobantes"],
+                "bases": {
+                    "no_objeto": TributarioService.decimal(row["base_no_objeto"]),
+                    "iva_0": TributarioService.decimal(row["base_iva_0"]),
+                    "iva_12": TributarioService.decimal(row["base_iva_12"]),
+                },
+                "impuestos": {
+                    "iva": TributarioService.decimal(row["iva"]),
+                    "ice": TributarioService.decimal(row["ice"]),
+                },
+                "retenciones": {
+                    "iva": TributarioService.decimal(row["retencion_iva"]),
+                    "renta": TributarioService.decimal(row["retencion_renta"]),
+                },
+                "periodo": {
+                    "anio": anio,
+                    "mes": mes,
+                },
+            }
