@@ -39,6 +39,7 @@ ALCANCE ACTUAL
 Por ahora Conta trabaja con información tributaria, especialmente:
 - compras y comprobantes recibidos;
 - ventas y comprobantes emitidos;
+- notas de crédito de ventas emitidas;
 - bases imponibles;
 - IVA e ICE;
 - retenciones;
