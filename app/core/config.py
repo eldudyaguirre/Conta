@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     AI_MAX_HISTORY_MESSAGES: int = 20
 
     SRI_HEADLESS: bool = True
+    SRI_BROWSER_CHANNEL: str = "chromium"
+    SRI_USER_DATA_DIR: str = ""
+    SRI_NAVIGATION_TIMEOUT_MS: int = 45000
 
     # Token interno compartido con el administrador web de TotalCounts.
     # No se expone al navegador.
