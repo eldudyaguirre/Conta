@@ -15,14 +15,34 @@ router = APIRouter(
     tags=["Administración SRI"],
 )
 
+TEST_URLS = [
+    ("google", "https://www.google.com/"),
+    ("sri_home", "https://srienlinea.sri.gob.ec/"),
+    ("sri_perfil", "https://srienlinea.sri.gob.ec/sri-en-linea/contribuyente/perfil"),
+]
+
 
 @router.post("/diagnostico")
 async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
     """
-    Diagnóstico del acceso SRI desde el mismo proceso de Conta/NSSM.
+    Diagnóstico de conectividad Chromium desde el mismo proceso de Conta/NSSM.
     No realiza login ni consulta comprobantes.
     """
     p = browser = None
+
+    proxy_vars = {
+        key: os.environ.get(key, "")
+        for key in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        )
+    }
 
     info = {
         "usuario_admin": usuario["usrname"],
@@ -36,13 +56,15 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
         "python": sys.executable,
         "python_version": platform.python_version(),
         "sri_headless": settings.SRI_HEADLESS,
-        "login_url": SriClienteSyncDiagnostic.LOGIN_URL,
-        "playwright_browser": "chromium",
+        "proxy_environment": proxy_vars,
+        "tests": [],
     }
 
     try:
         p = await async_playwright().start()
-        browser = await p.chromium.launch(headless=settings.SRI_HEADLESS)
+        browser = await p.chromium.launch(
+            headless=settings.SRI_HEADLESS,
+        )
         info["browser_launched"] = True
 
         page = await browser.new_page()
@@ -50,38 +72,47 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
 
-        try:
-            response = await page.goto(
-                SriClienteSyncDiagnostic.LOGIN_URL,
-                wait_until="commit",
-                timeout=60000,
-            )
-            info["goto_ok"] = True
-            info["http_status"] = response.status if response else None
-            info["url"] = page.url
-            info["title"] = await page.title()
-        except Exception as exc:
-            info["goto_ok"] = False
-            info["url"] = page.url
-            info["goto_error"] = str(exc)
-            info["goto_error_type"] = type(exc).__name__
+        for name, url in TEST_URLS:
+            test = {
+                "name": name,
+                "url_requested": url,
+            }
 
             try:
-                info["page_title_after_error"] = await page.title()
-            except Exception:
-                pass
+                response = await page.goto(
+                    url,
+                    wait_until="commit",
+                    timeout=20000,
+                )
+                test["ok"] = True
+                test["http_status"] = response.status if response else None
+                test["url"] = page.url
 
-            try:
-                info["content_length_after_error"] = len(await page.content())
-            except Exception:
-                pass
+                try:
+                    test["title"] = await page.title()
+                except Exception:
+                    pass
 
-            raise HTTPException(status_code=502, detail=info)
+            except Exception as exc:
+                test["ok"] = False
+                test["url"] = page.url
+                test["error_type"] = type(exc).__name__
+                test["error"] = str(exc)
+
+                try:
+                    test["title_after_error"] = await page.title()
+                except Exception:
+                    pass
+
+            info["tests"].append(test)
+
+        info["summary"] = {
+            test["name"]: test["ok"]
+            for test in info["tests"]
+        }
 
         return info
 
-    except HTTPException:
-        raise
     except Exception as exc:
         info["diagnostic_error"] = str(exc)
         info["diagnostic_error_type"] = type(exc).__name__
@@ -91,7 +122,3 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
             await browser.close()
         if p is not None:
             await p.stop()
-
-
-class SriClienteSyncDiagnostic:
-    LOGIN_URL = "https://srienlinea.sri.gob.ec/sri-en-linea/contribuyente/perfil"
