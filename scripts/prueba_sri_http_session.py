@@ -338,6 +338,16 @@ async def main() -> None:
         ]
 
         print(f"   POST SRI detectados: {len(post_sri)}")
+        for idx, response in enumerate(post_sri, start=1):
+            try:
+                cuerpo_diag = await response.text()
+                print(
+                    f"      POST {idx}: bytes={len(cuerpo_diag.encode('utf-8', errors='ignore'))}, "
+                    f"panel={'sí' if 'id="frmPrincipal:panelListaComprobantes"' in cuerpo_diag else 'no'}, "
+                    f"captcha={'sí' if 'captcha' in cuerpo_diag.lower() else 'no'}"
+                )
+            except Exception as exc:
+                print(f"      POST {idx}: no se pudo leer respuesta ({type(exc).__name__})")
 
         if not post_sri:
             boton = page.locator("#frmPrincipal\\:btnBuscar")
@@ -351,19 +361,22 @@ async def main() -> None:
                 "SRI no produjo la petición AJAX de consulta después de executeRecaptcha."
             )
 
-        # Tomamos el último POST 200, que normalmente es el resultado de la
-        # consulta. No mostramos tokens, cookies ni ViewState.
-        respuesta_real = post_sri[-1]
+        # Preferimos la respuesta que realmente contiene el update del panel.
+        # Si SRI devuelve una advertencia/error, no la confundimos con una tabla.
+        respuesta_real = next(
+            (
+                response for response in reversed(post_sri)
+                if 'id="frmPrincipal:panelListaComprobantes"' in (await response.text())
+            ),
+            post_sri[-1],
+        )
         cuerpo_real = await respuesta_real.text()
 
         print(f"   POST consulta REAL HTTP: {respuesta_real.status}")
         print(f"   Content-Type: {respuesta_real.headers.get('content-type', '')}")
         print(f"   Resumen respuesta real: {_resumen_respuesta(cuerpo_real)}")
 
-        tiene_tabla = (
-            "tablaCompRecibidos" in cuerpo_real
-            or "Lista de comprobantes recibidos" in cuerpo_real
-        )
+        tiene_tabla = 'id="frmPrincipal:panelListaComprobantes"' in cuerpo_real
         print(f"   Tabla devuelta por SRI: {'sí' if tiene_tabla else 'no'}")
 
         if tiene_tabla:
@@ -380,9 +393,8 @@ async def main() -> None:
                 print("   No se pudo convertir la tabla en registros.")
             print("   RESULTADO: la consulta real del navegador funciona y la tabla fue extraída.")
         else:
-            print("   RESULTADO: el navegador produjo la respuesta AJAX,")
-            print("   pero no se detectó la tabla de comprobantes.")
-            print("   Respuesta resumida:", re.sub(r"\\s+", " ", cuerpo_real[:1200]).strip())
+            print("   RESULTADO: SRI no devolvió el panel de comprobantes en esta consulta.")
+            print("   Respuesta resumida:", re.sub(r"\\s+", " ", cuerpo_real[:2500]).strip())
 
         cookies = await page.context.cookies()
 
