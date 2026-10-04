@@ -98,6 +98,55 @@ async def main() -> None:
 
         page_html = await page.content()
         view_state = _view_state(page_html)
+
+        # Ejecutar primero la consulta REAL dentro del navegador.
+        # Playwright deja que el JavaScript de SRI genere y envíe
+        # reCAPTCHA Enterprise de forma legítima; no se reutiliza ni
+        # se fabrica ningún token.
+        print("2. Ejecutando consulta real dentro de Playwright...")
+        await page.locator("#frmPrincipal\\:ano").select_option(str(args.anio))
+        await page.locator("#frmPrincipal\\:mes").select_option(f"{args.mes:02d}")
+        await page.locator("#frmPrincipal\\:dia").select_option("0")
+        await page.locator("#frmPrincipal\\:cmbTipoComprobante").select_option(str(args.tipo))
+
+        await page.locator("#frmPrincipal\\:btnBuscar").click()
+        await page.wait_for_timeout(1000)
+
+        try:
+            async with page.expect_response(
+                lambda r: (
+                    "comprobantesRecibidos.jsf" in r.url
+                    and r.request.method == "POST"
+                    and r.status == 200
+                ),
+                timeout=30000,
+            ) as response_info:
+                await page.locator("#frmPrincipal\\:j_idt36").click()
+            respuesta_real = await response_info.value
+        except Exception as exc:
+            print(f"   No se capturó la respuesta AJAX esperada: {type(exc).__name__}")
+            print("   URL actual:", page.url)
+            raise
+
+        cuerpo_real = await respuesta_real.text()
+        print(f"   POST consulta REAL HTTP: {respuesta_real.status}")
+        print(f"   Content-Type: {respuesta_real.headers.get('content-type', '')}")
+        print(f"   Resumen respuesta real: {_resumen_respuesta(cuerpo_real)}")
+
+        tiene_tabla = (
+            "tablaCompRecibidos" in cuerpo_real
+            or "Lista de comprobantes recibidos" in cuerpo_real
+        )
+        print(f"   Tabla devuelta por SRI: {'sí' if tiene_tabla else 'no'}")
+
+        if tiene_tabla:
+            filas = len(re.findall(r"<tr\\b", cuerpo_real, re.IGNORECASE))
+            print(f"   Filas <tr> detectadas en respuesta: {filas}")
+            print("   RESULTADO: la consulta real del navegador funciona.")
+        else:
+            print("   RESULTADO: el navegador llegó al POST, pero SRI no devolvió la tabla.")
+            print("   Respuesta resumida:", re.sub(r"\\s+", " ", cuerpo_real[:1200]).strip())
+
         cookies = await page.context.cookies()
 
         cookie_jar = {
@@ -110,7 +159,7 @@ async def main() -> None:
         print(f"   Cookies SRI transferibles: {len(cookie_jar)}")
         print(f"   ViewState obtenido: {'sí' if view_state else 'no'}")
 
-        print("2. Reutilizando cookies con HTTPX...")
+        print("3. Reutilizando cookies con HTTPX para comparar la sesión...")
         async with httpx.AsyncClient(
             cookies=cookie_jar,
             follow_redirects=True,
@@ -185,7 +234,7 @@ async def main() -> None:
             else:
                 http_view_state = _view_state(response.text)
 
-            print("3. Enviando POST JSF de preparación sin reCAPTCHA...")
+            print("4. Enviando POST JSF de preparación sin reCAPTCHA...")
             data = {
                 "javax.faces.partial.ajax": "true",
                 "javax.faces.source": "frmPrincipal:btnBuscar",
@@ -237,7 +286,7 @@ async def main() -> None:
                 print("   ViewState actualizado desde respuesta AJAX: no")
                 return
 
-            print("4. Enviando segundo POST JSF (consulta real) sin reCAPTCHA...")
+            print("5. Enviando segundo POST JSF (consulta real) sin reCAPTCHA...")
             data = {
                 "javax.faces.partial.ajax": "true",
                 "javax.faces.source": "frmPrincipal:j_idt36",
