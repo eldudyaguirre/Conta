@@ -318,7 +318,73 @@ async def main() -> None:
         # Dejamos un margen para que sri-reCAPTCHAEnterprise.js cree el cliente.
         await page.wait_for_timeout(5000)
 
+        # Diagnóstico del flujo IMPLEMENTADO POR SRI.
+        # No ejecutamos manualmente grecaptcha ni modificamos el token.
+        # Solo inspeccionamos la función pública de SRI y observamos cuándo
+        # aparece/cambia el campo g-recaptcha-response.
+        try:
+            sri_recaptcha_info = await page.evaluate(
+                """() => {
+                    const fn = typeof executeRecaptcha === 'function'
+                        ? executeRecaptcha.toString()
+                        : '';
+                    const scripts = Array.from(document.scripts)
+                        .map(s => s.src)
+                        .filter(Boolean)
+                        .filter(u => /recaptcha|sri/i.test(u));
+                    return {
+                        executeRecaptcha_length: fn.length,
+                        executeRecaptcha_source: fn.slice(0, 4000),
+                        scripts
+                    };
+                }"""
+            )
+            print("   Implementación SRI executeRecaptcha():")
+            print("      " + str(sri_recaptcha_info.get("executeRecaptcha_source", "")).replace("\\n", " ")[:4000])
+            print("   Scripts SRI/reCAPTCHA relevantes:")
+            for script_url in sri_recaptcha_info.get("scripts", []):
+                print(f"      {script_url}")
+        except Exception as exc:
+            print(f"   No se pudo inspeccionar executeRecaptcha(): {type(exc).__name__}")
+
+        # Tomamos una pequeña línea de tiempo del campo reCAPTCHA. Solo se
+        # registra longitud y presencia; jamás se imprime el valor.
+        captcha_timeline = []
+        async def sample_captcha(label: str) -> None:
+            try:
+                state = await page.locator(
+                    'textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]'
+                ).evaluate_all(
+                    """els => els.map(e => ({
+                        valueLength: (e.value || '').length,
+                        visible: !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length)
+                    }))"""
+                )
+                captcha_timeline.append((label, state))
+            except Exception:
+                captcha_timeline.append((label, []))
+
+        await sample_captcha("antes_click")
         await boton.click()
+        await sample_captcha("inmediatamente_despues_click")
+
+        # Esperamos por cambios del campo durante el flujo legítimo de SRI.
+        # No escribimos nada en el campo.
+        for i in range(20):
+            await page.wait_for_timeout(500)
+            await sample_captcha(f"{(i + 1) * 500}ms")
+            if any(item.get("valueLength", 0) > 0 for _, state in captcha_timeline for item in state):
+                # Seguimos observando unos ciclos para determinar si el token
+                # aparece antes o después del POST AJAX.
+                if i >= 5:
+                    break
+
+        print("   Línea de tiempo g-recaptcha-response:")
+        for label, state in captcha_timeline:
+            print(f"      {label}: {state}")
+
+        # Esperamos a que termine el flujo de reCAPTCHA + PrimeFaces.
+        await page.wait_for_timeout(30000)
 
         # Esperamos a que termine el flujo de reCAPTCHA + PrimeFaces.
         await page.wait_for_timeout(30000)
