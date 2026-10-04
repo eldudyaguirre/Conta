@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import uuid
 import xml.etree.ElementTree as ET
@@ -18,62 +19,174 @@ from app.database.connection import engine
 
 
 class SriClienteSyncService:
-    _jobs: dict[str, dict[str, Any]] = {}
-    _active_keys: dict[str, str] = {}
+    JOB_TABLE = "conta_sri_jobs"
+
+    @classmethod
+    def _ensure_jobs_table(cls) -> None:
+        with engine.begin() as db:
+            db.execute(text(f"""
+                CREATE TABLE IF NOT EXISTS {cls.JOB_TABLE} (
+                    job_id VARCHAR(64) PRIMARY KEY,
+                    estado VARCHAR(20) NOT NULL,
+                    ruc VARCHAR(13) NOT NULL,
+                    cliente TEXT NOT NULL DEFAULT '',
+                    anio INTEGER NOT NULL,
+                    mes INTEGER NOT NULL,
+                    tipo_comprobante VARCHAR(2) NOT NULL,
+                    sri INTEGER NOT NULL DEFAULT 0,
+                    ya_existentes INTEGER NOT NULL DEFAULT 0,
+                    descargadas INTEGER NOT NULL DEFAULT 0,
+                    guardadas INTEGER NOT NULL DEFAULT 0,
+                    errores JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    paginas INTEGER NOT NULL DEFAULT 0,
+                    mensaje TEXT NOT NULL DEFAULT '',
+                    detalle TEXT,
+                    creado TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    actualizado TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            db.execute(text(
+                f"CREATE INDEX IF NOT EXISTS idx_{cls.JOB_TABLE}_estado "
+                f"ON {cls.JOB_TABLE}(estado, creado)"
+            ))
 
     @classmethod
     def _job_update(cls, job_id: str | None, **values) -> None:
-        if job_id and job_id in cls._jobs:
-            cls._jobs[job_id].update(values, actualizado=datetime.now().isoformat())
+        if not job_id:
+            return
+        cls._ensure_jobs_table()
+        allowed = {
+            "estado", "ruc", "cliente", "anio", "mes", "tipo_comprobante",
+            "sri", "ya_existentes", "descargadas", "guardadas", "errores",
+            "paginas", "mensaje", "detalle"
+        }
+        sets = []
+        params = {"job_id": job_id}
+        for key, value in values.items():
+            if key not in allowed:
+                continue
+            if key == "errores":
+                value = json.dumps(value, ensure_ascii=False)
+            sets.append(f"{key} = :{key}")
+            params[key] = value
+        if not sets:
+            return
+        sets.append("actualizado = CURRENT_TIMESTAMP")
+        with engine.begin() as db:
+            db.execute(text(
+                f"UPDATE {cls.JOB_TABLE} SET {', '.join(sets)} WHERE job_id = :job_id"
+            ), params)
 
     @classmethod
     def iniciar_sincronizacion(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1) -> dict[str, Any]:
-        # Validamos credenciales antes de crear el trabajo para devolver errores
-        # de configuración inmediatamente, sin mantener abierta la petición web.
+        # El trabajo se guarda en PostgreSQL para que la API y el worker
+        # interactivo compartan la misma cola, incluso en procesos separados.
         cred = cls._credenciales(ruc)
-        key = f"{ruc}:{anio}:{mes}:{tipo_comprobante}"
-        existente = cls._active_keys.get(key)
-        if existente:
-            estado = cls._jobs.get(existente)
-            if estado and estado.get("estado") in {"pendiente", "ejecutando", "captcha"}:
-                return {"job_id": existente, "estado": estado["estado"], "duplicado": True}
+        cls._ensure_jobs_table()
+        with engine.begin() as db:
+            existente = db.execute(text(f"""
+                SELECT job_id, estado
+                FROM {cls.JOB_TABLE}
+                WHERE ruc = :ruc AND anio = :anio AND mes = :mes
+                  AND tipo_comprobante = :tipo
+                  AND estado IN ('pendiente', 'ejecutando', 'captcha')
+                ORDER BY creado DESC
+                LIMIT 1
+            """), {
+                "ruc": ruc, "anio": anio, "mes": mes,
+                "tipo": cls._tipo(tipo_comprobante),
+            }).mappings().first()
+            if existente:
+                return {
+                    "job_id": existente["job_id"],
+                    "estado": existente["estado"],
+                    "duplicado": True,
+                }
 
-        job_id = uuid.uuid4().hex
-        cls._jobs[job_id] = {
-            "job_id": job_id,
-            "estado": "pendiente",
-            "ruc": ruc,
-            "cliente": cred["nombre"],
-            "anio": anio,
-            "mes": mes,
-            "tipo_comprobante": cls._tipo(tipo_comprobante),
-            "sri": 0,
-            "ya_existentes": 0,
-            "descargadas": 0,
-            "guardadas": 0,
-            "errores": [],
-            "paginas": 0,
-            "mensaje": "Sincronización en cola.",
-            "actualizado": datetime.now().isoformat(),
-        }
-        cls._active_keys[key] = job_id
-        asyncio.create_task(cls._ejecutar_job(job_id, ruc, anio, mes, tipo_comprobante, key))
+            job_id = uuid.uuid4().hex
+            db.execute(text(f"""
+                INSERT INTO {cls.JOB_TABLE}
+                (job_id, estado, ruc, cliente, anio, mes, tipo_comprobante, mensaje)
+                VALUES
+                (:job_id, 'pendiente', :ruc, :cliente, :anio, :mes, :tipo, :mensaje)
+            """), {
+                "job_id": job_id,
+                "ruc": ruc,
+                "cliente": cred["nombre"],
+                "anio": anio,
+                "mes": mes,
+                "tipo": cls._tipo(tipo_comprobante),
+                "mensaje": "Sincronización en cola. Esperando al worker SRI interactivo.",
+            })
         return {"job_id": job_id, "estado": "pendiente", "duplicado": False}
 
     @classmethod
-    async def _ejecutar_job(cls, job_id: str, ruc: str, anio: int, mes: int, tipo_comprobante: int, key: str) -> None:
-        cls._job_update(job_id, estado="ejecutando", mensaje="Iniciando navegador y conexión con el SRI.")
+    async def _ejecutar_job(cls, job_id: str, ruc: str, anio: int, mes: int, tipo_comprobante: int) -> None:
+        cls._job_update(
+            job_id,
+            estado="ejecutando",
+            mensaje="Worker SRI activo. Iniciando navegador y conexión con el SRI.",
+        )
         try:
-            resultado = await cls.sincronizar_mes(ruc, anio, mes, tipo_comprobante, job_id=job_id)
-            cls._jobs[job_id].update(resultado, estado="finalizado", mensaje="Sincronización finalizada.", actualizado=datetime.now().isoformat())
+            resultado = await cls.sincronizar_mes(
+                ruc, anio, mes, tipo_comprobante, job_id=job_id
+            )
+            cls._job_update(
+                job_id,
+                **resultado,
+                estado="finalizado",
+                mensaje="Sincronización finalizada.",
+            )
         except Exception as exc:
-            cls._job_update(job_id, estado="error", mensaje=str(exc), detalle=str(exc))
-        finally:
-            cls._active_keys.pop(key, None)
+            cls._job_update(
+                job_id,
+                estado="error",
+                mensaje=str(exc),
+                detalle=str(exc),
+            )
 
     @classmethod
     def estado_sincronizacion(cls, job_id: str) -> dict[str, Any] | None:
-        return cls._jobs.get(job_id)
+        cls._ensure_jobs_table()
+        with engine.connect() as db:
+            row = db.execute(text(f"""
+                SELECT job_id, estado, ruc, cliente, anio, mes, tipo_comprobante,
+                       sri, ya_existentes, descargadas, guardadas, errores,
+                       paginas, mensaje, detalle, creado, actualizado
+                FROM {cls.JOB_TABLE}
+                WHERE job_id = :job_id
+            """), {"job_id": job_id}).mappings().first()
+        if not row:
+            return None
+        result = dict(row)
+        for key in ("creado", "actualizado"):
+            if result.get(key):
+                result[key] = result[key].isoformat()
+        return result
+
+    @classmethod
+    def obtener_trabajo_pendiente(cls) -> dict[str, Any] | None:
+        """Reclama atómicamente un trabajo para el worker SRI interactivo."""
+        cls._ensure_jobs_table()
+        with engine.begin() as db:
+            row = db.execute(text(f"""
+                SELECT job_id, ruc, anio, mes, tipo_comprobante
+                FROM {cls.JOB_TABLE}
+                WHERE estado = 'pendiente'
+                ORDER BY creado
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            """)).mappings().first()
+            if not row:
+                return None
+            db.execute(text(f"""
+                UPDATE {cls.JOB_TABLE}
+                SET estado = 'ejecutando',
+                    mensaje = 'Trabajo reclamado por el worker SRI interactivo.',
+                    actualizado = CURRENT_TIMESTAMP
+                WHERE job_id = :job_id
+            """), {"job_id": row["job_id"]})
+        return dict(row)
 
     """Sincroniza automáticamente comprobantes recibidos del SRI hacia comprasnue.
 
