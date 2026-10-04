@@ -151,7 +151,13 @@ class SriClienteSyncService:
             except Exception:
                 pass
             await page.fill("#password", clave)
-            await page.click("#kc-login")
+            login_button = page.locator("#kc-login").first
+            await login_button.wait_for(state="visible", timeout=30000)
+            try:
+                await login_button.scroll_into_view_if_needed(timeout=5000)
+            except Exception:
+                pass
+            await login_button.click(force=True)
             await page.wait_for_timeout(1500)
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=5000)
