@@ -26,6 +26,10 @@ class Settings(BaseSettings):
 
     SRI_HEADLESS: bool = True
 
+    # Token interno compartido con el administrador web de TotalCounts.
+    # No se expone al navegador.
+    TOTALCOUNTS_INTERNAL_TOKEN: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",
