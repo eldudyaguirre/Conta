@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from sqlalchemy import text
 
 from app.core.config import settings
@@ -16,7 +16,13 @@ from app.database.connection import engine
 
 
 class SriClienteSyncService:
-    """Sincroniza comprobantes recibidos del SRI hacia comprasnue."""
+    """Sincroniza automáticamente comprobantes recibidos del SRI hacia comprasnue.
+
+    El portal del SRI usa reCAPTCHA para la consulta mensual. Conta no intenta
+    saltarse ni reutilizar el CAPTCHA. Si el SRI presenta el desafío, Chromium
+    puede quedar visible para que el usuario lo resuelva; una vez superado,
+    todo el procesamiento es automático.
+    """
 
     LOGIN_URL = "https://srienlinea.sri.gob.ec/sri-en-linea/contribuyente/perfil"
     PORTAL_URL = "https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=60&idGrupo=58"
@@ -75,9 +81,11 @@ class SriClienteSyncService:
         except ValueError as exc:
             raise ValueError(f"Fecha de emisión inválida: {fecha_txt}") from exc
 
-        bases = {"no_objeto": Decimal("0"), "0": Decimal("0"), "5": Decimal("0"),
-                 "8": Decimal("0"), "12": Decimal("0"), "14": Decimal("0"),
-                 "15": Decimal("0"), "exenta": Decimal("0")}
+        bases = {
+            "no_objeto": Decimal("0"), "0": Decimal("0"), "5": Decimal("0"),
+            "8": Decimal("0"), "12": Decimal("0"), "14": Decimal("0"),
+            "15": Decimal("0"), "exenta": Decimal("0"),
+        }
         ivas = {k: Decimal("0") for k in ("5", "8", "12", "14", "15")}
         ice = Decimal("0")
 
@@ -127,22 +135,15 @@ class SriClienteSyncService:
 
     @classmethod
     async def _login(cls, ruc: str, clave: str):
-        headless = settings.SRI_HEADLESS
         p = await async_playwright().start()
-        browser = await p.chromium.launch(headless=headless)
+        browser = await p.chromium.launch(headless=settings.SRI_HEADLESS)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         try:
             await page.goto(cls.LOGIN_URL, wait_until="commit", timeout=60000)
-            # El portal puede contener un #username hidden y otro campo visible.
-            # Debemos seleccionar explícitamente el campo visible para evitar
-            # que Playwright se quede esperando el input hidden.
-            usuario = page.locator(
-                'input[name="username"]:visible, #username:visible, #usuario:visible'
-            ).first
+            usuario = page.locator('input[name="username"]:visible, #username:visible, #usuario:visible').first
             password = page.locator("#password:visible").first
-
             await usuario.wait_for(state="visible", timeout=30000)
             await password.wait_for(state="visible", timeout=10000)
             await usuario.fill(ruc)
@@ -150,7 +151,7 @@ class SriClienteSyncService:
                 await page.fill("#ciAdicional", "")
             except Exception:
                 pass
-            await page.fill("#password", clave)
+            await password.fill(clave)
             login_button = page.locator("#kc-login").first
             await login_button.wait_for(state="visible", timeout=30000)
             try:
@@ -165,18 +166,66 @@ class SriClienteSyncService:
                 pass
             if "perfil" in page.url and await page.locator("#password").count():
                 raise ValueError("El SRI no aceptó las credenciales del cliente.")
-            try:
-                popup = page.locator("text=Quiero responder")
-                if await popup.count():
-                    await page.keyboard.press("Escape")
-            except Exception:
-                pass
             await page.goto(cls.PORTAL_URL, wait_until="domcontentloaded", timeout=60000)
             return p, browser, page
         except Exception:
             await browser.close()
             await p.stop()
             raise
+
+    @staticmethod
+    async def _seleccionar(page, selector: str, value: str) -> None:
+        await page.locator(selector).wait_for(state="visible", timeout=15000)
+        await page.select_option(selector, value)
+
+    @classmethod
+    async def _consultar_recibidos(cls, page, anio: int, mes: int, tipo_comprobante: int) -> None:
+        await page.goto(cls.RECIBIDOS_URL, wait_until="domcontentloaded", timeout=30000)
+        await cls._seleccionar(page, "#frmPrincipal\\:ano", str(anio))
+        await cls._seleccionar(page, "#frmPrincipal\\:mes", str(mes))
+        await cls._seleccionar(page, "#frmPrincipal\\:dia", "0")
+        await cls._seleccionar(page, "#frmPrincipal\\:cmbTipoComprobante", str(tipo_comprobante))
+        await page.locator("#frmPrincipal\\:btnConsultarSinRe").click()
+
+        links = page.locator('a[id$=":lnkXml"]')
+        try:
+            await links.first.wait_for(state="visible", timeout=15000)
+            return
+        except PlaywrightTimeoutError:
+            if settings.SRI_HEADLESS:
+                raise RuntimeError(
+                    "SRI presentó reCAPTCHA para la consulta mensual. "
+                    "Configure SRI_HEADLESS=False para resolverlo en Chromium y continuar automáticamente."
+                )
+            print("SRI solicita reCAPTCHA. Resuélvalo en Chromium; Conta continuará automáticamente.")
+            await links.first.wait_for(state="visible", timeout=120000)
+
+    @classmethod
+    async def _siguiente_pagina(cls, page) -> bool:
+        candidatos = [
+            ".rf-pg-btn.rf-pg-btn-next",
+            "input.rf-pg-btn-next",
+            "a.rf-pg-btn-next",
+            ".ui-paginator-next",
+            "a[title*='Siguiente']",
+            "button[title*='Siguiente']",
+        ]
+        for selector in candidatos:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                continue
+            try:
+                disabled = await locator.get_attribute("disabled")
+                classes = (await locator.get_attribute("class") or "").lower()
+                aria = (await locator.get_attribute("aria-disabled") or "").lower()
+                if disabled is not None or "disabled" in classes or aria == "true":
+                    return False
+                await locator.click()
+                await page.wait_for_timeout(1200)
+                return True
+            except Exception:
+                continue
+        return False
 
     @classmethod
     async def sincronizar_mes(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1) -> dict[str, Any]:
@@ -185,42 +234,46 @@ class SriClienteSyncService:
         result = {
             "ruc": ruc, "cliente": cred["nombre"], "anio": anio, "mes": mes,
             "tipo_comprobante": cls._tipo(tipo_comprobante),
-            "sri": 0, "ya_existentes": 0, "descargadas": 0, "guardadas": 0, "errores": [],
+            "sri": 0, "ya_existentes": 0, "descargadas": 0, "guardadas": 0,
+            "errores": [], "paginas": 0,
         }
         try:
             p, browser, page = await cls._login(ruc, cred["clave"])
-            await page.goto(cls.RECIBIDOS_URL, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_selector("#frmPrincipal\\:cmbTipoComprobante", timeout=15000)
-            await page.select_option("#frmPrincipal\\:ano", str(anio))
-            await page.select_option("#frmPrincipal\\:mes", str(mes))
-            await page.select_option("#frmPrincipal\\:dia", "0")
-            await page.select_option("#frmPrincipal\\:cmbTipoComprobante", str(tipo_comprobante))
-            await page.click("#frmPrincipal\\:btnConsultarSinRe")
-            await page.wait_for_timeout(3000)
-
+            await cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
             db = obtener_session_cliente(ruc)
+            procesadas: set[str] = set()
             try:
-                pages = 0
-                while True:
-                    pages += 1
-                    rows = await page.locator("#frmPrincipal\\:tablaCompRecibidos_data tr").count()
-                    for idx in range(rows):
+                for pagina in range(1, 1001):
+                    result["paginas"] = pagina
+                    links = page.locator('a[id$=":lnkXml"]')
+                    total_links = await links.count()
+                    if total_links == 0:
+                        raise RuntimeError("SRI no devolvió comprobantes en la tabla actual.")
+
+                    for idx in range(total_links):
                         try:
-                            selector = f"#frmPrincipal\\:tablaCompRecibidos\\:{idx}\\:lnkXml"
+                            links = page.locator('a[id$=":lnkXml"]')
                             async with page.expect_download(timeout=30000) as info:
-                                await page.locator(selector).click()
+                                await links.nth(idx).click()
                             download = await info.value
                             with tempfile.TemporaryDirectory(prefix="conta_sri_") as tmp:
                                 path = Path(tmp) / download.suggested_filename
                                 await download.save_as(str(path))
                                 factura = cls._parsear_xml(path)
 
+                            clave = factura["clave_acceso"]
                             result["sri"] += 1
+                            if not clave:
+                                raise ValueError("El XML no contiene clave de acceso.")
+                            if clave in procesadas:
+                                result["ya_existentes"] += 1
+                                continue
+                            procesadas.add(clave)
+
                             exists = db.execute(text("""
                                 SELECT 1 FROM comprasnue
-                                WHERE TRIM(numaut) = :clave
-                                LIMIT 1
-                            """), {"clave": factura["clave_acceso"]}).first()
+                                WHERE TRIM(numaut::text) = :clave LIMIT 1
+                            """), {"clave": clave}).first()
                             if exists:
                                 result["ya_existentes"] += 1
                                 continue
@@ -231,16 +284,12 @@ class SriClienteSyncService:
                             result["guardadas"] += 1
                         except Exception as exc:
                             db.rollback()
-                            result["errores"].append({"fila": idx, "detalle": str(exc)})
+                            result["errores"].append({
+                                "pagina": pagina, "fila": idx + 1, "detalle": str(exc)
+                            })
 
-                    next_btn = page.locator(".ui-paginator-next").first
-                    classes = await next_btn.get_attribute("class")
-                    if not classes or "ui-state-disabled" in classes:
+                    if not await cls._siguiente_pagina(page):
                         break
-                    await next_btn.click()
-                    await page.wait_for_timeout(1500)
-                    if pages >= 1000:
-                        raise RuntimeError("Se alcanzó el límite de páginas de seguridad.")
             finally:
                 db.close()
         finally:
@@ -255,6 +304,7 @@ class SriClienteSyncService:
     @classmethod
     def _insertar(cls, db, factura: dict[str, Any], tipo_comprobante: int) -> None:
         b, i = factura["bases"], factura["ivas"]
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext('conta_comprasnue_numcompra'))"))
         values = {
             "codsus": "01", "tipid": "01", "ruccedprovee": factura["ruc"],
             "tipcom": cls._tipo(tipo_comprobante), "fecreg": factura["fecha"],
