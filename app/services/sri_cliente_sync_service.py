@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -16,6 +18,63 @@ from app.database.connection import engine
 
 
 class SriClienteSyncService:
+    _jobs: dict[str, dict[str, Any]] = {}
+    _active_keys: dict[str, str] = {}
+
+    @classmethod
+    def _job_update(cls, job_id: str | None, **values) -> None:
+        if job_id and job_id in cls._jobs:
+            cls._jobs[job_id].update(values, actualizado=datetime.now().isoformat())
+
+    @classmethod
+    def iniciar_sincronizacion(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1) -> dict[str, Any]:
+        # Validamos credenciales antes de crear el trabajo para devolver errores
+        # de configuración inmediatamente, sin mantener abierta la petición web.
+        cred = cls._credenciales(ruc)
+        key = f"{ruc}:{anio}:{mes}:{tipo_comprobante}"
+        existente = cls._active_keys.get(key)
+        if existente:
+            estado = cls._jobs.get(existente)
+            if estado and estado.get("estado") in {"pendiente", "ejecutando", "captcha"}:
+                return {"job_id": existente, "estado": estado["estado"], "duplicado": True}
+
+        job_id = uuid.uuid4().hex
+        cls._jobs[job_id] = {
+            "job_id": job_id,
+            "estado": "pendiente",
+            "ruc": ruc,
+            "cliente": cred["nombre"],
+            "anio": anio,
+            "mes": mes,
+            "tipo_comprobante": cls._tipo(tipo_comprobante),
+            "sri": 0,
+            "ya_existentes": 0,
+            "descargadas": 0,
+            "guardadas": 0,
+            "errores": [],
+            "paginas": 0,
+            "mensaje": "Sincronización en cola.",
+            "actualizado": datetime.now().isoformat(),
+        }
+        cls._active_keys[key] = job_id
+        asyncio.create_task(cls._ejecutar_job(job_id, ruc, anio, mes, tipo_comprobante, key))
+        return {"job_id": job_id, "estado": "pendiente", "duplicado": False}
+
+    @classmethod
+    async def _ejecutar_job(cls, job_id: str, ruc: str, anio: int, mes: int, tipo_comprobante: int, key: str) -> None:
+        cls._job_update(job_id, estado="ejecutando", mensaje="Iniciando navegador y conexión con el SRI.")
+        try:
+            resultado = await cls.sincronizar_mes(ruc, anio, mes, tipo_comprobante, job_id=job_id)
+            cls._jobs[job_id].update(resultado, estado="finalizado", mensaje="Sincronización finalizada.", actualizado=datetime.now().isoformat())
+        except Exception as exc:
+            cls._job_update(job_id, estado="error", mensaje=str(exc), detalle=str(exc))
+        finally:
+            cls._active_keys.pop(key, None)
+
+    @classmethod
+    def estado_sincronizacion(cls, job_id: str) -> dict[str, Any] | None:
+        return cls._jobs.get(job_id)
+
     """Sincroniza automáticamente comprobantes recibidos del SRI hacia comprasnue.
 
     El portal del SRI usa reCAPTCHA para la consulta mensual. Conta no intenta
@@ -399,7 +458,7 @@ class SriClienteSyncService:
         return False
 
     @classmethod
-    async def sincronizar_mes(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1) -> dict[str, Any]:
+    async def sincronizar_mes(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, job_id: str | None = None) -> dict[str, Any]:
         cred = cls._credenciales(ruc)
         p = browser = context = page = None
         result = {
@@ -409,13 +468,17 @@ class SriClienteSyncService:
             "errores": [], "paginas": 0,
         }
         try:
+            cls._job_update(job_id, mensaje="Abriendo sesión del SRI.")
             p, browser, context, page = await cls._login(ruc, cred["clave"])
+            cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI. Si aparece CAPTCHA, resuélvalo en Chromium.")
             await cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
+            cls._job_update(job_id, estado="ejecutando", mensaje="Consulta completada. Procesando comprobantes.")
             db = obtener_session_cliente(ruc)
             procesadas: set[str] = set()
             try:
                 for pagina in range(1, 1001):
                     result["paginas"] = pagina
+                    cls._job_update(job_id, mensaje=f"Procesando página {pagina}.", paginas=pagina)
                     links = page.locator('a[id$=":lnkXml"]')
                     total_links = await links.count()
                     if total_links == 0:
@@ -434,6 +497,7 @@ class SriClienteSyncService:
 
                             clave = factura["clave_acceso"]
                             result["sri"] += 1
+                            cls._job_update(job_id, sri=result["sri"], mensaje=f"Procesando comprobante {result[\"sri\"]}.")
                             if not clave:
                                 raise ValueError("El XML no contiene clave de acceso.")
                             if clave in procesadas:
@@ -453,11 +517,13 @@ class SriClienteSyncService:
                             db.commit()
                             result["descargadas"] += 1
                             result["guardadas"] += 1
+                            cls._job_update(job_id, guardadas=result["guardadas"], descargadas=result["descargadas"], ya_existentes=result["ya_existentes"])
                         except Exception as exc:
                             db.rollback()
                             result["errores"].append({
                                 "pagina": pagina, "fila": idx + 1, "detalle": str(exc)
                             })
+                            cls._job_update(job_id, errores=result["errores"], mensaje=f"Error procesando fila {idx + 1}: {exc}")
 
                     if not await cls._siguiente_pagina(page):
                         break
