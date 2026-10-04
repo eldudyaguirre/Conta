@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import tempfile
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -11,6 +10,7 @@ from typing import Any
 from playwright.async_api import async_playwright
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.database.client_connection import obtener_session_cliente
 from app.database.connection import engine
 
