@@ -391,7 +391,17 @@ class SriClienteSyncService:
                     + diagnostico
                 ) from exc
 
-        links = page.locator('a[id$=":lnkXml"]')
+        # El SRI ha cambiado varias veces el markup del enlace de descarga XML.
+        # No dependemos únicamente de a[id$=":lnkXml"].
+        xml_selector = (
+            'a[id*="lnkXml"], '
+            'a[id$=":lnkXml"], '
+            'input[id*="lnkXml"], '
+            'button[id*="lnkXml"], '
+            'a[title*="XML"], '
+            'a[href*="xml"]'
+        )
+        links = page.locator(xml_selector)
         try:
             await links.first.wait_for(state="visible", timeout=15000)
             return
@@ -399,14 +409,30 @@ class SriClienteSyncService:
             diagnostico = await cls._diagnostico_consulta(page)
             if settings.SRI_HEADLESS:
                 raise RuntimeError(
-                    "SRI no devolvió la tabla de comprobantes después de Consultar. "
-                    "Es posible que haya presentado reCAPTCHA. " + diagnostico
+                    "SRI no devolvió los enlaces XML después de Consultar. "
+                    "Es posible que haya presentado reCAPTCHA o que el portal haya cambiado el selector de descarga. "
+                    + diagnostico
                 )
             print(
-                "SRI solicita validación/CAPTCHA después de Consultar. "
-                "Resuélvalo en Chromium; Conta continuará automáticamente."
+                "SRI todavía no muestra los enlaces XML. "
+                "Si aparece CAPTCHA, resuélvalo en Chromium; Conta continuará automáticamente."
             )
-            await links.first.wait_for(state="visible", timeout=120000)
+            try:
+                await links.first.wait_for(state="visible", timeout=120000)
+            except PlaywrightTimeoutError as exc:
+                diagnostico = await cls._diagnostico_consulta(page)
+                try:
+                    await page.screenshot(
+                        path=str(Path(tempfile.gettempdir()) / f"conta_sri_resultado_{anio}_{mes:02d}.png"),
+                        full_page=True,
+                    )
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "SRI no mostró los enlaces XML después de 120 segundos. "
+                    "La consulta pudo quedar detenida por CAPTCHA, por un cambio del portal "
+                    "o porque la tabla no terminó de renderizar. " + diagnostico
+                ) from exc
 
     @staticmethod
     async def _diagnostico_consulta(page) -> str:
@@ -479,7 +505,10 @@ class SriClienteSyncService:
                 for pagina in range(1, 1001):
                     result["paginas"] = pagina
                     cls._job_update(job_id, mensaje=f"Procesando página {pagina}.", paginas=pagina)
-                    links = page.locator('a[id$=":lnkXml"]')
+                    links = page.locator(
+                        'a[id*="lnkXml"], a[id$=":lnkXml"], input[id*="lnkXml"], '
+                        'button[id*="lnkXml"], a[title*="XML"], a[href*="xml"]'
+                    )
                     total_links = await links.count()
                     if total_links == 0:
                         raise RuntimeError("SRI no devolvió comprobantes en la tabla actual.")
