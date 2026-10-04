@@ -332,6 +332,23 @@ async def main() -> None:
             print(f"   Primer error JS: {page_errors[0]}")
         print("   disabled después:", await boton.is_disabled())
 
+        # Diagnóstico seguro del campo generado por reCAPTCHA. Nunca mostramos
+        # el token, solo si existe y su longitud.
+        try:
+            captcha_fields = await page.locator(
+                'textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]'
+            ).evaluate_all(
+                """els => els.map(e => ({
+                    tag: e.tagName,
+                    name: e.name,
+                    valueLength: (e.value || '').length,
+                    visible: !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length)
+                }))"""
+            )
+            print(f"   Campos g-recaptcha-response en DOM: {captcha_fields}")
+        except Exception as exc:
+            print(f"   No se pudo inspeccionar g-recaptcha-response: {type(exc).__name__}")
+
         post_sri = [
             response for response in respuestas
             if response.status == 200
@@ -341,10 +358,20 @@ async def main() -> None:
         for idx, response in enumerate(post_sri, start=1):
             try:
                 cuerpo_diag = await response.text()
+                post_data = response.request.post_data or ""
+                captcha_match = re.search(
+                    r"(?:^|&)g-recaptcha-response=([^&]*)",
+                    post_data,
+                    re.IGNORECASE,
+                )
+                captcha_value = captcha_match.group(1) if captcha_match else ""
+                captcha_len = len(captcha_value)
                 print(
                     f"      POST {idx}: bytes={len(cuerpo_diag.encode('utf-8', errors='ignore'))}, "
                     f"panel={'sí' if 'id="frmPrincipal:panelListaComprobantes"' in cuerpo_diag else 'no'}, "
-                    f"captcha={'sí' if 'captcha' in cuerpo_diag.lower() else 'no'}"
+                    f"captcha={'sí' if 'captcha' in cuerpo_diag.lower() else 'no'}, "
+                    f"token_recaptcha={'presente' if captcha_len else 'vacío'}, "
+                    f"token_len={captcha_len}"
                 )
             except Exception as exc:
                 print(f"      POST {idx}: no se pudo leer respuesta ({type(exc).__name__})")
