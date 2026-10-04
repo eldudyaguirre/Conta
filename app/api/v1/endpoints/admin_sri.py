@@ -23,9 +23,9 @@ async def sincronizar_compras(
     request: SincronizarComprasRequest,
     usuario: dict = Depends(get_admin_user),
 ):
-    """Primera fase: sincroniza un solo cliente y período."""
+    """Inicia la sincronización en segundo plano y responde inmediatamente."""
     try:
-        resultado = await SriClienteSyncService.sincronizar_mes(
+        resultado = SriClienteSyncService.iniciar_sincronizacion(
             ruc=request.ruc,
             anio=request.anio,
             mes=request.mes,
@@ -41,5 +41,21 @@ async def sincronizar_compras(
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Error sincronizando comprobantes del SRI: {exc}",
+            detail=f"Error iniciando sincronización del SRI: {exc}",
         )
+
+
+@router.get("/compras/estado/{job_id}")
+async def estado_compras(
+    job_id: str,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Consulta el estado de un trabajo SRI sin esperar al SRI."""
+    resultado = SriClienteSyncService.estado_sincronizacion(job_id)
+    if resultado is None:
+        raise HTTPException(status_code=404, detail="Trabajo de sincronización no encontrado.")
+    return {
+        "usuario": usuario["usrname"],
+        "tipo": "sri_sync_status",
+        **resultado,
+    }
