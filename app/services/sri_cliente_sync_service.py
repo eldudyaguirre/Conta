@@ -134,11 +134,10 @@ class SriClienteSyncService:
         page = await context.new_page()
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         try:
-            await page.goto(cls.LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_selector("#usuario", timeout=10000)
+            await page.goto(cls.LOGIN_URL, wait_until="commit", timeout=60000)
+            await page.wait_for_selector("input[name=\"username\"], #username, #usuario", timeout=30000)
             await page.wait_for_selector("#password", timeout=10000)
-            await page.fill("#usuario", ruc)
-            await page.evaluate("(ruc) => { const u=document.getElementById('username'); if(u) u.value=ruc; }", ruc)
+            await page.locator("input[name=\"username\"], #username, #usuario").first.fill(ruc)
             try:
                 await page.fill("#ciAdicional", "")
             except Exception:
@@ -158,7 +157,7 @@ class SriClienteSyncService:
                     await page.keyboard.press("Escape")
             except Exception:
                 pass
-            await page.goto(cls.PORTAL_URL, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(cls.PORTAL_URL, wait_until="domcontentloaded", timeout=60000)
             return p, browser, page
         except Exception:
             await browser.close()
