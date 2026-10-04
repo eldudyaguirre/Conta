@@ -163,10 +163,35 @@ async def main() -> None:
 
         page.on("response", lambda response: respuestas.append(response) if es_post_sri(response) else None)
 
-        await page.locator("#frmPrincipal\\:btnBuscar").click()
+        # Diagnóstico del flujo reCAPTCHA: solo registramos URLs/tipos,
+        # nunca tokens ni cookies.
+        recaptcha_requests = []
+        page.on(
+            "request",
+            lambda request: recaptcha_requests.append(request.url)
+            if any(x in request.url.lower() for x in ("recaptcha", "gstatic.com/recaptcha"))
+            else None,
+        )
+        page_errors = []
+        page.on("pageerror", lambda exc: page_errors.append(str(exc)[:300]))
+
+        boton = page.locator("#frmPrincipal\\:btnBuscar")
+        print("   onclick Consultar:", (await boton.get_attribute("onclick") or "")[:500])
+        print("   disabled antes:", await boton.is_disabled())
+
+        await boton.click()
 
         # Esperamos a que termine el flujo de reCAPTCHA + PrimeFaces.
-        await page.wait_for_timeout(15000)
+        await page.wait_for_timeout(30000)
+
+        print(f"   Peticiones relacionadas con reCAPTCHA: {len(recaptcha_requests)}")
+        if recaptcha_requests:
+            dominios = sorted({re.sub(r"^https?://([^/]+).*", r"\\1", u) for u in recaptcha_requests})
+            print(f"   Dominios reCAPTCHA detectados: {dominios}")
+        print(f"   Errores JavaScript de página: {len(page_errors)}")
+        if page_errors:
+            print(f"   Primer error JS: {page_errors[0]}")
+        print("   disabled después:", await boton.is_disabled())
 
         post_sri = [
             response for response in respuestas
