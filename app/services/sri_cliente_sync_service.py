@@ -140,16 +140,42 @@ class SriClienteSyncService:
         context = None
         profile_root = str(settings.SRI_USER_DATA_DIR or "").strip()
         if profile_root:
-            profile_dir = Path(profile_root) / str(ruc)
+            # Nunca compartimos el perfil del RUC que pueda estar abierto por
+            # un navegador manual. Chromium bloquea un user-data-dir cuando
+            # otra instancia ya lo está usando.
+            profile_base = Path(profile_root)
+            profile_dir = profile_base / f"{ruc}_conta"
             profile_dir.mkdir(parents=True, exist_ok=True)
-            context = await p.chromium.launch_persistent_context(
-                str(profile_dir),
-                headless=settings.SRI_HEADLESS,
-                channel=(settings.SRI_BROWSER_CHANNEL or "chromium").strip() or "chromium",
-                accept_downloads=True,
-                locale="es-EC",
-                viewport={"width": 1366, "height": 900},
-            )
+            launch_kwargs = {
+                "headless": settings.SRI_HEADLESS,
+                "channel": (settings.SRI_BROWSER_CHANNEL or "chromium").strip() or "chromium",
+                "accept_downloads": True,
+                "locale": "es-EC",
+                "viewport": {"width": 1366, "height": 900},
+            }
+            try:
+                context = await p.chromium.launch_persistent_context(
+                    str(profile_dir),
+                    **launch_kwargs,
+                )
+            except Exception as exc:
+                # Si el perfil dedicado quedó bloqueado por una ejecución
+                # anterior, usamos un perfil aislado para esta ejecución.
+                # Esto evita que el servicio muera por "Se está abriendo en
+                # una sesión de navegador existente".
+                fallback_dir = profile_base / f"{ruc}_conta_run"
+                fallback_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    context = await p.chromium.launch_persistent_context(
+                        str(fallback_dir),
+                        **launch_kwargs,
+                    )
+                except Exception as fallback_exc:
+                    raise RuntimeError(
+                        "Chromium no pudo abrir el perfil SRI de Conta. "
+                        f"Perfil={profile_dir}; primer error={exc}; "
+                        f"perfil alterno={fallback_dir}; segundo error={fallback_exc}"
+                    ) from fallback_exc
         else:
             browser = await p.chromium.launch(
                 headless=settings.SRI_HEADLESS,
