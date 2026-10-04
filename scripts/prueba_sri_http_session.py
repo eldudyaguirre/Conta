@@ -347,6 +347,32 @@ async def main() -> None:
         except Exception as exc:
             print(f"   No se pudo inspeccionar executeRecaptcha(): {type(exc).__name__}")
 
+        # Inspeccionamos también el JavaScript oficial de SRI que implementa
+        # reCAPTCHA Enterprise. Esto permite saber si existe un callback,
+        # una función rcBuscar() o algún paso adicional entre execute() y
+        # PrimeFaces.ab(). No mostramos tokens.
+        try:
+            sri_script_info = await page.evaluate(
+                """async () => {
+                    const urls = Array.from(document.scripts)
+                        .map(s => s.src)
+                        .filter(u => u && u.includes('sri-reCAPTCHAEnterprise.js.jsf'));
+                    if (!urls.length) return {url: null, source: ''};
+                    const response = await fetch(urls[0], {credentials: 'same-origin'});
+                    const source = await response.text();
+                    return {
+                        url: urls[0],
+                        source: source.slice(0, 12000)
+                    };
+                }"""
+            )
+            print("   Código sri-reCAPTCHAEnterprise.js.jsf:")
+            print(f"      URL: {sri_script_info.get('url')}")
+            script_source = sri_script_info.get("source", "")
+            print("      " + script_source.replace("\\n", " ")[:12000])
+        except Exception as exc:
+            print(f"   No se pudo leer sri-reCAPTCHAEnterprise.js.jsf: {type(exc).__name__}")
+
         # Tomamos una pequeña línea de tiempo del campo reCAPTCHA. Solo se
         # registra longitud y presencia; jamás se imprime el valor.
         captcha_timeline = []
