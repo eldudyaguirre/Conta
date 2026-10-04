@@ -2,7 +2,6 @@ import os
 import platform
 import sys
 from getpass import getuser
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from playwright.async_api import async_playwright
@@ -38,11 +37,11 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
         "python_version": platform.python_version(),
         "sri_headless": settings.SRI_HEADLESS,
         "login_url": SriClienteSyncDiagnostic.LOGIN_URL,
+        "playwright_browser": "chromium",
     }
 
     try:
         p = await async_playwright().start()
-        info["playwright_version"] = p.chromium
         browser = await p.chromium.launch(headless=settings.SRI_HEADLESS)
         info["browser_launched"] = True
 
@@ -77,10 +76,7 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
             except Exception:
                 pass
 
-            raise HTTPException(
-                status_code=502,
-                detail=info,
-            )
+            raise HTTPException(status_code=502, detail=info)
 
         return info
 
