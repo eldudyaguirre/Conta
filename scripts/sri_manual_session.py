@@ -50,22 +50,22 @@ def safe_post_data(post_data: str) -> str:
 
 
 def _limpiar_html(html: str) -> str:
-    """Convierte el HTML del detalle JSF en texto legible, sin exponer secretos."""
-    html = re.sub(r"(?is)<script\b[^>]*>.*?</script>", " ", html)
-    html = re.sub(r"(?is)<style\b[^>]*>.*?</style>", " ", html)
+    """Convierte HTML en texto legible para diagnóstico, sin scripts/styles."""
+    html = re.sub(r"(?is)<script\\b[^>]*>.*?</script>", " ", html)
+    html = re.sub(r"(?is)<style\\b[^>]*>.*?</style>", " ", html)
     html = html.replace("&nbsp;", " ")
-    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?i)</(?:div|p|tr|li|h[1-6])\s*>", "\n", html)
-    html = re.sub(r"(?i)</td\s*>", " | ", html)
+    html = re.sub(r"(?i)<br\\s*/?>", "\\n", html)
+    html = re.sub(r"(?i)</(?:div|p|tr|li|h[1-6])\\s*>", "\\n", html)
+    html = re.sub(r"(?i)</td\\s*>", " | ", html)
     html = re.sub(r"<[^>]+>", " ", html)
     html = unquote_plus(html)
-    html = re.sub(r"[ \t]+", " ", html)
-    html = re.sub(r"\n\s*\n+", "\n", html)
+    html = re.sub(r"[ \\t]+", " ", html)
+    html = re.sub(r"\\n\\s*\\n+", "\\n", html)
     return html.strip()
 
 
 def extraer_update_detalle(body: str) -> str | None:
-    """Extrae exclusivamente el CDATA del update del panel de detalle JSF."""
+    """Extrae exclusivamente el <update> real del panel de detalle JSF."""
     try:
         root = ET.fromstring(body)
     except ET.ParseError:
@@ -75,33 +75,71 @@ def extraer_update_detalle(body: str) -> str | None:
         "form-detalle-factura:panel-detalle-factura",
         "panel-detalle-factura",
     }
-
     for update in root.iter():
-        tag = update.tag.rsplit("}", 1)[-1]
-        if tag != "update":
-            continue
-        if (update.attrib.get("id") or "") in wanted:
+        if update.tag.rsplit("}", 1)[-1] == "update" and update.attrib.get("id") in wanted:
             return "".join(update.itertext())
-
     return None
 
 
-def _valor_por_etiqueta(texto: str, etiquetas: tuple[str, ...]) -> str | None:
-    """Busca 'Etiqueta valor' dentro del texto visible del detalle."""
-    for etiqueta in etiquetas:
-        patron = (
-            rf"{re.escape(etiqueta)}\s*[:\-]?\s*"
-            r"(.{1,180}?)(?=\s+(?:RUC|Número RUC|Clave de acceso|"
-            r"Establecimiento|Punto de emisión|Secuencial|Fecha Emisión|"
-            r"Razón Social|Nombre Comercial|Tipo de emisión|Total Sin impuestos|"
-            r"Total Descuento|Total Propina|$))"
+def extraer_tablas_detalle(html: str) -> list[dict]:
+    """Extrae tablas HTML del detalle y conserva encabezados/filas para validar estructura."""
+    class TableParser(__import__("html.parser").parser.HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.tables = []
+            self.table = None
+            self.row = None
+            self.cell = None
+            self.cell_tag = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag.lower() == "table":
+                self.table = {"id": attrs.get("id", ""), "class": attrs.get("class", ""), "rows": []}
+            elif self.table is not None and tag.lower() == "tr":
+                self.row = []
+            elif self.table is not None and tag.lower() in ("td", "th") and self.row is not None:
+                self.cell = []
+                self.cell_tag = tag.lower()
+
+        def handle_data(self, data):
+            if self.cell is not None:
+                self.cell.append(data)
+
+        def handle_endtag(self, tag):
+            tag = tag.lower()
+            if tag in ("td", "th") and self.cell is not None and self.row is not None:
+                value = re.sub(r"\\s+", " ", "".join(self.cell)).strip()
+                self.row.append(value)
+                self.cell = None
+                self.cell_tag = None
+            elif tag == "tr" and self.row is not None and self.table is not None:
+                if any(self.row):
+                    self.table["rows"].append(self.row)
+                self.row = None
+            elif tag == "table" and self.table is not None:
+                if self.table["rows"]:
+                    self.tables.append(self.table)
+                self.table = None
+
+    parser = TableParser()
+    parser.feed(html)
+    return parser.tables
+
+
+def resumir_tablas_detalle(html: str) -> list[str]:
+    tablas = extraer_tablas_detalle(html)
+    salida = [f"tablas_detectadas={len(tablas)}"]
+
+    for i, tabla in enumerate(tablas, 1):
+        filas = tabla["rows"]
+        salida.append(
+            f"TABLA_{i}: id={tabla['id'] or '-'} | class={tabla['class'] or '-'} | filas={len(filas)}"
         )
-        match = re.search(patron, texto, flags=re.I | re.S)
-        if match:
-            valor = re.sub(r"\s+", " ", match.group(1)).strip(" |:-")
-            if valor:
-                return valor
-    return None
+        for fila in filas[:80]:
+            salida.append("  FILA: " + " | ".join(fila)[:1000])
+
+    return salida
 
 
 def extraer_campos_detalle(body: str) -> dict[str, str]:
@@ -114,37 +152,17 @@ def extraer_campos_detalle(body: str) -> dict[str, str]:
     campos: dict[str, str] = {}
 
     patrones = {
-        "ruc_proveedor": (
-            r"(?:Número\s+RUC|RUC)\s*[:\-]?\s*(\d{13})",
-        ),
-        "clave_acceso": (
-            r"Clave\s+de\s+acceso\s*[:\-]?\s*(\d{49})",
-        ),
-        "establecimiento": (
-            r"Establecimiento\s*[:\-]?\s*(\d{3})",
-        ),
-        "punto_emision": (
-            r"Punto\s+de\s+emisión\s*[:\-]?\s*(\d{3})",
-            r"Punto\s+de\s+emision\s*[:\-]?\s*(\d{3})",
-        ),
-        "secuencial": (
-            r"Secuencial\s*[:\-]?\s*(\d{9})",
-        ),
-        "fecha_emision": (
-            r"Fecha\s+Emisión\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})",
-            r"Fecha\s+Emision\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})",
-        ),
-        "total_sin_impuestos": (
-            r"Total\s+Sin\s+impuestos\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)",
-        ),
-        "total_descuento": (
-            r"Total\s+Descuento\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)",
-        ),
-        "total_propina": (
-            r"Total\s+Propina\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)",
-        ),
+        "ruc_proveedor": (r"(?:Número\\s+RUC|RUC)\\s*[:\\-]?\\s*(\\d{13})",),
+        "clave_acceso": (r"Clave\\s+de\\s+acceso\\s*[:\\-]?\\s*(\\d{49})",),
+        "establecimiento": (r"Establecimiento\\s*[:\\-]?\\s*(\\d{3})",),
+        "punto_emision": (r"Punto\\s+de\\s+emisión\\s*[:\\-]?\\s*(\\d{3})", r"Punto\\s+de\\s+emision\\s*[:\\-]?\\s*(\\d{3})"),
+        "secuencial": (r"Secuencial\\s*[:\\-]?\\s*(\\d{9})",),
+        "fecha_emision": (r"Fecha\\s+Emisión\\s*[:\\-]?\\s*(\\d{2}/\\d{2}/\\d{4})", r"Fecha\\s+Emision\\s*[:\\-]?\\s*(\\d{2}/\\d{2}/\\d{4})"),
+        "total_sin_impuestos": (r"Total\\s+Sin\\s+impuestos\\s*[:\\-]?\\s*([0-9]+(?:[.,][0-9]+)?)",),
+        "total_descuento": (r"Total\\s+Descuento\\s*[:\\-]?\\s*([0-9]+(?:[.,][0-9]+)?)",),
+        "total_propina": (r"Total\\s+Propina\\s*[:\\-]?\\s*([0-9]+(?:[.,][0-9]+)?)",),
+        "importe_total": (r"Importe\\s+Total\\s*[:\\-]?\\s*([0-9]+(?:[.,][0-9]+)?)",),
     }
-
     for nombre, variantes in patrones.items():
         for patron in variantes:
             match = re.search(patron, texto, flags=re.I)
@@ -152,53 +170,39 @@ def extraer_campos_detalle(body: str) -> dict[str, str]:
                 campos[nombre] = match.group(1).strip()
                 break
 
-    # En este detalle el texto muestra la etiqueta y el valor inmediatamente
-    # después. Se conserva el valor hasta la siguiente etiqueta conocida.
-    etiquetas_sociales = (
-        "Razón Social", "Razon Social",
-        "Nombre Comercial", "Nombre comercial",
+    match = re.search(
+        r"Razón\\s+Social\\s*[:\\-]?\\s*(.+?)(?=\\s+\\|\\s+Nombre Comercial\\s+\\||\\s+Número RUC\\b)",
+        texto, flags=re.I | re.S,
     )
-    for etiqueta in etiquetas_sociales:
-        match = re.search(
-            rf"{re.escape(etiqueta)}\s*[:\-]?\s*(.+?)(?=\s+(?:Número RUC|RUC|"
-            r"Clave de acceso|Tipo de emisión|Tipo de emision|Establecimiento|"
-            r"Punto de emisión|Punto de emision|Secuencial|Fecha Emisión|"
-            r"Fecha Emision)\b)",
-            texto,
-            flags=re.I | re.S,
-        )
-        if match:
-            valor = re.sub(r"\s+", " ", match.group(1)).strip(" |:-")
-            if valor:
-                if etiqueta.lower().startswith("razón") or etiqueta.lower().startswith("razon"):
-                    campos.setdefault("razon_social", valor)
-                else:
-                    campos.setdefault("nombre_comercial", valor)
+    if match:
+        campos["razon_social"] = re.sub(r"\\s+", " ", match.group(1)).strip(" |:-")
+
+    match = re.search(
+        r"Nombre\\s+Comercial\\s*[:\\-]?\\s*(.+?)(?=\\s+\\|\\s+Número RUC\\b|\\s+Número RUC\\b)",
+        texto, flags=re.I | re.S,
+    )
+    if match:
+        campos["nombre_comercial"] = re.sub(r"\\s+", " ", match.group(1)).strip(" |:-")
 
     return campos
 
 
 def resumir_detalle(body: str) -> list[str]:
-    """Resumen seguro para diagnóstico; prioriza el panel de detalle real."""
+    """Resumen seguro del detalle real, incluyendo estructura de tablas."""
     html = extraer_update_detalle(body)
-    if html:
-        texto = _limpiar_html(html)
-        campos = extraer_campos_detalle(body)
-        encontrados = [
-            f"{nombre}={valor}"
-            for nombre, valor in campos.items()
-        ]
+    if not html:
+        return ["No se encontró el <update> real del panel de detalle en la respuesta JSF."]
 
-        # Mostrar unas líneas del texto visible ayuda a validar campos que aún
-        # no tengan parser, sin registrar el body completo.
-        if texto:
-            muestra = re.sub(r"\s+", " ", texto)
-            encontrados.append("texto_detalle=" + muestra[:1200])
+    texto = _limpiar_html(html)
+    campos = extraer_campos_detalle(body)
+    encontrados = [f"{nombre}={valor}" for nombre, valor in campos.items()]
+    encontrados.extend(resumir_tablas_detalle(html))
 
-        return encontrados
+    # Muestra acotada para validar etiquetas que todavía no tengan parser.
+    if texto:
+        encontrados.append("texto_detalle=" + re.sub(r"\\s+", " ", texto)[:1500])
 
-    return ["No se encontró el <update> del panel de detalle en la respuesta JSF."]
-
+    return encontrados
 
 
 async def main() -> None:
