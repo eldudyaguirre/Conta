@@ -53,6 +53,7 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
         "home": os.environ.get("HOME", ""),
         "localappdata": os.environ.get("LOCALAPPDATA", ""),
         "playwright_browsers_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
+        "playwright_version": str(getattr(p, "version", "")),
         "python": sys.executable,
         "python_version": platform.python_version(),
         "sri_headless": settings.SRI_HEADLESS,
@@ -66,6 +67,7 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
             headless=settings.SRI_HEADLESS,
         )
         info["browser_launched"] = True
+        info["browser_name"] = "chromium"
 
         page = await browser.new_page()
         await page.add_init_script(
