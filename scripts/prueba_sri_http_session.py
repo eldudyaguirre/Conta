@@ -148,8 +148,46 @@ async def main() -> None:
         await page.locator("#frmPrincipal\\:cmbTipoComprobante").select_option(str(args.tipo))
 
         await page.locator("#frmPrincipal\\:btnBuscar").click()
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(3000)
 
+        # El id j_idt36 del HAR puede cambiar después de los AJAX de
+        # PrimeFaces. Buscamos el control real que dispara la consulta.
+        controles = await page.locator(
+            "button, input[type='submit'], input[type='button'], a"
+        ).evaluate_all(
+            """els => els.map(e => ({
+                id: e.id || "",
+                name: e.getAttribute("name") || "",
+                text: (e.innerText || e.value || "").trim(),
+                type: e.getAttribute("type") || "",
+                visible: !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length)
+            })).filter(x => x.visible && (x.text || x.id || x.name))"""
+        )
+        print("   Controles visibles después de btnBuscar:")
+        for control in controles:
+            if any(p in (control["text"] + " " + control["id"] + " " + control["name"]).lower()
+                   for p in ("buscar", "consult", "acept", "continuar", "list")):
+                print(f"      {control}")
+
+        consulta_locator = page.locator(
+            "#frmPrincipal\\:j_idt36"
+        )
+        if await consulta_locator.count() == 0:
+            # Fallback: localizar un control visible cuyo texto/value indique
+            # la consulta. No dependemos del id generado por JSF.
+            candidatos = page.locator(
+                "button:visible, input[type='submit']:visible, input[type='button']:visible"
+            )
+            consulta_locator = candidatos.filter(
+                has_text=re.compile(r"buscar|consultar|aceptar|continuar", re.I)
+            ).first
+
+        if await consulta_locator.count() == 0:
+            print("   No se encontró el botón/control de consulta.")
+            print("   URL actual:", page.url)
+            raise RuntimeError("No se encontró el control que dispara la consulta SRI.")
+
+        print("   Control de consulta encontrado. Ejecutando...")
         try:
             async with page.expect_response(
                 lambda r: (
@@ -159,7 +197,7 @@ async def main() -> None:
                 ),
                 timeout=30000,
             ) as response_info:
-                await page.locator("#frmPrincipal\\:j_idt36").click()
+                await consulta_locator.click()
             respuesta_real = await response_info.value
         except Exception as exc:
             print(f"   No se capturó la respuesta AJAX esperada: {type(exc).__name__}")
