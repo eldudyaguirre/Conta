@@ -361,40 +361,96 @@ async def main() -> None:
                 "SRI no produjo la petición AJAX de consulta después de executeRecaptcha."
             )
 
-        # Preferimos la respuesta que realmente contiene el update del panel.
-        # Si SRI devuelve una advertencia/error, no la confundimos con una tabla.
-        respuesta_real = next(
-            (
-                response for response in reversed(post_sri)
-                if 'id="frmPrincipal:panelListaComprobantes"' in (await response.text())
-            ),
-            post_sri[-1],
-        )
-        cuerpo_real = await respuesta_real.text()
+        # Leer las respuestas de forma asíncrona y guardar el cuerpo una sola vez.
+        # No usamos next() con await dentro de una expresión: response.text()
+        # es asíncrono y debe resolverse mediante un bucle normal.
+        respuestas_leidas: list[tuple[Any, str]] = []
+        for response in post_sri:
+            try:
+                cuerpo = await response.text()
+            except Exception as exc:
+                print(
+                    f"      POST: no se pudo leer el cuerpo "
+                    f"({type(exc).__name__}: {exc})"
+                )
+                continue
+            respuestas_leidas.append((response, cuerpo))
 
-        print(f"   POST consulta REAL HTTP: {respuesta_real.status}")
-        print(f"   Content-Type: {respuesta_real.headers.get('content-type', '')}")
-        print(f"   Resumen respuesta real: {_resumen_respuesta(cuerpo_real)}")
+        # Un panel en el XML parcial NO significa que la consulta haya tenido
+        # éxito. SRI puede devolver el panel con un mensaje de CAPTCHA/error.
+        # Consideramos éxito solamente si hay al menos una clave de acceso
+        # de 49 dígitos en la respuesta.
+        respuesta_real = None
+        cuerpo_real = ""
 
-        tiene_tabla = 'id="frmPrincipal:panelListaComprobantes"' in cuerpo_real
-        print(f"   Tabla devuelta por SRI: {'sí' if tiene_tabla else 'no'}")
+        for response, cuerpo in reversed(respuestas_leidas):
+            if re.search(r"\b\d{49}\b", cuerpo):
+                respuesta_real = response
+                cuerpo_real = cuerpo
+                break
 
-        if tiene_tabla:
+        if respuesta_real is not None:
+            print(f"   POST consulta REAL HTTP: {respuesta_real.status}")
+            print(
+                f"   Content-Type: "
+                f"{respuesta_real.headers.get('content-type', '')}"
+            )
+            print(f"   Resumen respuesta real: {_resumen_respuesta(cuerpo_real)}")
+
             filas = _extraer_comprobantes(cuerpo_real)
             registros = _normalizar_comprobantes(filas)
+
+            print("   Tabla válida de comprobantes: sí")
             print(f"   Filas de tabla extraídas: {len(filas)}")
             print(f"   Comprobantes reconocidos: {len(registros)}")
+
             if registros:
                 print("   Encabezados:", list(registros[0].keys()))
                 print("   Primeros comprobantes:")
                 for i, registro in enumerate(registros[:10], start=1):
                     print(f"      {i}. {registro}")
+                print(
+                    "   RESULTADO: la consulta real del navegador funciona "
+                    "y la tabla fue extraída."
+                )
             else:
-                print("   No se pudo convertir la tabla en registros.")
-            print("   RESULTADO: la consulta real del navegador funciona y la tabla fue extraída.")
+                print(
+                    "   La respuesta contiene claves de acceso, pero el parser "
+                    "todavía no pudo convertirlas en filas."
+                )
         else:
-            print("   RESULTADO: SRI no devolvió el panel de comprobantes en esta consulta.")
-            print("   Respuesta resumida:", re.sub(r"\\s+", " ", cuerpo_real[:2500]).strip())
+            # No hubo una respuesta con comprobantes. Mostramos la respuesta
+            # más relevante para diagnóstico, sin exponer tokens ni cookies.
+            if respuestas_leidas:
+                respuesta_real, cuerpo_real = respuestas_leidas[-1]
+                print(f"   POST consulta REAL HTTP: {respuesta_real.status}")
+                print(
+                    f"   Content-Type: "
+                    f"{respuesta_real.headers.get('content-type', '')}"
+                )
+                print(f"   Resumen respuesta real: {_resumen_respuesta(cuerpo_real)}")
+                tiene_panel = 'id="frmPrincipal:panelListaComprobantes"' in cuerpo_real
+                print(
+                    f"   PanelListaComprobantes presente: "
+                    f"{'sí' if tiene_panel else 'no'}"
+                )
+                print(
+                    f"   Clave de acceso de 49 dígitos: "
+                    f"{'sí' if re.search(r'\b\d{49}\b', cuerpo_real) else 'no'}"
+                )
+                print(
+                    "   RESULTADO: SRI no devolvió comprobantes válidos "
+                    "en esta consulta."
+                )
+                print(
+                    "   Respuesta resumida:",
+                    re.sub(r"\s+", " ", cuerpo_real[:2500]).strip(),
+                )
+            else:
+                print(
+                    "   RESULTADO: no hubo respuestas SRI que pudieran "
+                    "ser analizadas."
+                )
 
         cookies = await page.context.cookies()
 
