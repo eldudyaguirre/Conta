@@ -4,12 +4,33 @@ import argparse
 import asyncio
 import html
 import re
+from html.parser import HTMLParser
 from typing import Any
 
 import httpx
 
 from app.core.config import settings
 from app.services.sri_cliente_sync_service import SriClienteSyncService
+
+
+class _HiddenInputParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fields: dict[str, str] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "input":
+            return
+        data = dict(attrs)
+        name = data.get("name")
+        if name:
+            self.fields[name] = data.get("value") or ""
+
+
+def _form_fields(page_html: str) -> dict[str, str]:
+    parser = _HiddenInputParser()
+    parser.feed(page_html)
+    return parser.fields
 
 
 def _view_state(page_html: str) -> str:
@@ -118,13 +139,7 @@ async def main() -> None:
                     response.text,
                     re.IGNORECASE,
                 )
-                fields = dict(
-                    re.findall(
-                        r'<input[^>]+name=[\"\']([^\"\']+)[\"\'][^>]+value=[\"\']([^\"\']*)[\"\']',
-                        response.text,
-                        re.IGNORECASE,
-                    )
-                )
+                fields = _form_fields(response.text)
 
                 if action_match and fields:
                     action = action_match.group(1)
