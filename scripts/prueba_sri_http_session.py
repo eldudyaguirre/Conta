@@ -373,6 +373,43 @@ async def main() -> None:
         except Exception as exc:
             print(f"   No se pudo leer sri-reCAPTCHAEnterprise.js.jsf: {type(exc).__name__}")
 
+        # Instrumentamos únicamente el flujo ya implementado por SRI.
+        # Los wrappers llaman inmediatamente a las funciones originales:
+        # no generan, sustituyen ni reutilizan tokens.
+        try:
+            await page.evaluate(
+                """() => {
+                    const log = (name, extra = '') => {
+                        window.__sriCaptchaTrace = window.__sriCaptchaTrace || [];
+                        window.__sriCaptchaTrace.push({
+                            name,
+                            extra,
+                            t: Math.round(performance.now())
+                        });
+                    };
+
+                    for (const name of ['executeRecaptcha', 'onSubmit', 'rcBuscar']) {
+                        if (typeof window[name] === 'function' && !window[name].__contaWrapped) {
+                            const original = window[name];
+                            const wrapped = function(...args) {
+                                log(name + ':start', name === 'executeRecaptcha'
+                                    ? ('args=' + JSON.stringify(args))
+                                    : '');
+                                const result = original.apply(this, args);
+                                log(name + ':end', '');
+                                return result;
+                            };
+                            wrapped.__contaWrapped = true;
+                            wrapped.__contaOriginal = original;
+                            window[name] = wrapped;
+                        }
+                    }
+                }"""
+            )
+            print("   Instrumentación SRI: executeRecaptcha/onSubmit/rcBuscar instalada")
+        except Exception as exc:
+            print(f"   No se pudo instrumentar flujo SRI: {type(exc).__name__}")
+
         # Tomamos una pequeña línea de tiempo del campo reCAPTCHA. Solo se
         # registra longitud y presencia; jamás se imprime el valor.
         captcha_timeline = []
@@ -408,6 +445,14 @@ async def main() -> None:
         print("   Línea de tiempo g-recaptcha-response:")
         for label, state in captcha_timeline:
             print(f"      {label}: {state}")
+
+        try:
+            sri_trace = await page.evaluate("() => window.__sriCaptchaTrace || []")
+            print("   Secuencia JS SRI:")
+            for item in sri_trace:
+                print(f"      t={item.get('t')}ms {item.get('name')} {item.get('extra')}")
+        except Exception as exc:
+            print(f"   No se pudo leer secuencia JS SRI: {type(exc).__name__}")
 
         # Esperamos a que termine el flujo de reCAPTCHA + PrimeFaces.
         await page.wait_for_timeout(30000)
