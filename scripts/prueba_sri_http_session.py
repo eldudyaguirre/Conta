@@ -179,6 +179,39 @@ async def main() -> None:
         print("   onclick Consultar:", (await boton.get_attribute("onclick") or "")[:500])
         print("   disabled antes:", await boton.is_disabled())
 
+        # SRI inicializa reCAPTCHA Enterprise mediante JavaScript propio.
+        # Esperamos explícitamente a que el cliente exista antes del click.
+        try:
+            await page.wait_for_function(
+                """() => typeof grecaptcha !== 'undefined' &&
+                         grecaptcha.enterprise &&
+                         typeof grecaptcha.enterprise.execute === 'function'""",
+                timeout=30000,
+            )
+            print("   reCAPTCHA Enterprise API: disponible")
+        except Exception:
+            print("   reCAPTCHA Enterprise API: NO disponible")
+            print("   Scripts reCAPTCHA cargados:")
+            for url in await page.locator("script[src]").evaluate_all(
+                """els => els.map(e => e.src).filter(u => u.toLowerCase().includes('recaptcha'))"""
+            ):
+                print(f"      {url}")
+
+        # Comprobar si la página de SRI expone su inicializador.
+        estado_recaptcha = await page.evaluate(
+            """() => ({
+                grecaptcha: typeof grecaptcha !== 'undefined',
+                enterprise: typeof grecaptcha !== 'undefined' && !!grecaptcha.enterprise,
+                execute: typeof grecaptcha !== 'undefined' && !!grecaptcha.enterprise &&
+                         typeof grecaptcha.enterprise.execute === 'function',
+                sriExecute: typeof executeRecaptcha === 'function'
+            })"""
+        )
+        print(f"   Estado JS reCAPTCHA: {estado_recaptcha}")
+
+        # Dejamos un margen para que sri-reCAPTCHAEnterprise.js cree el cliente.
+        await page.wait_for_timeout(5000)
+
         await boton.click()
 
         # Esperamos a que termine el flujo de reCAPTCHA + PrimeFaces.
