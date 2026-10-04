@@ -185,12 +185,7 @@ async def main() -> None:
             else:
                 http_view_state = _view_state(response.text)
 
-            print("3. Enviando POST JSF de prueba sin reCAPTCHA...")
-            # No se intenta falsificar ni reutilizar un token reCAPTCHA.
-            # El objetivo es comprobar que HTTPX conserva la sesión y llega
-            # al endpoint JSF. El SRI puede rechazar esta petición por
-            # ausencia de reCAPTCHA, lo cual es precisamente un resultado
-            # útil para el diagnóstico.
+            print("3. Enviando POST JSF de preparación sin reCAPTCHA...")
             data = {
                 "javax.faces.partial.ajax": "true",
                 "javax.faces.source": "frmPrincipal:btnBuscar",
@@ -218,9 +213,71 @@ async def main() -> None:
                 },
             )
 
-            print(f"   POST HTTP: {response.status_code}")
+            print(f"   POST preparación HTTP: {response.status_code}")
+            print(f"   Resumen: {_resumen_respuesta(response.text)}")
+
+            # El primer POST puede devolver un ViewState nuevo. Lo extraemos
+            # sin mostrar su valor.
+            partial_view_states = re.findall(
+                r'<update[^>]+id=["\']javax\.faces\.ViewState["\'][^>]*><!\[CDATA\[(.*?)\]\]>',
+                response.text,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if partial_view_states:
+                http_view_state = html.unescape(partial_view_states[-1]).strip()
+                print("   ViewState actualizado desde respuesta AJAX: sí")
+            elif "javax.faces.ViewState" in response.text:
+                try:
+                    http_view_state = _view_state(response.text)
+                    print("   ViewState actualizado desde respuesta AJAX: sí")
+                except RuntimeError:
+                    print("   ViewState actualizado desde respuesta AJAX: no")
+                    return
+            else:
+                print("   ViewState actualizado desde respuesta AJAX: no")
+                return
+
+            print("4. Enviando segundo POST JSF (consulta real) sin reCAPTCHA...")
+            data = {
+                "javax.faces.partial.ajax": "true",
+                "javax.faces.source": "frmPrincipal:j_idt36",
+                "javax.faces.partial.execute": "@all",
+                "javax.faces.partial.render": "frmPrincipal:panelListaComprobantes frmPrincipal:tablaCompRecibidos",
+                "frmPrincipal:j_idt36": "frmPrincipal:j_idt36",
+                "frmPrincipal": "frmPrincipal",
+                "frmPrincipal:opciones": "ruc",
+                "frmPrincipal:ano": str(args.anio),
+                "frmPrincipal:mes": str(args.mes),
+                "frmPrincipal:dia": "0",
+                "frmPrincipal:cmbTipoComprobante": str(args.tipo),
+                "g-recaptcha-response": "",
+                "javax.faces.ViewState": http_view_state,
+            }
+            response = await client.post(
+                SriClienteSyncService.RECIBIDOS_URL,
+                data=data,
+                headers={
+                    "Accept": "application/xml, text/xml, */*; q=0.01",
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "Faces-Request": "partial/ajax",
+                    "Origin": "https://srienlinea.sri.gob.ec",
+                    "Referer": str(response.url),
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            )
+
+            print(f"   POST consulta HTTP: {response.status_code}")
             print(f"   Content-Type: {response.headers.get('content-type', '')}")
             print(f"   Resumen: {_resumen_respuesta(response.text)}")
+            print(f"   Contiene tabla de comprobantes: {'tablaCompRecibidos' in response.text}")
+            print(f"   Tamaño respuesta consulta: {len(response.content)} bytes")
+
+            if "tablaCompRecibidos" in response.text or "Lista de comprobantes recibidos" in response.text:
+                print("   RESULTADO: SRI devolvió contenido de comprobantes sin reCAPTCHA.")
+            else:
+                print("   RESULTADO: SRI no devolvió la tabla. Esto permite confirmar si reCAPTCHA")
+                print("   es el único requisito pendiente para la consulta HTTP.")
+
 
         print()
         print("RESULTADO:")
