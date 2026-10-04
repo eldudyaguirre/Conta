@@ -105,7 +105,45 @@ async def main() -> None:
         # se fabrica ningún token.
         print("2. Ejecutando consulta real dentro de Playwright...")
         await page.locator("#frmPrincipal\\:ano").select_option(str(args.anio))
-        await page.locator("#frmPrincipal\\:mes").select_option(f"{args.mes:02d}")
+
+        # SRI no usa necesariamente 01..12 como value del combo de meses.
+        # Descubrimos el option real y seleccionamos por value o label.
+        mes_locator = page.locator("#frmPrincipal\\:mes")
+        opciones_mes = await mes_locator.locator("option").evaluate_all(
+            """els => els.map(e => ({value: e.value, text: (e.textContent || '').trim()}))"""
+        )
+        print(f"   Opciones de mes disponibles: {opciones_mes}")
+
+        mes_num = args.mes
+        mes_nombres = [
+            "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
+        ]
+        candidatos = {
+            f"{mes_num:02d}",
+            str(mes_num),
+            mes_nombres[mes_num],
+            mes_nombres[mes_num].capitalize(),
+        }
+
+        opcion_mes = next(
+            (
+                o for o in opciones_mes
+                if str(o["value"]).strip() in candidatos
+                or str(o["text"]).strip().lower() in {x.lower() for x in candidatos}
+                or str(o["text"]).strip().lower().startswith(mes_nombres[mes_num])
+            ),
+            None,
+        )
+        if not opcion_mes:
+            raise RuntimeError(
+                f"No se encontró el mes {mes_num} en el combo SRI. "
+                f"Opciones: {opciones_mes}"
+            )
+
+        print(f"   Mes seleccionado: {opcion_mes}")
+        await mes_locator.select_option(value=opcion_mes["value"])
+
         await page.locator("#frmPrincipal\\:dia").select_option("0")
         await page.locator("#frmPrincipal\\:cmbTipoComprobante").select_option(str(args.tipo))
 
