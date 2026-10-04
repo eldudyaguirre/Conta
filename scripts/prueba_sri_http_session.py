@@ -172,6 +172,7 @@ async def main() -> None:
     parser.add_argument("--anio", type=int, required=True)
     parser.add_argument("--mes", type=int, required=True)
     parser.add_argument("--tipo", type=int, default=1)
+    parser.add_argument("--manual", action="store_true", help="Deja la ventana abierta para hacer clic manualmente en Consultar.")
     args = parser.parse_args()
 
     if not 1 <= args.mes <= 12:
@@ -428,7 +429,15 @@ async def main() -> None:
                 captcha_timeline.append((label, []))
 
         await sample_captcha("antes_click")
-        await boton.click()
+        if args.manual:
+            print()
+            print("   *** MODO MANUAL ***")
+            print("   La ventana de SRI quedó abierta.")
+            print("   Haz clic MANUALMENTE en el botón Consultar dentro de la ventana.")
+            print("   Espera a que SRI termine la consulta y luego vuelve aquí.")
+            await asyncio.to_thread(input, "   Cuando termine la consulta, presiona ENTER aquí...")
+        else:
+            await boton.click()
         await sample_captcha("inmediatamente_despues_click")
 
         # Esperamos por cambios del campo durante el flujo legítimo de SRI.
