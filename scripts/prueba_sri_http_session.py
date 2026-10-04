@@ -105,6 +105,18 @@ async def main() -> None:
             print(f"   URL final: {response.url}")
             print(f"   Sesión reutilizada: {'sí' if 'comprobantesRecibidos.jsf' in str(response.url) else 'no'}")
             print(f"   ViewState HTTP: {'sí' if 'javax.faces.ViewState' in response.text else 'no'}")
+            print(f"   Content-Type: {response.headers.get('content-type', '')}")
+            print(f"   Longitud respuesta: {len(response.content)} bytes")
+            print(f"   Primeros 500 caracteres: {re.sub(r"\\s+", " ", response.text[:500]).strip()}")
+
+            if 'javax.faces.ViewState' not in response.text:
+                print()
+                print("DIAGNÓSTICO:")
+                print("HTTPX conserva la sesión/cookies y recibe HTTP 200, pero el SRI no entrega")
+                print("el formulario JSF/ViewState en esta petición. No continuamos con el POST.")
+                print("Esto indica que debemos comparar la petición HTTP del navegador con HTTPX")
+                print("antes de intentar reutilizar la sesión fuera de Playwright.")
+                return
 
             http_view_state = _view_state(response.text)
 
