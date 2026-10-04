@@ -27,6 +27,112 @@ class _HiddenInputParser(HTMLParser):
             self.fields[name] = data.get("value") or ""
 
 
+class _TableParser(HTMLParser):
+    """Extrae filas/celdas de la tabla HTML incluida dentro del CDATA de SRI."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_table = False
+        self.in_row = False
+        self.in_cell = False
+        self.current_row: list[str] = []
+        self.current_cell: list[str] = []
+        self.rows: list[list[str]] = []
+        self._table_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        attrs_dict = dict(attrs)
+        if tag == "table":
+            table_id = (attrs_dict.get("id") or "").lower()
+            table_class = (attrs_dict.get("class") or "").lower()
+            if "tablacomprecibidos" in table_id or "tablacomprecibidos" in table_class:
+                self.in_table = True
+                self._table_depth = 1
+            elif self.in_table:
+                self._table_depth += 1
+        elif self.in_table and tag == "tr":
+            self.in_row = True
+            self.current_row = []
+        elif self.in_table and self.in_row and tag in {"td", "th"}:
+            self.in_cell = True
+            self.current_cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if not self.in_table:
+            return
+        if tag in {"td", "th"} and self.in_cell:
+            value = re.sub(r"\\s+", " ", "".join(self.current_cell)).strip()
+            self.current_row.append(html.unescape(value))
+            self.current_cell = []
+            self.in_cell = False
+        elif tag == "tr" and self.in_row:
+            if any(cell.strip() for cell in self.current_row):
+                self.rows.append(self.current_row)
+            self.current_row = []
+            self.in_row = False
+        elif tag == "table":
+            self._table_depth -= 1
+            if self._table_depth <= 0:
+                self.in_table = False
+                self._table_depth = 0
+
+    def handle_data(self, data: str) -> None:
+        if self.in_table and self.in_cell:
+            self.current_cell.append(data)
+
+
+def _extraer_comprobantes(respuesta: str) -> list[list[str]]:
+    """Extrae las filas de tablaCompRecibidos desde la respuesta partial-response de JSF."""
+    panel_match = re.search(
+        r'<update[^>]+id=["\']frmPrincipal:panelListaComprobantes["\'][^>]*>\\s*<!\\[CDATA\\[(.*?)\\]\\]>',
+        respuesta,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not panel_match:
+        return []
+
+    panel_html = html.unescape(panel_match.group(1))
+    parser = _TableParser()
+    parser.feed(panel_html)
+    return parser.rows
+
+
+def _normalizar_comprobantes(filas: list[list[str]]) -> list[dict[str, str]]:
+    """Convierte la tabla SRI en registros con nombres de columnas estables."""
+    if not filas:
+        return []
+
+    # SRI puede devolver cabeceras con una o varias filas. Tomamos la primera
+    # fila que tenga nombres de columnas reconocibles.
+    header_index = next(
+        (
+            i for i, fila in enumerate(filas)
+            if any("RUC" in celda.upper() for celda in fila)
+            and any("CLAVE" in celda.upper() or "AUTORIZ" in celda.upper() for celda in fila)
+        ),
+        None,
+    )
+    if header_index is None:
+        return []
+
+    headers = [re.sub(r"\\s+", " ", x).strip() for x in filas[header_index]]
+    datos: list[dict[str, str]] = []
+    for fila in filas[header_index + 1:]:
+        if len(fila) < 2:
+            continue
+        registro = {
+            headers[i] if i < len(headers) and headers[i] else f"columna_{i + 1}": fila[i]
+            for i in range(min(len(headers), len(fila)))
+        }
+        # Descarta filas de paginación/controles sin una clave de acceso.
+        texto = " ".join(fila)
+        if re.search(r"\\b\\d{49}\\b", texto):
+            datos.append(registro)
+    return datos
+
+
 def _form_fields(page_html: str) -> dict[str, str]:
     parser = _HiddenInputParser()
     parser.feed(page_html)
@@ -261,9 +367,18 @@ async def main() -> None:
         print(f"   Tabla devuelta por SRI: {'sí' if tiene_tabla else 'no'}")
 
         if tiene_tabla:
-            filas = len(re.findall(r"<tr\\b", cuerpo_real, re.IGNORECASE))
-            print(f"   Filas <tr> detectadas en respuesta: {filas}")
-            print("   RESULTADO: la consulta real del navegador funciona.")
+            filas = _extraer_comprobantes(cuerpo_real)
+            registros = _normalizar_comprobantes(filas)
+            print(f"   Filas de tabla extraídas: {len(filas)}")
+            print(f"   Comprobantes reconocidos: {len(registros)}")
+            if registros:
+                print("   Encabezados:", list(registros[0].keys()))
+                print("   Primeros comprobantes:")
+                for i, registro in enumerate(registros[:10], start=1):
+                    print(f"      {i}. {registro}")
+            else:
+                print("   No se pudo convertir la tabla en registros.")
+            print("   RESULTADO: la consulta real del navegador funciona y la tabla fue extraída.")
         else:
             print("   RESULTADO: el navegador produjo la respuesta AJAX,")
             print("   pero no se detectó la tabla de comprobantes.")
@@ -440,14 +555,18 @@ async def main() -> None:
             print(f"   POST consulta HTTP: {response.status_code}")
             print(f"   Content-Type: {response.headers.get('content-type', '')}")
             print(f"   Resumen: {_resumen_respuesta(response.text)}")
-            print(f"   Contiene tabla de comprobantes: {'tablaCompRecibidos' in response.text}")
+            filas_http = _extraer_comprobantes(response.text)
+            registros_http = _normalizar_comprobantes(filas_http)
+            print(f"   Filas de tabla extraídas por HTTPX: {len(filas_http)}")
+            print(f"   Comprobantes reconocidos por HTTPX: {len(registros_http)}")
             print(f"   Tamaño respuesta consulta: {len(response.content)} bytes")
 
-            if "tablaCompRecibidos" in response.text or "Lista de comprobantes recibidos" in response.text:
-                print("   RESULTADO: SRI devolvió contenido de comprobantes sin reCAPTCHA.")
+            if registros_http:
+                print("   RESULTADO HTTPX: la tabla fue extraída sin reCAPTCHA.")
             else:
-                print("   RESULTADO: SRI no devolvió la tabla. Esto permite confirmar si reCAPTCHA")
-                print("   es el único requisito pendiente para la consulta HTTP.")
+                print("   RESULTADO HTTPX: no se obtuvieron comprobantes; la respuesta no contiene")
+                print("   una tabla válida de comprobantes. Esto confirma que el token reCAPTCHA")
+                print("   generado por el navegador forma parte del flujo necesario.")
 
 
         print()
