@@ -82,25 +82,41 @@ def extraer_update_detalle(body: str) -> str | None:
 
 
 def extraer_tablas_detalle(html: str) -> list[dict]:
-    """Extrae tablas HTML del detalle y conserva encabezados/filas para validar estructura."""
-    class TableParser(__import__("html.parser").parser.HTMLParser):
+    """Extrae tablas HTML, incluyendo tablas anidadas, del detalle SRI."""
+    from html.parser import HTMLParser
+
+    class TableParser(HTMLParser):
         def __init__(self):
             super().__init__(convert_charrefs=True)
             self.tables = []
-            self.table = None
+            self.table_stack = []
             self.row = None
             self.cell = None
-            self.cell_tag = None
 
         def handle_starttag(self, tag, attrs):
+            tag = tag.lower()
             attrs = dict(attrs)
-            if tag.lower() == "table":
-                self.table = {"id": attrs.get("id", ""), "class": attrs.get("class", ""), "rows": []}
-            elif self.table is not None and tag.lower() == "tr":
+
+            if tag == "table":
+                table = {
+                    "id": attrs.get("id", ""),
+                    "class": attrs.get("class", ""),
+                    "rows": [],
+                    "depth": len(self.table_stack),
+                }
+                self.table_stack.append(table)
+                return
+
+            if not self.table_stack:
+                return
+
+            if tag == "tr" and self.row is None:
                 self.row = []
-            elif self.table is not None and tag.lower() in ("td", "th") and self.row is not None:
+                return
+
+            if tag in ("td", "th") and self.row is not None and self.cell is None:
                 self.cell = []
-                self.cell_tag = tag.lower()
+                return
 
         def handle_data(self, data):
             if self.cell is not None:
@@ -108,24 +124,64 @@ def extraer_tablas_detalle(html: str) -> list[dict]:
 
         def handle_endtag(self, tag):
             tag = tag.lower()
-            if tag in ("td", "th") and self.cell is not None and self.row is not None:
+
+            if tag in ("td", "th") and self.cell is not None:
                 value = re.sub(r"\\s+", " ", "".join(self.cell)).strip()
-                self.row.append(value)
+                if self.row is not None:
+                    self.row.append(value)
                 self.cell = None
-                self.cell_tag = None
-            elif tag == "tr" and self.row is not None and self.table is not None:
-                if any(self.row):
-                    self.table["rows"].append(self.row)
+                return
+
+            if tag == "tr" and self.row is not None:
+                if self.table_stack and any(self.row):
+                    self.table_stack[-1]["rows"].append(self.row)
                 self.row = None
-            elif tag == "table" and self.table is not None:
-                if self.table["rows"]:
-                    self.tables.append(self.table)
-                self.table = None
+                return
+
+            if tag == "table" and self.table_stack:
+                table = self.table_stack.pop()
+                if table["rows"]:
+                    self.tables.append(table)
 
     parser = TableParser()
     parser.feed(html)
-    return parser.tables
 
+    # El detalle puede traer HTML escapado dentro de JavaScript.
+    # Si las tablas principales ya fueron encontradas, no necesitamos
+    # interpretar los objetos RichFaces que aparecen después.
+    self_tables = sorted(
+        parser.tables,
+        key=lambda t: (t["depth"], t["id"])
+    )
+    return self_tables
+
+
+def resumir_tablas_detalle(html: str) -> list[str]:
+    tablas = extraer_tablas_detalle(html)
+    salida = [f"tablas_detectadas={len(tablas)}"]
+
+    for i, tabla in enumerate(tablas, 1):
+        filas = tabla["rows"]
+        salida.append(
+            f"TABLA_{i}: id={tabla['id'] or '-'} | class={tabla['class'] or '-'} | "
+            f"depth={tabla['depth']} | filas={len(filas)}"
+        )
+        for fila in filas[:100]:
+            salida.append("  FILA: " + " | ".join(fila)[:1200])
+
+    # Además, localizar explícitamente la sección "Detalles Factura".
+    # Esto ayuda si SRI envía esa tabla parcialmente generada por RichFaces.
+    texto = _limpiar_html(html)
+    m = re.search(
+        r"Detalles?\\s+Factura.*?(?=(?:Impuesto\\s+Porcentaje|Nro\\s+Impuesto|$))",
+        texto,
+        flags=re.I | re.S,
+    )
+    if m:
+        muestra = re.sub(r"\\s+", " ", m.group(0)).strip()
+        salida.append("SECCION_DETALLES_FACTURA=" + muestra[:6000])
+
+    return salida
 
 def resumir_tablas_detalle(html: str) -> list[str]:
     tablas = extraer_tablas_detalle(html)
