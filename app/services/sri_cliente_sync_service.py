@@ -141,7 +141,20 @@ class SriClienteSyncService:
         page = await context.new_page()
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         try:
-            await page.goto(cls.LOGIN_URL, wait_until="commit", timeout=60000)
+            try:
+                await page.goto(cls.LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+            except PlaywrightTimeoutError as exc:
+                # El portal puede tardar en responder desde el proceso de Windows.
+                # Reintentamos una sola vez antes de declarar caída la conexión.
+                try:
+                    await page.goto("https://srienlinea.sri.gob.ec/", wait_until="domcontentloaded", timeout=20000)
+                    await page.goto(cls.LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+                except Exception as retry_exc:
+                    raise RuntimeError(
+                        "No se pudo abrir el portal del SRI desde Conta. "
+                        f"Primer intento: {exc}. Reintento: {retry_exc}"
+                    ) from retry_exc
+
             usuario = page.locator('input[name="username"]:visible, #username:visible, #usuario:visible').first
             password = page.locator("#password:visible").first
             await usuario.wait_for(state="visible", timeout=30000)
