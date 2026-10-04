@@ -135,9 +135,17 @@ class SriClienteSyncService:
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         try:
             await page.goto(cls.LOGIN_URL, wait_until="commit", timeout=60000)
-            await page.wait_for_selector("input[name=\"username\"], #username, #usuario", timeout=30000)
-            await page.wait_for_selector("#password", timeout=10000)
-            await page.locator("input[name=\"username\"], #username, #usuario").first.fill(ruc)
+            # El portal puede contener un #username hidden y otro campo visible.
+            # Debemos seleccionar explícitamente el campo visible para evitar
+            # que Playwright se quede esperando el input hidden.
+            usuario = page.locator(
+                'input[name="username"]:visible, #username:visible, #usuario:visible'
+            ).first
+            password = page.locator("#password:visible").first
+
+            await usuario.wait_for(state="visible", timeout=30000)
+            await password.wait_for(state="visible", timeout=10000)
+            await usuario.fill(ruc)
             try:
                 await page.fill("#ciAdicional", "")
             except Exception:
