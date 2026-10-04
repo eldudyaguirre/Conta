@@ -147,64 +147,51 @@ async def main() -> None:
         await page.locator("#frmPrincipal\\:dia").select_option("0")
         await page.locator("#frmPrincipal\\:cmbTipoComprobante").select_option(str(args.tipo))
 
-        await page.locator("#frmPrincipal\\:btnBuscar").click()
-        await page.wait_for_timeout(3000)
+        # El botón Consultar ejecuta executeRecaptcha(...) y luego PrimeFaces.ab(...)
+        # desde su propio onclick. Al hacer click queda temporalmente disabled
+        # mientras Google/SRI genera el token. Por eso NO debemos intentar
+        # hacer un segundo click sobre el mismo botón.
+        print("   Ejecutando Consultar y esperando la respuesta AJAX real...")
 
-        # El id j_idt36 del HAR puede cambiar después de los AJAX de
-        # PrimeFaces. Buscamos el control real que dispara la consulta.
-        controles = await page.locator(
-            "button, input[type='submit'], input[type='button'], a"
-        ).evaluate_all(
-            """els => els.map(e => ({
-                id: e.id || "",
-                name: e.getAttribute("name") || "",
-                text: (e.innerText || e.value || "").trim(),
-                type: e.getAttribute("type") || "",
-                visible: !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length)
-            })).filter(x => x.visible && (x.text || x.id || x.name))"""
-        )
-        print("   Controles visibles después de btnBuscar:")
-        for control in controles:
-            if any(p in (control["text"] + " " + control["id"] + " " + control["name"]).lower()
-                   for p in ("buscar", "consult", "acept", "continuar", "list")):
-                print(f"      {control}")
+        respuestas = []
 
-        consulta_locator = page.locator(
-            "#frmPrincipal\\:j_idt36"
-        )
-        if await consulta_locator.count() == 0:
-            # Fallback: localizar un control visible cuyo texto/value indique
-            # la consulta. No dependemos del id generado por JSF.
-            candidatos = page.locator(
-                "button:visible, input[type='submit']:visible, input[type='button']:visible"
+        def es_post_sri(response):
+            return (
+                "comprobantesRecibidos.jsf" in response.url
+                and response.request.method == "POST"
             )
-            consulta_locator = candidatos.filter(
-                has_text=re.compile(r"buscar|consultar|aceptar|continuar", re.I)
-            ).first
 
-        if await consulta_locator.count() == 0:
-            print("   No se encontró el botón/control de consulta.")
+        page.on("response", lambda response: respuestas.append(response) if es_post_sri(response) else None)
+
+        await page.locator("#frmPrincipal\\:btnBuscar").click()
+
+        # Esperamos a que termine el flujo de reCAPTCHA + PrimeFaces.
+        await page.wait_for_timeout(15000)
+
+        post_sri = [
+            response for response in respuestas
+            if response.status == 200
+        ]
+
+        print(f"   POST SRI detectados: {len(post_sri)}")
+
+        if not post_sri:
+            boton = page.locator("#frmPrincipal\\:btnBuscar")
+            print(
+                "   Estado Consultar: "
+                f"disabled={await boton.is_disabled()}"
+            )
+            print("   No se recibió POST AJAX después de esperar 15 segundos.")
             print("   URL actual:", page.url)
-            raise RuntimeError("No se encontró el control que dispara la consulta SRI.")
+            raise RuntimeError(
+                "SRI no produjo la petición AJAX de consulta después de executeRecaptcha."
+            )
 
-        print("   Control de consulta encontrado. Ejecutando...")
-        try:
-            async with page.expect_response(
-                lambda r: (
-                    "comprobantesRecibidos.jsf" in r.url
-                    and r.request.method == "POST"
-                    and r.status == 200
-                ),
-                timeout=30000,
-            ) as response_info:
-                await consulta_locator.click()
-            respuesta_real = await response_info.value
-        except Exception as exc:
-            print(f"   No se capturó la respuesta AJAX esperada: {type(exc).__name__}")
-            print("   URL actual:", page.url)
-            raise
-
+        # Tomamos el último POST 200, que normalmente es el resultado de la
+        # consulta. No mostramos tokens, cookies ni ViewState.
+        respuesta_real = post_sri[-1]
         cuerpo_real = await respuesta_real.text()
+
         print(f"   POST consulta REAL HTTP: {respuesta_real.status}")
         print(f"   Content-Type: {respuesta_real.headers.get('content-type', '')}")
         print(f"   Resumen respuesta real: {_resumen_respuesta(cuerpo_real)}")
@@ -220,7 +207,8 @@ async def main() -> None:
             print(f"   Filas <tr> detectadas en respuesta: {filas}")
             print("   RESULTADO: la consulta real del navegador funciona.")
         else:
-            print("   RESULTADO: el navegador llegó al POST, pero SRI no devolvió la tabla.")
+            print("   RESULTADO: el navegador produjo la respuesta AJAX,")
+            print("   pero no se detectó la tabla de comprobantes.")
             print("   Respuesta resumida:", re.sub(r"\\s+", " ", cuerpo_real[:1200]).strip())
 
         cookies = await page.context.cookies()
