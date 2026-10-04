@@ -1,6 +1,10 @@
+import asyncio
 import os
 import platform
+import socket
+import ssl
 import sys
+import time
 from getpass import getuser
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -59,6 +63,8 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
         "sri_headless": settings.SRI_HEADLESS,
         "proxy_environment": proxy_vars,
         "tests": [],
+        "network": [],
+
     }
 
     try:
@@ -70,6 +76,62 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
         info["browser_name"] = "chromium"
 
         page = await browser.new_page()
+
+        request_failures = []
+        responses = []
+
+        page.on("requestfailed", lambda request: request_failures.append({
+            "url": request.url,
+            "method": request.method,
+            "failure": request.failure,
+        }))
+        page.on("response", lambda response: responses.append({
+            "url": response.url,
+            "status": response.status,
+        }) if ("sri.gob.ec" in response.url or len(responses) < 20) else None)
+
+        async def network_test(host: str, port: int = 443) -> dict:
+            item = {"host": host, "port": port}
+            started = time.monotonic()
+            try:
+                addresses = await asyncio.to_thread(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
+                item["dns_ok"] = True
+                item["addresses"] = sorted({x[4][0] for x in addresses})
+            except Exception as exc:
+                item["dns_ok"] = False
+                item["dns_error"] = f"{type(exc).__name__}: {exc}"
+                item["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+                return item
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port), timeout=10
+                )
+                item["tcp_ok"] = True
+                writer.close()
+                await writer.wait_closed()
+            except Exception as exc:
+                item["tcp_ok"] = False
+                item["tcp_error"] = f"{type(exc).__name__}: {exc}"
+                item["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+                return item
+            try:
+                def tls_probe():
+                    ctx = ssl.create_default_context()
+                    with socket.create_connection((host, port), timeout=10) as raw:
+                        with ctx.wrap_socket(raw, server_hostname=host) as tls:
+                            return tls.version(), tls.getpeercert()
+                version, cert = await asyncio.to_thread(tls_probe)
+                item["tls_ok"] = True
+                item["tls_version"] = version
+                item["certificate_subject"] = str(cert.get("subject", ""))[:500]
+            except Exception as exc:
+                item["tls_ok"] = False
+                item["tls_error"] = f"{type(exc).__name__}: {exc}"
+            item["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+            return item
+
+        for host in ("srienlinea.sri.gob.ec", "www.google.com"):
+            info["network"].append(await network_test(host))
         await page.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
@@ -100,6 +162,8 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
                 test["url"] = page.url
                 test["error_type"] = type(exc).__name__
                 test["error"] = str(exc)
+                test["request_failures"] = request_failures[-20:]
+                test["responses"] = responses[-20:]
 
                 try:
                     test["title_after_error"] = await page.title()
@@ -107,6 +171,8 @@ async def diagnostico_sri(usuario: dict = Depends(get_admin_user)):
                     pass
 
             info["tests"].append(test)
+
+        info["browser_network_events"] = {"request_failures": request_failures[-50:], "responses": responses[-50:]}
 
         info["summary"] = {
             test["name"]: test["ok"]
