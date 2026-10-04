@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     AI_MAX_TOOL_CALLS: int = 5
     AI_MAX_HISTORY_MESSAGES: int = 20
 
+    SRI_HEADLESS: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",
