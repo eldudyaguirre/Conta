@@ -3,10 +3,49 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as dt
+import re
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote_plus
 
 from app.core.config import settings
 from app.services.sri_cliente_sync_service import SriClienteSyncService
+
+SENSITIVE_FIELDS = {
+    "g-recaptcha-response",
+    "javax.faces.ViewState",
+    "password",
+    "j_password",
+    "contrasena",
+    "clave",
+}
+
+SAFE_FIELDS = {
+    "javax.faces.source",
+    "javax.faces.partial.execute",
+    "javax.faces.partial.render",
+    "Faces-Request",
+    "X-Requested-With",
+    "frmPrincipal:ano",
+    "frmPrincipal:mes",
+    "frmPrincipal:dia",
+    "frmPrincipal:cmbTipoComprobante",
+}
+
+
+def safe_post_data(post_data: str) -> str:
+    if not post_data:
+        return "sin_body"
+
+    parts = []
+    for name, value in parse_qsl(post_data, keep_blank_values=True):
+        if name in SENSITIVE_FIELDS:
+            parts.append(f"{name}=[REDACTED]")
+        elif name in SAFE_FIELDS:
+            value = unquote_plus(value)
+            if len(value) > 200:
+                value = value[:200] + "...[TRUNCADO]"
+            parts.append(f"{name}={value}")
+    return " | ".join(parts) if parts else "sin_campos_relevantes"
 
 
 async def main() -> None:
@@ -42,7 +81,20 @@ async def main() -> None:
             try:
                 if "sri.gob.ec" not in request.url:
                     return
+
                 log(f"REQUEST {request.method} {request.url}")
+
+                if (
+                    request.method == "POST"
+                    and "comprobantesRecibidos.jsf" in request.url
+                ):
+                    headers = request.headers
+                    log(
+                        "POST_HEADERS "
+                        f"Faces-Request={headers.get('faces-request', '')} | "
+                        f"X-Requested-With={headers.get('x-requested-with', '')}"
+                    )
+                    log("POST_DATA " + safe_post_data(request.post_data or ""))
             except Exception as exc:
                 log(f"REQUEST ERROR {type(exc).__name__}: {exc}")
 
@@ -50,6 +102,7 @@ async def main() -> None:
             try:
                 if "sri.gob.ec" not in response.url:
                     return
+
                 if response.request.method == "POST" or any(
                     x in response.url.lower()
                     for x in ("comprobantesrecibidos", "j_security_check", "recaptcha")
@@ -59,6 +112,25 @@ async def main() -> None:
                         f"{response.url} | content_type="
                         f"{response.headers.get('content-type', '')}"
                     )
+
+                    if (
+                        response.request.method == "POST"
+                        and "comprobantesRecibidos.jsf" in response.url
+                    ):
+                        try:
+                            body = await response.text()
+                            keys = len(re.findall(r"\b\d{49}\b", body))
+                            panel = "frmPrincipal:panelListaComprobantes" in body
+                            captcha = "captcha" in body.lower()
+                            log(
+                                "POST_RESULT "
+                                f"panel={'SI' if panel else 'NO'} | "
+                                f"claves_49_digitos={keys} | "
+                                f"menciona_captcha={'SI' if captcha else 'NO'} | "
+                                f"bytes={len(body.encode('utf-8', errors='ignore'))}"
+                            )
+                        except Exception as exc:
+                            log(f"POST_RESULT ERROR {type(exc).__name__}: {exc}")
             except Exception as exc:
                 log(f"RESPONSE ERROR {type(exc).__name__}: {exc}")
 
@@ -68,7 +140,7 @@ async def main() -> None:
 
         log("")
         log("==============================================")
-        log(" SESIÓN MANUAL SRI")
+        log(" SESIÓN MANUAL SRI - CAPTURA DETALLADA")
         log("==============================================")
         log("La sesión ya está iniciada.")
         log("Ahora tú manejas completamente la ventana de Chromium.")
@@ -79,7 +151,8 @@ async def main() -> None:
         log("5. Puedes repetir la prueba con otros meses.")
         log("")
         log(f"LOG: {log_path.resolve()}")
-        log("Por seguridad, este registro NO guarda contraseñas, cookies, tokens ni contenido de formularios.")
+        log("Se registran únicamente parámetros JSF no sensibles y resultados resumidos.")
+        log("NO se registran contraseñas, cookies, tokens reCAPTCHA ni valores ViewState.")
         log("")
 
         await asyncio.to_thread(
