@@ -497,7 +497,7 @@ class SriClienteSyncService:
 
                             clave = factura["clave_acceso"]
                             result["sri"] += 1
-                            cls._job_update(job_id, sri=result["sri"], mensaje=f"Procesando comprobante {result[\"sri\"]}.")
+                            cls._job_update(job_id, sri=result["sri"], mensaje=f"Procesando comprobante {result['sri']}.")
                             if not clave:
                                 raise ValueError("El XML no contiene clave de acceso.")
                             if clave in procesadas:
