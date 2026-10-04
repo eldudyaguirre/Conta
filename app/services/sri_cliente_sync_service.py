@@ -127,7 +127,7 @@ class SriClienteSyncService:
 
     @classmethod
     async def _login(cls, ruc: str, clave: str):
-        headless = os.getenv("SRI_HEADLESS", "true").lower() in {"1", "true", "yes", "on"}
+        headless = settings.SRI_HEADLESS
         p = await async_playwright().start()
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context(accept_downloads=True)
