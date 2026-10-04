@@ -136,19 +136,57 @@ class SriClienteSyncService:
     @classmethod
     async def _login(cls, ruc: str, clave: str):
         p = await async_playwright().start()
-        browser = await p.chromium.launch(headless=settings.SRI_HEADLESS)
-        context = await browser.new_context(accept_downloads=True)
-        page = await context.new_page()
+        browser = None
+        context = None
+        profile_root = str(settings.SRI_USER_DATA_DIR or "").strip()
+        if profile_root:
+            profile_dir = Path(profile_root) / str(ruc)
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            context = await p.chromium.launch_persistent_context(
+                str(profile_dir),
+                headless=settings.SRI_HEADLESS,
+                channel=(settings.SRI_BROWSER_CHANNEL or "chromium").strip() or "chromium",
+                accept_downloads=True,
+                locale="es-EC",
+                viewport={"width": 1366, "height": 900},
+            )
+        else:
+            browser = await p.chromium.launch(
+                headless=settings.SRI_HEADLESS,
+                channel=(settings.SRI_BROWSER_CHANNEL or "chromium").strip() or "chromium",
+            )
+            context = await browser.new_context(
+                accept_downloads=True,
+                locale="es-EC",
+                viewport={"width": 1366, "height": 900},
+            )
+        page = context.pages[0] if context.pages else await context.new_page()
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         try:
             try:
-                await page.goto(cls.LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+                await page.goto(
+                    cls.PORTAL_URL,
+                    wait_until="domcontentloaded",
+                    timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
+                )
+                if "perfil" not in page.url and "login" not in page.url.lower():
+                    return p, browser, context, page
+            except PlaywrightTimeoutError:
+                if page.url != "about:blank" and "perfil" not in page.url and "login" not in page.url.lower():
+                    return p, browser, context, page
+
+            try:
+                await page.goto(
+                    cls.LOGIN_URL,
+                    wait_until="domcontentloaded",
+                    timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
+                )
             except PlaywrightTimeoutError as exc:
                 # El portal puede tardar en responder desde el proceso de Windows.
                 # Reintentamos una sola vez antes de declarar caída la conexión.
                 try:
                     await page.goto("https://srienlinea.sri.gob.ec/", wait_until="domcontentloaded", timeout=20000)
-                    await page.goto(cls.LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+                    await page.goto(cls.LOGIN_URL, wait_until="domcontentloaded", timeout=settings.SRI_NAVIGATION_TIMEOUT_MS)
                 except Exception as retry_exc:
                     raise RuntimeError(
                         "No se pudo abrir el portal del SRI desde Conta. "
@@ -180,9 +218,12 @@ class SriClienteSyncService:
             if "perfil" in page.url and await page.locator("#password").count():
                 raise ValueError("El SRI no aceptó las credenciales del cliente.")
             await page.goto(cls.PORTAL_URL, wait_until="domcontentloaded", timeout=60000)
-            return p, browser, page
+            return p, browser, context, page
         except Exception:
-            await browser.close()
+            if context is not None:
+                await context.close()
+            elif browser is not None:
+                await browser.close()
             await p.stop()
             raise
 
@@ -243,7 +284,7 @@ class SriClienteSyncService:
     @classmethod
     async def sincronizar_mes(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1) -> dict[str, Any]:
         cred = cls._credenciales(ruc)
-        p = browser = page = None
+        p = browser = context = page = None
         result = {
             "ruc": ruc, "cliente": cred["nombre"], "anio": anio, "mes": mes,
             "tipo_comprobante": cls._tipo(tipo_comprobante),
@@ -251,7 +292,7 @@ class SriClienteSyncService:
             "errores": [], "paginas": 0,
         }
         try:
-            p, browser, page = await cls._login(ruc, cred["clave"])
+            p, browser, context, page = await cls._login(ruc, cred["clave"])
             await cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
             db = obtener_session_cliente(ruc)
             procesadas: set[str] = set()
@@ -306,7 +347,9 @@ class SriClienteSyncService:
             finally:
                 db.close()
         finally:
-            if browser is not None:
+            if context is not None:
+                await context.close()
+            elif browser is not None:
                 await browser.close()
             if p is not None:
                 await p.stop()
