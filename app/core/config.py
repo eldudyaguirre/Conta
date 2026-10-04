@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     SRI_BROWSER_CHANNEL: str = "chromium"
     SRI_USER_DATA_DIR: str = ""
     SRI_NAVIGATION_TIMEOUT_MS: int = 45000
+    SRI_WORKER_POLL_SECONDS: int = 3
 
     # Token interno compartido con el administrador web de TotalCounts.
     # No se expone al navegador.
