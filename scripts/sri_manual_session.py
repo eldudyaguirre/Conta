@@ -6,6 +6,7 @@ import datetime as dt
 import re
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus
+from xml.etree import ElementTree as ET
 
 from app.core.config import settings
 from app.services.sri_cliente_sync_service import SriClienteSyncService
@@ -48,6 +49,30 @@ def safe_post_data(post_data: str) -> str:
     return " | ".join(parts) if parts else "sin_campos_relevantes"
 
 
+def resumir_detalle(body: str) -> list[str]:
+    encontrados: list[str] = []
+    claves = (
+        "claveAcceso", "clave de acceso", "autorizacion", "autorización",
+        "ruc", "razon social", "razón social", "proveedor", "fecha",
+        "comprobante", "establecimiento", "punto de emisión", "punto de emision",
+        "secuencial", "subtotal", "base imponible", "iva", "ice", "total",
+        "retención", "retencion",
+    )
+    texto = re.sub(r"\s+", " ", body, flags=re.S)
+    texto_lower = texto.lower()
+
+    for clave in claves:
+        pos = texto_lower.find(clave.lower())
+        if pos >= 0:
+            fragmento = texto[max(0, pos - 120): min(len(texto), pos + 350)]
+            fragmento = re.sub(r"\s+", " ", fragmento)
+            fragmento = re.sub(r"<[^>]+>", " ", fragmento)
+            fragmento = re.sub(r"\s+", " ", fragmento).strip()
+            encontrados.append(f"{clave}: {fragmento[:500]}")
+
+    return list(dict.fromkeys(encontrados))
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Inicia sesión en SRI y deja Chromium abierto para navegación manual."
@@ -81,13 +106,9 @@ async def main() -> None:
             try:
                 if "sri.gob.ec" not in request.url:
                     return
-
                 log(f"REQUEST {request.method} {request.url}")
 
-                if (
-                    request.method == "POST"
-                    and "comprobantesRecibidos.jsf" in request.url
-                ):
+                if request.method == "POST" and "comprobantesRecibidos.jsf" in request.url:
                     headers = request.headers
                     log(
                         "POST_HEADERS "
@@ -121,14 +142,24 @@ async def main() -> None:
                             body = await response.text()
                             keys = len(re.findall(r"\b\d{49}\b", body))
                             panel = "frmPrincipal:panelListaComprobantes" in body
+                            detalle = (
+                                "form-detalle-factura:panel-detalle-factura" in body
+                                or "panel-detalle-factura" in body
+                            )
                             captcha = "captcha" in body.lower()
                             log(
                                 "POST_RESULT "
                                 f"panel={'SI' if panel else 'NO'} | "
+                                f"detalle={'SI' if detalle else 'NO'} | "
                                 f"claves_49_digitos={keys} | "
                                 f"menciona_captcha={'SI' if captcha else 'NO'} | "
                                 f"bytes={len(body.encode('utf-8', errors='ignore'))}"
                             )
+
+                            if detalle:
+                                log("DETALLE_CAMPOS_INFERIDOS:")
+                                for item in resumir_detalle(body):
+                                    log("  " + item)
                         except Exception as exc:
                             log(f"POST_RESULT ERROR {type(exc).__name__}: {exc}")
             except Exception as exc:
@@ -140,18 +171,17 @@ async def main() -> None:
 
         log("")
         log("==============================================")
-        log(" SESIÓN MANUAL SRI - CAPTURA DETALLADA")
+        log(" SESIÓN MANUAL SRI - CAPTURA DE DETALLE")
         log("==============================================")
         log("La sesión ya está iniciada.")
-        log("Ahora tú manejas completamente la ventana de Chromium.")
-        log("1. Entra manualmente a Comprobantes Recibidos.")
+        log("1. Entra a Comprobantes Recibidos.")
         log("2. Selecciona año y mes.")
-        log("3. Presiona Consultar/Buscar.")
-        log("4. Espera a que SRI termine.")
-        log("5. Puedes repetir la prueba con otros meses.")
+        log("3. Presiona Buscar.")
+        log("4. Haz clic en una Clave de Acceso.")
+        log("5. Espera a que aparezca el detalle.")
         log("")
         log(f"LOG: {log_path.resolve()}")
-        log("Se registran únicamente parámetros JSF no sensibles y resultados resumidos.")
+        log("Se registran parámetros JSF seguros y un resumen de campos visibles del detalle.")
         log("NO se registran contraseñas, cookies, tokens reCAPTCHA ni valores ViewState.")
         log("")
 
