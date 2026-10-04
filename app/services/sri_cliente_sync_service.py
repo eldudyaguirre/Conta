@@ -234,25 +234,116 @@ class SriClienteSyncService:
 
     @classmethod
     async def _consultar_recibidos(cls, page, anio: int, mes: int, tipo_comprobante: int) -> None:
+        """Consulta comprobantes recibidos con tolerancia a cambios de renderizado del SRI."""
         await page.goto(cls.RECIBIDOS_URL, wait_until="domcontentloaded", timeout=30000)
-        await cls._seleccionar(page, "#frmPrincipal\\:ano", str(anio))
-        await cls._seleccionar(page, "#frmPrincipal\\:mes", str(mes))
-        await cls._seleccionar(page, "#frmPrincipal\\:dia", "0")
-        await cls._seleccionar(page, "#frmPrincipal\\:cmbTipoComprobante", str(tipo_comprobante))
-        await page.locator("#frmPrincipal\\:btnConsultarSinRe").click()
+
+        # JSF/RichFaces puede tardar en terminar de montar el formulario.
+        campos = {
+            "ano": str(anio),
+            "mes": str(mes),
+            "dia": "0",
+            "cmbTipoComprobante": str(tipo_comprobante),
+        }
+        for nombre, value in campos.items():
+            await cls._seleccionar(page, f"#frmPrincipal\\:{nombre}", value)
+
+        boton_selectores = [
+            "#frmPrincipal\\:btnConsultarSinRe",
+            "input[id$=':btnConsultarSinRe']",
+            "button[id$=':btnConsultarSinRe']",
+            "input[value*='Consultar']",
+            "button:has-text('Consultar')",
+        ]
+
+        boton = None
+        for selector in boton_selectores:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                continue
+            try:
+                await locator.wait_for(state="visible", timeout=5000)
+                boton = locator
+                break
+            except PlaywrightTimeoutError:
+                continue
+
+        if boton is None:
+            diagnostico = await cls._diagnostico_consulta(page)
+            try:
+                await page.screenshot(
+                    path=str(Path(tempfile.gettempdir()) / f"conta_sri_consulta_{anio}_{mes:02d}.png"),
+                    full_page=True,
+                )
+            except Exception:
+                pass
+            raise RuntimeError(
+                "SRI cargó la pantalla de comprobantes recibidos, pero no apareció "
+                "el botón Consultar. " + diagnostico
+            )
+
+        # Esperamos que el botón sea realmente utilizable. Playwright hace auto-wait
+        # de actionability, pero el portal JSF puede mantenerlo deshabilitado durante
+        # su inicialización. Si sigue bloqueado, force evita quedar esperando por
+        # hit-testing sin saltarse ninguna validación del SRI.
+        try:
+            await boton.scroll_into_view_if_needed(timeout=5000)
+        except Exception:
+            pass
+
+        try:
+            await boton.click(timeout=10000)
+        except PlaywrightTimeoutError:
+            try:
+                disabled = await boton.get_attribute("disabled")
+                classes = (await boton.get_attribute("class") or "").lower()
+                if disabled is not None or "disabled" in classes:
+                    await page.wait_for_timeout(3000)
+                await boton.click(timeout=10000, force=True)
+            except Exception as exc:
+                diagnostico = await cls._diagnostico_consulta(page)
+                raise RuntimeError(
+                    "SRI mostró el formulario, pero no fue posible ejecutar la consulta. "
+                    + diagnostico
+                ) from exc
 
         links = page.locator('a[id$=":lnkXml"]')
         try:
             await links.first.wait_for(state="visible", timeout=15000)
             return
         except PlaywrightTimeoutError:
+            diagnostico = await cls._diagnostico_consulta(page)
             if settings.SRI_HEADLESS:
                 raise RuntimeError(
-                    "SRI presentó reCAPTCHA para la consulta mensual. "
-                    "Configure SRI_HEADLESS=False para resolverlo en Chromium y continuar automáticamente."
+                    "SRI no devolvió la tabla de comprobantes después de Consultar. "
+                    "Es posible que haya presentado reCAPTCHA. " + diagnostico
                 )
-            print("SRI solicita reCAPTCHA. Resuélvalo en Chromium; Conta continuará automáticamente.")
+            print(
+                "SRI solicita validación/CAPTCHA después de Consultar. "
+                "Resuélvalo en Chromium; Conta continuará automáticamente."
+            )
             await links.first.wait_for(state="visible", timeout=120000)
+
+    @staticmethod
+    async def _diagnostico_consulta(page) -> str:
+        try:
+            url = page.url
+            title = await page.title()
+            body = (await page.locator("body").inner_text(timeout=3000))[:1500]
+            body = " ".join(body.split())
+            captcha = await page.locator(
+                "iframe[src*='recaptcha'], iframe[title*='reCAPTCHA'], "
+                "[class*='captcha'], [id*='captcha']"
+            ).count()
+            boton = await page.locator(
+                "#frmPrincipal\\:btnConsultarSinRe, "
+                "input[id$=':btnConsultarSinRe'], button[id$=':btnConsultarSinRe']"
+            ).count()
+            return (
+                f"URL={url}; título={title!r}; botón_consultar={boton}; "
+                f"captcha_elementos={captcha}; texto={body!r}"
+            )
+        except Exception as exc:
+            return f"Diagnóstico adicional no disponible: {exc}"
 
     @classmethod
     async def _siguiente_pagina(cls, page) -> bool:
