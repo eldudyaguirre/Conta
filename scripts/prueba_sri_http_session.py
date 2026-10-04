@@ -110,15 +110,65 @@ async def main() -> None:
             print(f"   Primeros 500 caracteres: {re.sub(r"\\s+", " ", response.text[:500]).strip()}")
 
             if 'javax.faces.ViewState' not in response.text:
-                print()
-                print("DIAGNÓSTICO:")
-                print("HTTPX conserva la sesión/cookies y recibe HTTP 200, pero el SRI no entrega")
-                print("el formulario JSF/ViewState en esta petición. No continuamos con el POST.")
-                print("Esto indica que debemos comparar la petición HTTP del navegador con HTTPX")
-                print("antes de intentar reutilizar la sesión fuera de Playwright.")
-                return
+                # El SRI puede entregar un formulario automático de
+                # j_security_check. El navegador lo envía mediante onload.
+                # Reproducimos únicamente ese flujo HTTP normal.
+                action_match = re.search(
+                    r'<form[^>]+action=[\"\']([^\"\']*j_security_check[^\"\']*)[\"\'][^>]*>',
+                    response.text,
+                    re.IGNORECASE,
+                )
+                fields = dict(
+                    re.findall(
+                        r'<input[^>]+name=[\"\']([^\"\']+)[\"\'][^>]+value=[\"\']([^\"\']*)[\"\']',
+                        response.text,
+                        re.IGNORECASE,
+                    )
+                )
 
-            http_view_state = _view_state(response.text)
+                if action_match and fields:
+                    action = action_match.group(1)
+                    if action.startswith("http"):
+                        auth_url = action
+                    else:
+                        auth_url = str(response.url).rsplit("/", 1)[0] + "/" + action.lstrip("/")
+
+                    print("   SRI devolvió j_security_check: sí")
+                    print(f"   Campos del formulario: {len(fields)}")
+
+                    auth_response = await client.post(
+                        auth_url,
+                        data=fields,
+                        headers={
+                            "Referer": str(response.url),
+                            "Origin": "https://srienlinea.sri.gob.ec",
+                        },
+                    )
+
+                    print(f"   POST j_security_check: {auth_response.status_code}")
+                    print(f"   URL después de j_security_check: {auth_response.url}")
+                    print(
+                        "   ViewState después de j_security_check: "
+                        f"{'sí' if 'javax.faces.ViewState' in auth_response.text else 'no'}"
+                    )
+                    print(f"   Respuesta final: {len(auth_response.content)} bytes")
+
+                    if 'javax.faces.ViewState' in auth_response.text:
+                        http_view_state = _view_state(auth_response.text)
+                    else:
+                        print()
+                        print("DIAGNÓSTICO:")
+                        print("HTTPX ejecutó el paso j_security_check, pero todavía no recibió el JSF.")
+                        print("No continuamos con la consulta.")
+                        return
+                else:
+                    print()
+                    print("DIAGNÓSTICO:")
+                    print("HTTPX recibió 200 pero no encontró un formulario j_security_check utilizable.")
+                    print("No continuamos con la consulta.")
+                    return
+            else:
+                http_view_state = _view_state(response.text)
 
             print("3. Enviando POST JSF de prueba sin reCAPTCHA...")
             # No se intenta falsificar ni reutilizar un token reCAPTCHA.
