@@ -173,9 +173,18 @@ class SriClienteSyncService:
             mensaje="Worker SRI activo. Iniciando navegador y conexión con el SRI.",
         )
         try:
-            resultado = await cls.sincronizar_mes(
-                ruc, anio, mes, tipo_comprobante, job_id=job_id, operacion=operacion
-            )
+            if operacion == "ventas_validar":
+                # Import local para evitar dependencia circular: el validador
+                # reutiliza los selectores y parsers del sincronizador SRI.
+                from app.services.sri_ventas_validator_service import SriVentasValidatorService
+
+                resultado = await SriVentasValidatorService.sincronizar_mes(
+                    ruc, anio, mes, tipo_comprobante, job_id=job_id
+                )
+            else:
+                resultado = await cls.sincronizar_mes(
+                    ruc, anio, mes, tipo_comprobante, job_id=job_id, operacion=operacion
+                )
             cls._job_update(
                 job_id,
                 **resultado,
