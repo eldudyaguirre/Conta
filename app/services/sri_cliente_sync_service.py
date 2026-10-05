@@ -345,18 +345,19 @@ class SriClienteSyncService:
                 if codigo != "2":
                     continue
 
-                # Para compras damos prioridad al codigoPorcentaje del SRI
-                # y usamos tarifa como respaldo. Esto evita que un XML con
-                # tarifa 0/vacía termine enviando una compra al IVA 0%.
-                tasa = codigo_a_tasa.get(codigo_pct)
-                if tasa is None:
-                    tarifa_key = format(tarifa, "f").rstrip("0").rstrip(".")
-                    if tarifa_key in {"0", "5", "8", "12", "14", "15"}:
-                        tasa = tarifa_key
+                # En compras la TARIFA es la fuente principal.
+                # Si el XML trae tarifa=15, la base debe ir a IVA 15,
+                # aunque codigoPorcentaje venga vacío, 0 o con un código
+                # que no coincida. El código queda como respaldo.
+                tarifa_key = format(tarifa, "f").rstrip("0").rstrip(".")
+                if tarifa_key in {"5", "8", "12", "14", "15"}:
+                    tasa = tarifa_key
+                else:
+                    tasa = codigo_a_tasa.get(codigo_pct)
 
-                if codigo_pct == "6":
+                if codigo_pct == "6" and tarifa_key not in {"5", "8", "12", "14", "15"}:
                     bases["no_objeto"] += base
-                elif codigo_pct == "7":
+                elif codigo_pct == "7" and tarifa_key not in {"5", "8", "12", "14", "15"}:
                     bases["exenta"] += base
                 elif tasa in {"5", "8", "12", "14", "15"}:
                     bases[tasa] += base
