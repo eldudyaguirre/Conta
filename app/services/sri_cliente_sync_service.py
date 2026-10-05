@@ -502,18 +502,13 @@ class SriClienteSyncService:
 
     @classmethod
     async def _consultar_recibidos(cls, page, anio: int, mes: int, tipo_comprobante: int) -> None:
-        """Consulta comprobantes recibidos con tolerancia a cambios de renderizado del SRI."""
-        await page.goto(cls.RECIBIDOS_URL, wait_until="domcontentloaded", timeout=30000)
-
-        # JSF/RichFaces puede tardar en terminar de montar el formulario.
+        """Consulta comprobantes recibidos usando Chrome real y reCAPTCHA Enterprise del SRI."""
         campos = {
             "ano": str(anio),
             "mes": str(mes),
             "dia": "0",
             "cmbTipoComprobante": str(tipo_comprobante),
         }
-        for nombre, value in campos.items():
-            await cls._seleccionar(page, f"#frmPrincipal\\:{nombre}", value)
 
         boton_selectores = [
             "#frmPrincipal\\:btnBuscar",
@@ -525,59 +520,106 @@ class SriClienteSyncService:
             "button:has-text('Consultar')",
         ]
 
-        boton = None
-        for selector in boton_selectores:
-            locator = page.locator(selector).first
-            if await locator.count() == 0:
-                continue
-            try:
-                await locator.wait_for(state="visible", timeout=5000)
-                boton = locator
-                break
-            except PlaywrightTimeoutError:
-                continue
+        async def preparar_formulario():
+            for nombre, value in campos.items():
+                await cls._seleccionar(page, f"#frmPrincipal\\:{nombre}", value)
 
-        if boton is None:
-            diagnostico = await cls._diagnostico_consulta(page)
-            try:
-                await page.screenshot(
-                    path=str(Path(tempfile.gettempdir()) / f"conta_sri_consulta_{anio}_{mes:02d}.png"),
-                    full_page=True,
-                )
-            except Exception:
-                pass
-            raise RuntimeError(
-                "SRI cargó la pantalla de comprobantes recibidos, pero no apareció "
-                "el botón Consultar. " + diagnostico
-            )
+            boton = None
+            for selector in boton_selectores:
+                locator = page.locator(selector).first
+                if await locator.count() == 0:
+                    continue
+                try:
+                    await locator.wait_for(state="visible", timeout=5000)
+                    boton = locator
+                    break
+                except PlaywrightTimeoutError:
+                    continue
 
-        # Esperamos que el botón sea realmente utilizable. Playwright hace auto-wait
-        # de actionability, pero el portal JSF puede mantenerlo deshabilitado durante
-        # su inicialización. Si sigue bloqueado, force evita quedar esperando por
-        # hit-testing sin saltarse ninguna validación del SRI.
-        try:
-            await boton.scroll_into_view_if_needed(timeout=5000)
-        except Exception:
-            pass
-
-        try:
-            await boton.click(timeout=10000)
-        except PlaywrightTimeoutError:
-            try:
-                disabled = await boton.get_attribute("disabled")
-                classes = (await boton.get_attribute("class") or "").lower()
-                if disabled is not None or "disabled" in classes:
-                    await page.wait_for_timeout(3000)
-                await boton.click(timeout=10000, force=True)
-            except Exception as exc:
+            if boton is None:
                 diagnostico = await cls._diagnostico_consulta(page)
                 raise RuntimeError(
-                    "SRI mostró el formulario, pero no fue posible ejecutar la consulta. "
-                    + diagnostico
-                ) from exc
+                    "SRI cargó la pantalla de comprobantes recibidos, pero no apareció "
+                    f"el botón Consultar. {diagnostico}"
+                )
+
+            return boton
+
+        async def esperar_boton_habilitado(boton, segundos: int = 30) -> bool:
+            limite = time.monotonic() + segundos
+            while time.monotonic() < limite:
+                try:
+                    if not await boton.is_disabled():
+                        disabled_attr = await boton.get_attribute("disabled")
+                        classes = (await boton.get_attribute("class") or "").lower()
+                        if disabled_attr is None and "disabled" not in classes:
+                            return True
+                except Exception:
+                    pass
+                await page.wait_for_timeout(500)
+            return False
+
+        # Primera carga.
+        await page.goto(
+            cls.RECIBIDOS_URL,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+
+        # El SRI puede cargar la página antes de terminar de inicializar
+        # reCAPTCHA Enterprise. En las pruebas manuales, un F5 hizo que el
+        # botón pasara de bloqueado a habilitado. Reproducimos ese comportamiento
+        # automáticamente, sin intervención del usuario.
+        for intento in range(1, 4):
+            boton = await preparar_formulario()
+
+            try:
+                await boton.scroll_into_view_if_needed(timeout=5000)
+            except Exception:
+                pass
+
+            if await esperar_boton_habilitado(boton, segundos=20):
+                break
+
+            if intento < 3:
+                print(
+                    f"SRI dejó Consultar bloqueado en el intento {intento}. "
+                    "Recargando la página para reinicializar reCAPTCHA Enterprise."
+                )
+                try:
+                    await page.reload(
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                except PlaywrightTimeoutError:
+                    # El portal puede tardar en terminar la navegación JSF;
+                    # seguimos y dejamos que preparar_formulario compruebe el estado.
+                    pass
+                await page.wait_for_timeout(2500)
+            else:
+                diagnostico = await cls._diagnostico_consulta(page)
+                try:
+                    await page.screenshot(
+                        path=str(Path(tempfile.gettempdir()) / f"conta_sri_bloqueado_{anio}_{mes:02d}.png"),
+                        full_page=True,
+                    )
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "SRI mantuvo el botón Consultar deshabilitado incluso después "
+                    "de recargar automáticamente la página. " + diagnostico
+                )
+
+        try:
+            await boton.click(timeout=15000)
+        except PlaywrightTimeoutError as exc:
+            diagnostico = await cls._diagnostico_consulta(page)
+            raise RuntimeError(
+                "SRI habilitó el formulario, pero no fue posible ejecutar la consulta. "
+                + diagnostico
+            ) from exc
 
         # El SRI ha cambiado varias veces el markup del enlace de descarga XML.
-        # No dependemos únicamente de a[id$=":lnkXml"].
         xml_selector = (
             'a[id*="lnkXml"], '
             'a[id$=":lnkXml"], '
@@ -588,7 +630,7 @@ class SriClienteSyncService:
         )
         links = page.locator(xml_selector)
         try:
-            await links.first.wait_for(state="visible", timeout=15000)
+            await links.first.wait_for(state="visible", timeout=20000)
             return
         except PlaywrightTimeoutError:
             diagnostico = await cls._diagnostico_consulta(page)
@@ -600,7 +642,7 @@ class SriClienteSyncService:
                 )
             print(
                 "SRI todavía no muestra los enlaces XML. "
-                "Si aparece CAPTCHA, resuélvalo en Chromium; Conta continuará automáticamente."
+                "Esperando hasta 120 segundos por la respuesta del portal."
             )
             try:
                 await links.first.wait_for(state="visible", timeout=120000)
