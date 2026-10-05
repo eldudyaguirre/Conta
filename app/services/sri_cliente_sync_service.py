@@ -328,78 +328,78 @@ class SriClienteSyncService:
             "5": "5", "8": "8",
         }
 
-        totals = inf.find("totalConImpuestos")
+        # Para compras, el SRI entrega la tarifa real en los impuestos
+        # de cada detalle. Esa estructura es la fuente principal.
         impuestos_clasificados = Decimal("0")
 
-        if totals is not None:
-            for ti in totals.findall("totalImpuesto"):
-                codigo = cls._txt(ti, "codigo")
-                tarifa = cls._dec(cls._txt(ti, "tarifa"))
-                codigo_pct = cls._txt(ti, "codigoPorcentaje")
-                base = cls._dec(cls._txt(ti, "baseImponible"))
-                valor = cls._dec(cls._txt(ti, "valor"))
+        for impuesto in inf.findall(".//detalle/impuestos/impuesto"):
+            codigo = cls._txt(impuesto, "codigo")
+            if codigo != "2":
+                continue
 
-                if codigo == "3":
-                    ice += valor
-                    continue
-                if codigo != "2":
-                    continue
+            codigo_pct = cls._txt(impuesto, "codigoPorcentaje")
+            tarifa = cls._dec(cls._txt(impuesto, "tarifa"))
+            base = cls._dec(cls._txt(impuesto, "baseImponible"))
+            valor = cls._dec(cls._txt(impuesto, "valor"))
 
-                # En compras la TARIFA es la fuente principal.
-                # Si el XML trae tarifa=15, la base debe ir a IVA 15,
-                # aunque codigoPorcentaje venga vacío, 0 o con un código
-                # que no coincida. El código queda como respaldo.
-                tarifa_key = format(tarifa, "f").rstrip("0").rstrip(".")
-                if tarifa_key in {"5", "8", "12", "14", "15"}:
-                    tasa = tarifa_key
-                else:
-                    tasa = codigo_a_tasa.get(codigo_pct)
-
-                if codigo_pct == "6" and tarifa_key not in {"5", "8", "12", "14", "15"}:
-                    bases["no_objeto"] += base
-                elif codigo_pct == "7" and tarifa_key not in {"5", "8", "12", "14", "15"}:
-                    bases["exenta"] += base
-                elif tasa in {"5", "8", "12", "14", "15"}:
-                    bases[tasa] += base
-                    ivas[tasa] += valor
-                    impuestos_clasificados += base
-                elif tasa == "0":
-                    bases["0"] += base
-                else:
-                    bases["no_objeto"] += base
-
-        # Algunos XML de comprobantes recibidos pueden traer correctamente
-        # la tarifa en cada detalle, aunque totalConImpuestos venga incompleto
-        # o con codigoPorcentaje 0. Si no encontramos ninguna base gravada
-        # arriba, reconstruimos las bases desde los impuestos de los detalles.
-        if impuestos_clasificados == 0:
-            detalle_bases = {k: Decimal("0") for k in ("5", "8", "12", "14", "15")}
-            detalle_ivas = {k: Decimal("0") for k in ("5", "8", "12", "14", "15")}
-
-            for impuesto in inf.findall(".//detalle/impuestos/impuesto"):
-                codigo = cls._txt(impuesto, "codigo")
-                if codigo != "2":
-                    continue
-
-                codigo_pct = cls._txt(impuesto, "codigoPorcentaje")
-                tarifa = cls._dec(cls._txt(impuesto, "tarifa"))
-                base = cls._dec(cls._txt(impuesto, "baseImponible"))
-                valor = cls._dec(cls._txt(impuesto, "valor"))
-
+            tarifa_key = format(tarifa, "f").rstrip("0").rstrip(".")
+            if tarifa_key in {"5", "8", "12", "14", "15"}:
+                tasa = tarifa_key
+            else:
                 tasa = codigo_a_tasa.get(codigo_pct)
-                if tasa is None:
+
+            if tasa in {"5", "8", "12", "14", "15"}:
+                bases[tasa] += base
+                ivas[tasa] += valor
+                impuestos_clasificados += base
+            elif tasa == "0":
+                bases["0"] += base
+            elif codigo_pct == "6":
+                bases["no_objeto"] += base
+            elif codigo_pct == "7":
+                bases["exenta"] += base
+            else:
+                bases["no_objeto"] += base
+
+        # Respaldo: si el XML no trae impuestos dentro de los detalles,
+        # usamos totalConImpuestos. En los XML normales de compras no se
+        # llega aquí, pero permite procesar comprobantes con estructura
+        # incompleta.
+        if impuestos_clasificados == 0:
+            totals = inf.find("totalConImpuestos")
+            if totals is not None:
+                for ti in totals.findall("totalImpuesto"):
+                    codigo = cls._txt(ti, "codigo")
+                    if codigo == "3":
+                        ice += cls._dec(cls._txt(ti, "valor"))
+                        continue
+                    if codigo != "2":
+                        continue
+
+                    codigo_pct = cls._txt(ti, "codigoPorcentaje")
+                    tarifa = cls._dec(cls._txt(ti, "tarifa"))
+                    base = cls._dec(cls._txt(ti, "baseImponible"))
+                    valor = cls._dec(cls._txt(ti, "valor"))
+
                     tarifa_key = format(tarifa, "f").rstrip("0").rstrip(".")
-                    if tarifa_key in {"5", "8", "12", "14", "15"}:
-                        tasa = tarifa_key
+                    tasa = (
+                        tarifa_key
+                        if tarifa_key in {"0", "5", "8", "12", "14", "15"}
+                        else codigo_a_tasa.get(codigo_pct)
+                    )
 
-                if tasa in detalle_bases:
-                    detalle_bases[tasa] += base
-                    detalle_ivas[tasa] += valor
+                    if tasa in {"5", "8", "12", "14", "15"}:
+                        bases[tasa] += base
+                        ivas[tasa] += valor
+                    elif tasa == "0":
+                        bases["0"] += base
+                    elif codigo_pct == "6":
+                        bases["no_objeto"] += base
+                    elif codigo_pct == "7":
+                        bases["exenta"] += base
+                    else:
+                        bases["no_objeto"] += base
 
-            for tasa in detalle_bases:
-                if detalle_bases[tasa]:
-                    bases[tasa] = detalle_bases[tasa]
-                    ivas[tasa] = detalle_ivas[tasa]
 
         pagos = inf.find("pagos")
         formas = [] if pagos is None else [cls._txt(p, "formaPago") for p in pagos.findall("pago")]
