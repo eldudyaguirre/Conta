@@ -1,3 +1,11 @@
+import os
+
+# PostgreSQL 16: registrar explícitamente las DLL nativas antes de importar
+# SQLAlchemy/psycopg2. Es necesario cuando Conta corre como servicio de Windows.
+_POSTGRES_BIN = r"C:\Program Files\PostgreSQL\16\bin"
+if os.path.isdir(_POSTGRES_BIN):
+    os.add_dll_directory(_POSTGRES_BIN)
+
 from fastapi import FastAPI
 from sqlalchemy import text
 
