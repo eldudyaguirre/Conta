@@ -180,7 +180,7 @@ class SriClienteSyncService:
         cls._ensure_jobs_table()
         with engine.begin() as db:
             row = db.execute(text(f"""
-                SELECT job_id, ruc, anio, mes, tipo_comprobante
+                SELECT job_id, ruc, anio, mes, tipo_comprobante, operacion
                 FROM {cls.JOB_TABLE}
                 WHERE estado = 'pendiente'
                 ORDER BY creado
