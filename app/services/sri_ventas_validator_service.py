@@ -106,6 +106,8 @@ class SriVentasValidatorService:
                 }).scalar_one()
 
                 result["dias_revisados"] += 1
+                if cantidad_sri == cantidad_bd:
+                    result["dias_ok"] += 1
                 dia_info = {
                     "fecha": fecha_txt,
                     "sri": int(cantidad_sri),
@@ -115,9 +117,29 @@ class SriVentasValidatorService:
                     "sobrantes": 0,
                 }
 
+                SriClienteSyncService._job_update(
+                    job_id,
+                    dias_revisados=result["dias_revisados"],
+                    dias_ok=result["dias_ok"],
+                    dias_diferentes=result["dias_diferentes"],
+                    mensaje=(
+                        f"Comparación {fecha_ui}: SRI={cantidad_sri}, BD={cantidad_bd} — "
+                        f"{'OK' if cantidad_sri == cantidad_bd else 'DIFERENCIA'}."
+                    ),
+                )
+
                 if cantidad_sri != cantidad_bd:
                     result["dias_diferentes"] += 1
                     SriClienteSyncService._job_update(
+                        job_id,
+                        dias_revisados=result["dias_revisados"],
+                        dias_ok=result["dias_ok"],
+                        dias_diferentes=result["dias_diferentes"],
+                        mensaje=(
+                            f"Diferencia {fecha_ui}: SRI={cantidad_sri}, "
+                            f"BD={cantidad_bd}. Revisando factura por factura."
+                        ),
+                    )
                         job_id,
                         mensaje=(
                             f"Diferencia {fecha_ui}: SRI={cantidad_sri}, "
@@ -137,6 +159,8 @@ class SriVentasValidatorService:
 
                     SriClienteSyncService._job_update(
                         job_id,
+                        faltantes=result["faltantes"],
+                        sobrantes=result["sobrantes"],
                         guardadas=result["guardadas"],
                         descargadas=result["descargadas"],
                         mensaje=(
@@ -146,6 +170,15 @@ class SriVentasValidatorService:
                     )
 
                 result["detalle_dias"].append(dia_info)
+                SriClienteSyncService._job_update(
+                    job_id,
+                    dias_revisados=result["dias_revisados"],
+                    dias_ok=result["dias_ok"],
+                    dias_diferentes=result["dias_diferentes"],
+                    faltantes=result["faltantes"],
+                    sobrantes=result["sobrantes"],
+                    detalle=json.dumps(result["detalle_dias"], ensure_ascii=False, default=str),
+                )
 
             detalle = json.dumps(
                 result["detalle_dias"],
