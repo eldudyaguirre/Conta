@@ -351,6 +351,47 @@ class SriClienteSyncService:
             f"Último error: {ultimo_error}"
         )
 
+    @staticmethod
+    def _cerrar_chrome(chrome_process) -> None:
+        """Cierra de forma segura el Chrome SRI que abrió Conta."""
+        if chrome_process is None:
+            return
+
+        pid = getattr(chrome_process, "pid", None)
+        try:
+            if chrome_process.poll() is None:
+                chrome_process.terminate()
+                try:
+                    chrome_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    chrome_process.kill()
+                    try:
+                        chrome_process.wait(timeout=3)
+                    except Exception:
+                        pass
+
+            # En Windows, si el proceso principal dejó procesos hijos de Chrome
+            # abiertos, cerramos únicamente el árbol del PID que Conta inició.
+            if pid and chrome_process.poll() is None:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+        except Exception:
+            # El cierre nunca debe convertir una sincronización exitosa en error.
+            try:
+                if pid:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+            except Exception:
+                pass
+
     @classmethod
     async def _login(cls, ruc: str, clave: str):
         p = await async_playwright().start()
@@ -483,15 +524,7 @@ class SriClienteSyncService:
                     await context.close()
                 except Exception:
                     pass
-            if chrome_process is not None:
-                try:
-                    chrome_process.terminate()
-                    chrome_process.wait(timeout=5)
-                except Exception:
-                    try:
-                        chrome_process.kill()
-                    except Exception:
-                        pass
+            cls._cerrar_chrome(chrome_process)
             await p.stop()
             raise
 
@@ -841,15 +874,7 @@ class SriClienteSyncService:
                     await context.close()
                 except Exception:
                     pass
-            if chrome_process is not None:
-                try:
-                    chrome_process.terminate()
-                    chrome_process.wait(timeout=5)
-                except Exception:
-                    try:
-                        chrome_process.kill()
-                    except Exception:
-                        pass
+            cls._cerrar_chrome(chrome_process)
             if p is not None:
                 await p.stop()
 
