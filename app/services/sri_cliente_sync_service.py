@@ -734,13 +734,11 @@ class SriClienteSyncService:
             return format(tasa, "f").rstrip("0").rstrip(".")
 
         # El SRI genera una tabla de impuestos por cada línea del detalle.
-        # Solo esas tablas alimentan las bases/IVA por tarifa. La tabla de
-        # totales del comprobante se ignora para evitar duplicar importes.
+        # No dependemos únicamente del ID de la tabla: el portal puede cambiar
+        # ese ID entre versiones. Detectamos estructuralmente la cabecera fiscal.
+        tablas_impuestos_vistas: set[str] = set()
         for tabla in soup.find_all("table"):
             tabla_id = tabla.get("id") or ""
-            if "tabla-impuestos-detalle-factura" not in tabla_id:
-                continue
-
             filas = tabla.find_all("tr")
             indice_encabezado = None
             encabezados: list[str] = []
@@ -749,10 +747,22 @@ class SriClienteSyncService:
                 textos = [_txt(c) for c in fila.find_all(["td", "th"])]
                 textos = [t for t in textos if t]
                 normalizados = [t.lower().rstrip(":").strip() for t in textos]
+                requeridos = {"impuesto", "porcentaje", "tarifa", "base imponible", "valor"}
+                if len(normalizados) >= 5 and requeridos.issubset(set(normalizados)):
+                    indice_encabezado = indice
+                    encabezados = normalizados
+                    break
 
-                if len(normalizados) >= 5:
-                    requeridos = {"impuesto", "porcentaje", "tarifa", "base imponible", "valor"}
-                    if requeridos.issubset(set(normalizados)):
+            # Compatibilidad con la estructura conocida del SRI aunque la
+            # cabecera no sea perfectamente detectable.
+            if indice_encabezado is None and "tabla-impuestos-detalle-factura" in tabla_id:
+                for indice, fila in enumerate(filas):
+                    textos = [_txt(c) for c in fila.find_all(["td", "th"])]
+                    textos = [t for t in textos if t]
+                    normalizados = [t.lower().rstrip(":").strip() for t in textos]
+                    if len(normalizados) >= 5 and all(
+                        x in normalizados for x in ("impuesto", "porcentaje", "tarifa", "base imponible", "valor")
+                    ):
                         indice_encabezado = indice
                         encabezados = normalizados
                         break
@@ -778,6 +788,12 @@ class SriClienteSyncService:
                 tasa = _canon_tasa(textos[pos_porcentaje]) or _canon_tasa(textos[pos_tarifa])
                 if tasa not in {"5", "8", "12", "14", "15"}:
                     continue
+
+                clave_fila = "|".join((tasa, textos[pos_base], textos[pos_valor]))
+                clave_tabla = f"{tabla_id}|{clave_fila}"
+                if clave_tabla in tablas_impuestos_vistas:
+                    continue
+                tablas_impuestos_vistas.add(clave_tabla)
 
                 pares.append((f"Base imponible IVA {tasa}%", textos[pos_base]))
                 pares.append((f"Valor IVA {tasa}%", textos[pos_valor]))
@@ -926,8 +942,8 @@ class SriClienteSyncService:
                 if len(tasas_con_iva) == 1:
                     bases_iva[tasas_con_iva[0]] = subtotal
                     baseiva_total = subtotal
-            elif subtotal:
-                base0 = subtotal
+            # Un subtotal genérico NO significa IVA 0%. Solo base0 se
+            # llena cuando el SRI lo identificó explícitamente como 0%.
 
         return {
             "clave_acceso": val("Clave de acceso"),
