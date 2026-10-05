@@ -896,7 +896,6 @@ class SriClienteSyncService:
                 lambda response: (
                     "recuperarComprobantes.jsf" in response.url
                     and response.request.method == "POST"
-                    and response.request.headers.get("Faces-Request", "").lower() == "partial/ajax"
                 ),
                 timeout=30000,
             ) as espera_respuesta:
@@ -920,22 +919,7 @@ class SriClienteSyncService:
                     return panel_html
 
         except Exception:
-            # Fallback: si Playwright no alcanza a capturar la respuesta por
-            # una variación de RichFaces, esperamos el diálogo ya actualizado.
-            pass
-
-        # Fallback de compatibilidad con la interfaz visual del SRI.
-        for _ in range(60):
-            await page.wait_for_timeout(500)
-            dialogs = page.locator(".ui-dialog:visible")
-            for i in range(await dialogs.count()):
-                dialogo = dialogs.nth(i)
-                html = await dialogo.inner_html()
-                if "Espere por favor" not in html and "Clave de acceso" in html:
-                    boton = dialogo.locator(".ui-dialog-titlebar-close")
-                    if await boton.count():
-                        await boton.click()
-                    return html
+            return None
 
         return None
 
