@@ -578,13 +578,35 @@ class SriClienteSyncService:
             except Exception:
                 pass
 
-            if await esperar_boton_habilitado(boton, segundos=20):
+            if await esperar_boton_habilitado(boton, segundos=5):
+                break
+
+            # El formulario del SRI llega inicialmente con Consultar deshabilitado.
+            # El propio portal expone rcBuscar(), una llamada PrimeFaces AJAX que
+            # inicializa el formulario y, en su onsuccess, ejecuta:
+            #   reactivarBoton('frmPrincipal:btnBuscar')
+            #   resetarRecaptcha('SI')
+            # En Chrome real + CDP comprobamos que esta es la inicialización que
+            # deja el botón habilitado. No forzamos disabled=false desde Conta:
+            # dejamos que sea el JavaScript del SRI quien lo reactive.
+            inicializado = await page.evaluate("""
+                () => {
+                    if (typeof rcBuscar !== "function") {
+                        return false;
+                    }
+                    rcBuscar();
+                    return true;
+                }
+            """)
+
+            if inicializado and await esperar_boton_habilitado(boton, segundos=30):
+                print("SRI inicializó el formulario mediante rcBuscar(); Consultar habilitado.")
                 break
 
             if intento < 3:
                 print(
                     f"SRI dejó Consultar bloqueado en el intento {intento}. "
-                    "Recargando la página para reinicializar reCAPTCHA Enterprise."
+                    "Reintentando la inicialización del formulario."
                 )
                 try:
                     await page.reload(
@@ -592,8 +614,6 @@ class SriClienteSyncService:
                         timeout=30000,
                     )
                 except PlaywrightTimeoutError:
-                    # El portal puede tardar en terminar la navegación JSF;
-                    # seguimos y dejamos que preparar_formulario compruebe el estado.
                     pass
                 await page.wait_for_timeout(2500)
             else:
@@ -606,8 +626,8 @@ class SriClienteSyncService:
                 except Exception:
                     pass
                 raise RuntimeError(
-                    "SRI mantuvo el botón Consultar deshabilitado incluso después "
-                    "de recargar automáticamente la página. " + diagnostico
+                    "SRI mantuvo el botón Consultar deshabilitado después de "
+                    "inicializar rcBuscar() y reintentar la página. " + diagnostico
                 )
 
         try:
