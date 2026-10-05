@@ -609,45 +609,48 @@ class SriClienteSyncService:
             wait_until="domcontentloaded",
             timeout=30000,
         )
+        try:
+            await page.wait_for_load_state("load", timeout=20000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(3000)
 
+        # En el SRI la carga del JavaScript de reCAPTCHA puede ocurrir después
+        # de DOMContentLoaded. No dependemos de que el botón aparezca habilitado:
+        # primero dejamos que el propio rcBuscar inicialice el formulario.
         for intento in range(1, 4):
             boton = await preparar_formulario()
 
-            try:
-                await boton.scroll_into_view_if_needed(timeout=5000)
-            except Exception:
-                pass
-
-            if await esperar_boton_habilitado(boton, segundos=5):
-                break
-
-            inicializado = await page.evaluate("""
-                () => {
-                    if (typeof rcBuscar !== "function") {
-                        return false;
+            if await page.evaluate("() => typeof rcBuscar === 'function'"):
+                await page.evaluate("""
+                    () => {
+                        console.log("CONTA: ejecutando rcBuscar() para inicializar SRI");
+                        rcBuscar();
                     }
-                    rcBuscar();
-                    return true;
-                }
-            """)
+                """)
+                await page.wait_for_timeout(3000)
 
-            if inicializado and await esperar_boton_habilitado(boton, segundos=30):
+            if await esperar_boton_habilitado(boton, segundos=30):
                 print("SRI inicializó el formulario mediante rcBuscar(); Consultar habilitado.")
                 break
 
+            # Si el SRI todavía mantiene el botón bloqueado, recargamos esperando
+            # el evento load completo. Esto reproduce de forma controlada el F5
+            # que manualmente permitió continuar.
             if intento < 3:
                 print(
-                    f"SRI dejó Consultar bloqueado en el intento {intento}. "
-                    "Reintentando la inicialización del formulario."
+                    f"SRI mantuvo Consultar bloqueado en intento {intento}. "
+                    "Recargando y esperando la inicialización completa de reCAPTCHA."
                 )
                 try:
-                    await page.reload(
-                        wait_until="domcontentloaded",
-                        timeout=30000,
-                    )
+                    await page.reload(wait_until="domcontentloaded", timeout=30000)
                 except PlaywrightTimeoutError:
                     pass
-                await page.wait_for_timeout(2500)
+                try:
+                    await page.wait_for_load_state("load", timeout=20000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(5000)
             else:
                 diagnostico = await cls._diagnostico_consulta(page)
                 try:
@@ -659,7 +662,8 @@ class SriClienteSyncService:
                     pass
                 raise RuntimeError(
                     "SRI mantuvo el botón Consultar deshabilitado después de "
-                    "inicializar rcBuscar() y reintentar la página. " + diagnostico
+                    "inicializar rcBuscar() y esperar la carga completa de la página. "
+                    + diagnostico
                 )
 
         # Importante: el click genera primero un AJAX sin token. Después,
