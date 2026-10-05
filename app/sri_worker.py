@@ -24,6 +24,11 @@ async def main() -> None:
         try:
             trabajo = SriClienteSyncService.obtener_trabajo_pendiente()
             if trabajo:
+                SriClienteSyncService._iva_debug_log(
+                    "WORKER | trabajo reclamado | job_id=%s | ruc=%s | anio=%s | mes=%s | tipo=%s | operacion=%s",
+                    trabajo["job_id"], trabajo["ruc"], trabajo["anio"], trabajo["mes"],
+                    trabajo["tipo_comprobante"], trabajo.get("operacion") or "compras",
+                )
                 logger.info(
                     "Trabajo %s reclamado: RUC=%s año=%s mes=%s tipo=%s",
                     trabajo["job_id"],
