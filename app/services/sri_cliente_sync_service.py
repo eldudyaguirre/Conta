@@ -609,88 +609,95 @@ class SriClienteSyncService:
         soup = BeautifulSoup(html, "html.parser")
         cab: dict[str, str] = {}
         pares: list[tuple[str, str]] = []
-        tablas_impuestos_procesadas: set[str] = set()
 
+        def _txt(celda) -> str:
+            return " ".join(celda.get_text(" ", strip=True).split())
+
+        def _canon_tasa(valor: str) -> str | None:
+            match = re.fullmatch(r"(\\d+(?:[.,]\\d+)?)\\s*%?", str(valor or "").strip())
+            if not match:
+                return None
+            tasa = cls._dec(match.group(1))
+            return format(tasa, "f").rstrip("0").rstrip(".")
+
+        # El SRI genera una tabla de impuestos por cada línea del detalle.
+        # Solo esas tablas alimentan las bases/IVA por tarifa. La tabla de
+        # totales del comprobante se ignora para evitar duplicar importes.
         for tabla in soup.find_all("table"):
-            # El SRI genera una tabla de impuestos por cada línea del detalle.
-            # RichFaces puede mantener copias ocultas de una misma tabla en el
-            # DOM. Procesamos cada ID de tabla una sola vez para no duplicar
-            # 100+20 como 200+40.
             tabla_id = tabla.get("id") or ""
-            if "tabla-impuestos-detalle-factura" in tabla_id:
-                if tabla_id in tablas_impuestos_procesadas:
-                    continue
-                tablas_impuestos_procesadas.add(tabla_id)
-
-                filas_impuesto = tabla.find_all("tr")
-                encabezados_impuesto: list[str] = []
-                for fila in filas_impuesto:
-                    celdas = fila.find_all(["td", "th"])
-                    textos = [" ".join(c.get_text(" ", strip=True).split()) for c in celdas]
-                    if not textos:
-                        continue
-
-                    if not encabezados_impuesto:
-                        encabezados_impuesto = [t.rstrip(":") for t in textos]
-                        if not all(
-                            x.lower() in {"impuesto", "porcentaje", "tarifa", "base imponible", "valor"}
-                            for x in encabezados_impuesto
-                        ):
-                            encabezados_impuesto = []
-                            continue
-                        continue
-
-                    if len(textos) != len(encabezados_impuesto):
-                        continue
-
-                    mapa = dict(zip(encabezados_impuesto, textos))
-                    impuesto = mapa.get("Impuesto", "").strip().upper()
-                    porcentaje = mapa.get("Porcentaje", "").strip()
-                    tarifa = mapa.get("Tarifa", "").strip()
-                    base = mapa.get("Base Imponible", "").strip()
-                    valor = mapa.get("Valor", "").strip()
-
-                    match_tasa = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%?", porcentaje)
-                    if not match_tasa:
-                        match_tasa = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%?", tarifa)
-
-                    if match_tasa and impuesto == "IVA":
-                        tasa_decimal = cls._dec(match_tasa.group(1))
-                        tasa_canonica = format(tasa_decimal, "f").rstrip("0").rstrip(".")
-                        pares.append((f"Base imponible IVA {tasa_canonica}%", base))
-                        pares.append((f"Valor IVA {tasa_canonica}%", valor))
+            if "tabla-impuestos-detalle-factura" not in tabla_id:
                 continue
 
+            filas = tabla.find_all("tr")
+            indice_encabezado = None
             encabezados: list[str] = []
+
+            for indice, fila in enumerate(filas):
+                textos = [_txt(c) for c in fila.find_all(["td", "th"])]
+                textos = [t for t in textos if t]
+                normalizados = [t.lower().rstrip(":").strip() for t in textos]
+
+                if len(normalizados) >= 5:
+                    requeridos = {"impuesto", "porcentaje", "tarifa", "base imponible", "valor"}
+                    if requeridos.issubset(set(normalizados)):
+                        indice_encabezado = indice
+                        encabezados = normalizados
+                        break
+
+            if indice_encabezado is None:
+                continue
+
+            pos_impuesto = encabezados.index("impuesto")
+            pos_porcentaje = encabezados.index("porcentaje")
+            pos_tarifa = encabezados.index("tarifa")
+            pos_base = encabezados.index("base imponible")
+            pos_valor = encabezados.index("valor")
+
+            for fila in filas[indice_encabezado + 1:]:
+                textos = [_txt(c) for c in fila.find_all(["td", "th"])]
+                textos = [t for t in textos if t]
+                if len(textos) <= max(pos_impuesto, pos_porcentaje, pos_tarifa, pos_base, pos_valor):
+                    continue
+
+                if textos[pos_impuesto].upper().strip() != "IVA":
+                    continue
+
+                tasa = _canon_tasa(textos[pos_porcentaje]) or _canon_tasa(textos[pos_tarifa])
+                if tasa not in {"5", "8", "12", "14", "15"}:
+                    continue
+
+                pares.append((f"Base imponible IVA {tasa}%", textos[pos_base]))
+                pares.append((f"Valor IVA {tasa}%", textos[pos_valor]))
+
+        # Las demás tablas se usan solo para cabecera y valores generales.
+        # Nunca volvemos a interpretar las tablas de impuestos como pares
+        # genéricos, porque eso puede mandar una base gravada a baseiva0.
+        for tabla in soup.find_all("table"):
+            tabla_id = tabla.get("id") or ""
+            if "tabla-impuestos-detalle-factura" in tabla_id:
+                continue
+
             for fila in tabla.find_all("tr"):
-                celdas = fila.find_all(["td", "th"])
-                textos = [" ".join(c.get_text(" ", strip=True).split()) for c in celdas]
+                textos = [_txt(c) for c in fila.find_all(["td", "th"])]
                 textos = [t for t in textos if t]
                 if not textos:
                     continue
 
-                if len(textos) >= 2:
-                    if len(textos) == 2:
-                        etiqueta, valor = textos[0].rstrip(":"), textos[1]
-                        pares.append((etiqueta, valor))
-                        cab[etiqueta] = valor
-                    elif len(textos) == 3:
-                        etiqueta, tarifa, valor = textos[0].rstrip(":"), textos[1].strip(), textos[2]
-                        match_tasa = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%", tarifa)
-                        if match_tasa:
-                            tasa_decimal = cls._dec(match_tasa.group(1))
-                            tasa_canonica = format(tasa_decimal, "f").rstrip("0").rstrip(".")
-                            pares.append((f"{etiqueta} {tasa_canonica}%", valor))
-                        else:
-                            pares.append((etiqueta, valor))
-                            pares.append((tarifa, valor))
-                    elif len(textos) % 2 == 0:
-                        for pos in range(0, len(textos), 2):
-                            pares.append((textos[pos].rstrip(":"), textos[pos + 1]))
+                if len(textos) == 2:
+                    etiqueta, valor = textos[0].rstrip(":"), textos[1]
+                    pares.append((etiqueta, valor))
+                    cab[etiqueta] = valor
+                elif len(textos) == 3:
+                    etiqueta, tarifa, valor = textos[0].rstrip(":"), textos[1].strip(), textos[2]
+                    tasa = _canon_tasa(tarifa)
+                    if tasa:
+                        pares.append((f"{etiqueta} {tasa}%", valor))
                     else:
-                        valor_ultimo = textos[-1]
-                        for etiqueta in textos[:-1]:
-                            pares.append((etiqueta.rstrip(":"), valor_ultimo))
+                        pares.append((etiqueta, valor))
+                elif len(textos) % 2 == 0:
+                    for pos in range(0, len(textos), 2):
+                        pares.append((textos[pos].rstrip(":"), textos[pos + 1]))
+                # Las tablas de totales de 5 columnas se ignoran aquí.
 
         def normalizar(s: str) -> str:
             return " ".join(s.lower().replace(":", " ").split())
