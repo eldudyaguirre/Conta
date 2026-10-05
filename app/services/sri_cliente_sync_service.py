@@ -94,6 +94,13 @@ class SriClienteSyncService:
             db.execute(text(
                 f"ALTER TABLE {cls.JOB_TABLE} ADD COLUMN IF NOT EXISTS operacion VARCHAR(30) NOT NULL DEFAULT 'compras'"
             ))
+            for columna in (
+                "dias_revisados", "dias_ok", "dias_diferentes", "faltantes", "sobrantes"
+            ):
+                db.execute(text(
+                    f"ALTER TABLE {cls.JOB_TABLE} "
+                    f"ADD COLUMN IF NOT EXISTS {columna} INTEGER NOT NULL DEFAULT 0"
+                ))
             db.execute(text(
                 f"CREATE INDEX IF NOT EXISTS idx_{cls.JOB_TABLE}_estado "
                 f"ON {cls.JOB_TABLE}(estado, creado)"
