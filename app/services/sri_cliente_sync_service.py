@@ -42,6 +42,14 @@ def _iva_debug_log(message: str, *args: Any) -> None:
         pass
 
 
+# Marca de carga del módulo para confirmar qué proceso está ejecutando este archivo.
+_iva_debug_log(
+    "MODULO CARGADO | archivo=%s | log=%s",
+    str(Path(__file__).resolve()),
+    str(IVA_DEBUG_LOG),
+)
+
+
 class SriJobCancelado(Exception):
     """Señala que un trabajo SRI fue cancelado por el usuario."""
 
@@ -1447,6 +1455,10 @@ class SriClienteSyncService:
 
     @classmethod
     async def sincronizar_mes(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, job_id: str | None = None, operacion: str = "compras") -> dict[str, Any]:
+        _iva_debug_log(
+            "SINCRONIZAR MES | ruc=%s | anio=%s | mes=%s | tipo=%s | operacion=%s | servicio=%s",
+            ruc, anio, mes, tipo_comprobante, operacion, str(Path(__file__).resolve()),
+        )
         cred = cls._credenciales(ruc)
         p = browser = context = page = chrome_process = None
         result = {
