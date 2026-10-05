@@ -1078,6 +1078,7 @@ class SriClienteSyncService:
     async def _procesar_emitidos_ventas(cls, page, db, result, job_id, procesadas, anio: int, mes: int) -> None:
         """Consulta y procesa todas las fechas del mes de comprobantes emitidos."""
         import calendar
+        from datetime import date
 
         ultimo_dia = calendar.monthrange(anio, mes)[1]
         # Reanudar desde el último día guardado, reprocesando ese día
