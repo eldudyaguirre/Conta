@@ -624,15 +624,40 @@ class SriClienteSyncService:
                 ]
                 textos = [t for t in textos if t]
                 if len(textos) >= 2:
-                    # Estructuras de 2 columnas: etiqueta | valor.
+                    # El detalle del SRI puede venir como:
+                    #   etiqueta | valor
+                    #   etiqueta | tarifa | valor
+                    #   etiqueta1 | valor1 | etiqueta2 | valor2
+                    # La versión anterior asociaba todas las etiquetas al
+                    # último valor de la fila y por eso podía confundir una
+                    # tarifa (15) con un importe o llevar el subtotal gravado
+                    # a baseiva0.
                     if len(textos) == 2:
-                        pares.append((textos[0].rstrip(":"), textos[1]))
-                        cab[textos[0].rstrip(":")] = textos[1]
+                        etiqueta = textos[0].rstrip(":")
+                        valor = textos[1]
+                        pares.append((etiqueta, valor))
+                        cab[etiqueta] = valor
+                    elif len(textos) == 3:
+                        etiqueta = textos[0].rstrip(":")
+                        tarifa = textos[1].strip()
+                        valor = textos[2]
+                        # Ej.: SUBTOTAL | 15% | 36.93
+                        # Conservamos "SUBTOTAL 15%" como etiqueta real.
+                        if re.fullmatch(r"\\d+(?:[.,]\\d+)?%", tarifa):
+                            pares.append((f"{etiqueta} {tarifa}", valor))
+                        else:
+                            pares.append((etiqueta, valor))
+                            pares.append((tarifa, valor))
+                    elif len(textos) % 2 == 0:
+                        # Tablas de cuatro/seis/etc. columnas:
+                        # etiqueta | valor | etiqueta | valor.
+                        for pos in range(0, len(textos), 2):
+                            pares.append((
+                                textos[pos].rstrip(":"),
+                                textos[pos + 1],
+                            ))
                     else:
-                        # Algunas tablas tienen columnas adicionales. En ese
-                        # caso el último valor de la fila suele ser el importe;
-                        # asociamos cada texto anterior con ese último valor
-                        # para poder localizar "Subtotal 15%", "IVA 15%", etc.
+                        # Respaldo para estructuras irregulares.
                         valor_ultimo = textos[-1]
                         for etiqueta in textos[:-1]:
                             pares.append((etiqueta.rstrip(":"), valor_ultimo))
@@ -683,6 +708,9 @@ class SriClienteSyncService:
             for etiqueta, valor in pares:
                 et = normalizar(etiqueta)
                 if any(et.startswith(obj + " ") for obj in objetivos):
+                    # Nunca interpretar una tarifa como importe.
+                    if "%" in str(valor):
+                        continue
                     return dec(valor)
 
             return Decimal("0")
@@ -732,6 +760,7 @@ class SriClienteSyncService:
             "Total IVA",
             "IVA 15%",
             "IVA 12%",
+            "IVA",
         ])
 
         # Si el detalle no trae el importe pero sí la base gravada, calculamos
