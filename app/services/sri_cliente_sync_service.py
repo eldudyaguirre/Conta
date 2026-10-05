@@ -611,10 +611,49 @@ class SriClienteSyncService:
         pares: list[tuple[str, str]] = []
 
         for tabla in soup.find_all("table"):
+            encabezados: list[str] = []
             for fila in tabla.find_all("tr"):
                 celdas = fila.find_all(["td", "th"])
                 textos = [" ".join(c.get_text(" ", strip=True).split()) for c in celdas]
                 textos = [t for t in textos if t]
+                if not textos:
+                    continue
+
+                # El detalle de impuestos del SRI tiene 5 columnas:
+                # Impuesto | Porcentaje | Tarifa | Base Imponible | Valor
+                # No se puede tratar como pares etiqueta/valor porque una fila
+                # como "IVA | 15.0 | 15.0 | 100.0 | 15.0" terminaría asociando
+                # 100.0/15.0 de forma incorrecta y el subtotal podría caer en IVA 0.
+                normalizados = [normalizar_texto for normalizar_texto in textos]
+                if len(textos) >= 4 and any(
+                    "impuesto" == t.lower().strip() for t in textos
+                ) and any(
+                    "base imponible" == t.lower().strip() for t in textos
+                ):
+                    encabezados = [t.rstrip(":") for t in textos]
+                    continue
+
+                if encabezados and len(textos) == len(encabezados):
+                    mapa = dict(zip(encabezados, textos))
+                    impuesto = mapa.get("Impuesto", "").strip()
+                    porcentaje = mapa.get("Porcentaje", "").strip()
+                    tarifa = mapa.get("Tarifa", "").strip()
+                    base = mapa.get("Base Imponible", "").strip()
+                    valor = mapa.get("Valor", "").strip()
+
+                    match_tasa = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%?", porcentaje)
+                    if not match_tasa:
+                        match_tasa = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%?", tarifa)
+
+                    if match_tasa and impuesto.upper() == "IVA":
+                        tasa_decimal = cls._dec(match_tasa.group(1))
+                        tasa_canonica = format(tasa_decimal, "f").rstrip("0").rstrip(".")
+                        pares.append((f"Base imponible IVA {tasa_canonica}%", base))
+                        pares.append((f"Valor IVA {tasa_canonica}%", valor))
+                        # También conservamos la fila completa para diagnóstico.
+                        pares.append((f"IVA {tasa_canonica}%", valor))
+                    continue
+
                 if len(textos) >= 2:
                     if len(textos) == 2:
                         etiqueta, valor = textos[0].rstrip(":"), textos[1]
@@ -622,9 +661,6 @@ class SriClienteSyncService:
                         cab[etiqueta] = valor
                     elif len(textos) == 3:
                         etiqueta, tarifa, valor = textos[0].rstrip(":"), textos[1].strip(), textos[2]
-                        # El SRI puede devolver la tarifa como "15%", "15,00%" o
-                        # "15.00 %". Canonizamos siempre a "15%" para que la
-                        # clasificación no termine cayendo por error en la tasa 12%.
                         match_tasa = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%", tarifa)
                         if match_tasa:
                             tasa_decimal = cls._dec(match_tasa.group(1))
@@ -1008,7 +1044,7 @@ class SriClienteSyncService:
             "baseiva8": b["8"],
             "baseiva14": b["14"],
             "baseiva15": b["15"],
-            "iva": factura["iva_total"],
+            "iva": Decimal("0"),
             "iva5": i["5"],
             "iva8": i["8"],
             "iva12": i["12"],
