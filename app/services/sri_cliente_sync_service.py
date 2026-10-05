@@ -585,9 +585,32 @@ class SriClienteSyncService:
             return cls._dec(v)
 
         base0 = dec(val("Base imponible IVA 0%")) or dec(val("Base IVA 0%"))
-        baseiva = dec(val("Base imponible IVA 15%")) or dec(val("Base IVA 15%")) or dec(val("Base imponible IVA 12%")) or dec(val("Base IVA 12%"))
+        baseiva = (
+            dec(val("Base imponible IVA 15%"))
+            or dec(val("Base IVA 15%"))
+            or dec(val("Base imponible IVA 12%"))
+            or dec(val("Base IVA 12%"))
+        )
         base_no = dec(val("Base imponible no objeto de IVA")) or dec(val("Base no objeto"))
-        iva = dec(val("IVA")) or dec(val("Valor IVA"))
+
+        # IMPORTANTE:
+        # En el detalle del SRI, "IVA" puede representar la TARIFA (15%),
+        # no el importe monetario del impuesto. Nunca debemos guardar esa
+        # tarifa directamente en ventas.iva.
+        # Primero buscamos exclusivamente campos que representen el valor.
+        iva = (
+            dec(val("Valor IVA"))
+            or dec(val("Importe IVA"))
+            or dec(val("IVA total"))
+            or dec(val("Total IVA"))
+        )
+
+        # Si SRI no entrega explícitamente el valor monetario, calculamos
+        # únicamente con la base gravada y la tarifa mostrada. Para la
+        # implementación actual del portal, la tarifa gravada es 15%.
+        if not iva and baseiva:
+            iva = (baseiva * Decimal("0.15")).quantize(Decimal("0.01"))
+
         if not (base0 or baseiva or base_no):
             subtotal = dec(val("Total Sin impuestos"))
             if iva > 0:
