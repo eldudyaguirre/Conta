@@ -80,6 +80,11 @@ class SriClienteSyncService:
                     guardadas INTEGER NOT NULL DEFAULT 0,
                     errores JSONB NOT NULL DEFAULT '[]'::jsonb,
                     paginas INTEGER NOT NULL DEFAULT 0,
+                    dias_revisados INTEGER NOT NULL DEFAULT 0,
+                    dias_ok INTEGER NOT NULL DEFAULT 0,
+                    dias_diferentes INTEGER NOT NULL DEFAULT 0,
+                    faltantes INTEGER NOT NULL DEFAULT 0,
+                    sobrantes INTEGER NOT NULL DEFAULT 0,
                     mensaje TEXT NOT NULL DEFAULT '',
                     detalle TEXT,
                     creado TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -102,7 +107,8 @@ class SriClienteSyncService:
         allowed = {
             "estado", "ruc", "cliente", "anio", "mes", "tipo_comprobante", "operacion",
             "sri", "ya_existentes", "descargadas", "guardadas", "errores",
-            "paginas", "mensaje", "detalle"
+            "paginas", "dias_revisados", "dias_ok", "dias_diferentes",
+            "faltantes", "sobrantes", "mensaje", "detalle"
         }
         sets = []
         params = {"job_id": job_id}
