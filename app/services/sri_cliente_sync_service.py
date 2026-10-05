@@ -781,9 +781,11 @@ class SriClienteSyncService:
 
                     for idx in range(total_links):
                         try:
-                            links = page.locator('a[id$=":lnkXml"]')
+                            # Mantener el mismo selector usado para detectar los
+                            # enlaces. El SRI puede cambiar el id exacto de lnkXml.
+                            enlace_xml = links.nth(idx)
                             async with page.expect_download(timeout=30000) as info:
-                                await links.nth(idx).click()
+                                await enlace_xml.click()
                             download = await info.value
                             with tempfile.TemporaryDirectory(prefix="conta_sri_") as tmp:
                                 path = Path(tmp) / download.suggested_filename
