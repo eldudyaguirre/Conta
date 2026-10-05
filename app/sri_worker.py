@@ -38,6 +38,7 @@ async def main() -> None:
                     int(trabajo["anio"]),
                     int(trabajo["mes"]),
                     int(trabajo["tipo_comprobante"]),
+                    str(trabajo.get("operacion") or "compras"),
                 )
                 logger.info("Trabajo %s terminado.", trabajo["job_id"])
             else:
