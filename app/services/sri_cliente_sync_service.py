@@ -609,40 +609,40 @@ class SriClienteSyncService:
         soup = BeautifulSoup(html, "html.parser")
         cab: dict[str, str] = {}
         pares: list[tuple[str, str]] = []
+        impuestos_html: list[tuple[str, Decimal, Decimal]] = []
 
         def _txt(celda) -> str:
             return " ".join(celda.get_text(" ", strip=True).split())
 
+        def normalizar(s: str) -> str:
+            return " ".join(str(s or "").lower().replace(":", " ").split())
+
         def _canon_tasa(valor: str) -> str | None:
-            match = re.fullmatch(r"(\\d+(?:[.,]\\d+)?)\\s*%?", str(valor or "").strip())
+            match = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%?", str(valor or "").strip())
             if not match:
                 return None
             tasa = cls._dec(match.group(1))
             return format(tasa, "f").rstrip("0").rstrip(".")
 
-        # El SRI genera una tabla de impuestos por cada línea del detalle.
-        # Solo esas tablas alimentan las bases/IVA por tarifa. La tabla de
-        # totales del comprobante se ignora para evitar duplicar importes.
+        # La tabla del detalle es la fuente más confiable para identificar
+        # explícitamente la tarifa y su base imponible.
         for tabla in soup.find_all("table"):
-            tabla_id = tabla.get("id") or ""
+            tabla_id = str(tabla.get("id") or "")
             if "tabla-impuestos-detalle-factura" not in tabla_id:
                 continue
 
             filas = tabla.find_all("tr")
-            indice_encabezado = None
             encabezados: list[str] = []
+            indice_encabezado = None
 
             for indice, fila in enumerate(filas):
                 textos = [_txt(c) for c in fila.find_all(["td", "th"])]
                 textos = [t for t in textos if t]
-                normalizados = [t.lower().rstrip(":").strip() for t in textos]
-
-                if len(normalizados) >= 5:
-                    requeridos = {"impuesto", "porcentaje", "tarifa", "base imponible", "valor"}
-                    if requeridos.issubset(set(normalizados)):
-                        indice_encabezado = indice
-                        encabezados = normalizados
-                        break
+                normalizados = [normalizar(t) for t in textos]
+                if {"impuesto", "porcentaje", "tarifa", "base imponible", "valor"}.issubset(set(normalizados)):
+                    encabezados = normalizados
+                    indice_encabezado = indice
+                    break
 
             if indice_encabezado is None:
                 continue
@@ -658,7 +658,6 @@ class SriClienteSyncService:
                 textos = [t for t in textos if t]
                 if len(textos) <= max(pos_impuesto, pos_porcentaje, pos_tarifa, pos_base, pos_valor):
                     continue
-
                 if textos[pos_impuesto].upper().strip() != "IVA":
                     continue
 
@@ -666,14 +665,16 @@ class SriClienteSyncService:
                 if tasa not in {"5", "8", "12", "14", "15"}:
                     continue
 
+                base = cls._dec(textos[pos_base])
+                iva = cls._dec(textos[pos_valor])
+                impuestos_html.append((tasa, base, iva))
                 pares.append((f"Base imponible IVA {tasa}%", textos[pos_base]))
                 pares.append((f"Valor IVA {tasa}%", textos[pos_valor]))
 
-        # Las demás tablas se usan solo para cabecera y valores generales.
-        # Nunca volvemos a interpretar las tablas de impuestos como pares
-        # genéricos, porque eso puede mandar una base gravada a baseiva0.
+        # Cabecera y totales generales. No usamos estas tablas para inferir
+        # una tarifa de IVA cuando ya existe información explícita del detalle.
         for tabla in soup.find_all("table"):
-            tabla_id = tabla.get("id") or ""
+            tabla_id = str(tabla.get("id") or "")
             if "tabla-impuestos-detalle-factura" in tabla_id:
                 continue
 
@@ -690,17 +691,10 @@ class SriClienteSyncService:
                 elif len(textos) == 3:
                     etiqueta, tarifa, valor = textos[0].rstrip(":"), textos[1].strip(), textos[2]
                     tasa = _canon_tasa(tarifa)
-                    if tasa:
-                        pares.append((f"{etiqueta} {tasa}%", valor))
-                    else:
-                        pares.append((etiqueta, valor))
+                    pares.append((f"{etiqueta} {tasa}%" if tasa else etiqueta, valor))
                 elif len(textos) % 2 == 0:
                     for pos in range(0, len(textos), 2):
                         pares.append((textos[pos].rstrip(":"), textos[pos + 1]))
-                # Las tablas de totales de 5 columnas se ignoran aquí.
-
-        def normalizar(s: str) -> str:
-            return " ".join(s.lower().replace(":", " ").split())
 
         def val(nombre: str) -> str:
             objetivo = normalizar(nombre)
@@ -712,109 +706,98 @@ class SriClienteSyncService:
                     return valor
             return ""
 
-        def buscar_valor_por_etiquetas(etiquetas: list[str]) -> Decimal:
-            # Una factura puede tener varias líneas con la misma tarifa.
-            # El SRI entrega una fila de impuesto por cada detalle, por lo que
-            # NO debemos devolver solo la primera coincidencia.
+        def buscar(etiquetas: list[str]) -> Decimal:
             objetivos = [normalizar(x) for x in etiquetas]
             total = Decimal("0")
-            encontrado = False
-
             for etiqueta, valor in pares:
                 et = normalizar(etiqueta)
                 if "%" in valor:
                     continue
                 if et in objetivos or any(et.startswith(obj + " ") for obj in objetivos):
                     total += cls._dec(valor)
-                    encontrado = True
-
-            return total if encontrado else Decimal("0")
-
-        def buscar_tasa(tipo: str, etiquetas_base: list[str], etiquetas_iva: list[str]) -> tuple[Decimal, Decimal]:
-            base = buscar_valor_por_etiquetas(etiquetas_base)
-            iva = buscar_valor_por_etiquetas(etiquetas_iva)
-            return base, iva
+            return total
 
         fecha_txt = val("Fecha Emisión") or val("Fecha de Emisión")
         fecha = datetime.strptime(fecha_txt, "%d/%m/%Y")
         identificacion = val("Identificación Comprador")
 
-        base0 = buscar_valor_por_etiquetas([
-            "Base imponible IVA 0%", "Base IVA 0%", "Subtotal 0%", "Subtotal IVA 0%"
-        ])
-        base_no = buscar_valor_por_etiquetas([
-            "Base imponible no objeto de IVA", "Base no objeto", "Subtotal no objeto de IVA"
-        ])
+        bases_iva = {t: Decimal("0") for t in ("5", "8", "12", "14", "15")}
+        ivas = {t: Decimal("0") for t in ("5", "8", "12", "14", "15")}
 
-        bases_iva: dict[str, Decimal] = {}
-        ivas: dict[str, Decimal] = {}
-        for tasa in ("5", "8", "12", "14", "15"):
-            base, iva = buscar_tasa(
-                tasa,
-                [f"Base imponible IVA {tasa}%", f"Base IVA {tasa}%", f"Subtotal {tasa}%", f"Subtotal IVA {tasa}%"],
-                [f"Valor IVA {tasa}%", f"Importe IVA {tasa}%", f"IVA {tasa}%"],
-            )
-            bases_iva[tasa] = base
-            ivas[tasa] = iva
+        # Primero usamos exclusivamente el detalle explícito del SRI.
+        for tasa, base, iva in impuestos_html:
+            bases_iva[tasa] += base
+            ivas[tasa] += iva
 
-        # Algunas pantallas muestran solo "Valor IVA" junto a una fila "SUBTOTAL X%".
-        # Si existe exactamente una base por tasa y no existe IVA específico, calculamos
-        # el IVA de esa tasa para conservar el detalle real del comprobante.
-        for tasa, base in bases_iva.items():
-            if base and not ivas[tasa]:
-                ivas[tasa] = (base * Decimal(tasa) / Decimal("100")).quantize(Decimal("0.01"))
-
-        # Fallback para versiones del SRI que solo muestran "IVA" genérico.
-        if not any(ivas.values()):
-            iva_generico = buscar_valor_por_etiquetas([
-                "Valor IVA", "Importe IVA", "IVA total", "Total IVA", "IVA"
-            ])
-            tasas_con_base = [t for t, b in bases_iva.items() if b]
-            if len(tasas_con_base) == 1 and iva_generico:
-                ivas[tasas_con_base[0]] = iva_generico
-
-        baseiva_total = sum(bases_iva.values(), Decimal("0"))
-        iva_total = sum(ivas.values(), Decimal("0"))
-
-        # Algunos diseños del SRI no incluyen la tarifa en la etiqueta de la
-        # fila: muestran solamente "Subtotal" + monto e "IVA" + monto.
-        # En ese caso NO debemos enviar el subtotal a baseiva0. Si existe una
-        # única base y un IVA, calculamos la tasa efectiva y la asociamos a la
-        # tarifa SRI correspondiente (5/8/12/14/15).
-        subtotal_generico = buscar_valor_por_etiquetas([
-            "Total Sin impuestos", "Subtotal sin impuestos", "Subtotal"
-        ])
-        iva_generico = buscar_valor_por_etiquetas([
-            "Valor IVA", "Importe IVA", "IVA total", "Total IVA", "IVA"
+        base_no = buscar([
+            "Base imponible no objeto de IVA",
+            "Base no objeto",
+            "Subtotal no objeto de IVA",
         ])
 
-        if not baseiva_total and subtotal_generico > 0 and iva_generico > 0:
-            tasa_detectada = None
-            for tasa in ("5", "8", "12", "14", "15"):
-                esperado = (
-                    subtotal_generico * Decimal(tasa) / Decimal("100")
-                ).quantize(Decimal("0.01"))
+        base0 = buscar([
+            "Base imponible IVA 0%",
+            "Base IVA 0%",
+            "Subtotal 0%",
+            "Subtotal IVA 0%",
+        ])
+
+        # Compatibilidad con HTML donde aparecen subtotales por tarifa pero
+        # no existe la tabla de detalle. Una etiqueta explícita con 15% debe
+        # ir a baseiva15, nunca a baseiva0.
+        for tasa in bases_iva:
+            if not bases_iva[tasa]:
+                bases_iva[tasa] = buscar([
+                    f"Base imponible IVA {tasa}%",
+                    f"Base IVA {tasa}%",
+                    f"Subtotal {tasa}%",
+                    f"Subtotal IVA {tasa}%",
+                ])
+            if bases_iva[tasa] and not ivas[tasa]:
+                ivas[tasa] = buscar([
+                    f"Valor IVA {tasa}%",
+                    f"Importe IVA {tasa}%",
+                    f"IVA {tasa}%",
+                ])
+
+        # Solo como último recurso: subtotal + IVA genéricos. Calculamos la
+        # tarifa efectiva y asignamos la base a esa tarifa.
+        iva_generico = buscar([
+            "Valor IVA",
+            "Importe IVA",
+            "IVA total",
+            "Total IVA",
+            "IVA",
+        ])
+        subtotal_generico = buscar([
+            "Total Sin impuestos",
+            "Subtotal sin impuestos",
+            "Subtotal",
+        ])
+
+        if not any(ivas.values()) and iva_generico > 0:
+            for tasa in ("15", "14", "12", "8", "5"):
+                if subtotal_generico <= 0:
+                    break
+                esperado = (subtotal_generico * Decimal(tasa) / Decimal("100")).quantize(Decimal("0.01"))
                 if abs(esperado - iva_generico) <= Decimal("0.02"):
-                    tasa_detectada = tasa
+                    bases_iva[tasa] = subtotal_generico
+                    ivas[tasa] = iva_generico
                     break
 
-            if tasa_detectada:
-                bases_iva[tasa_detectada] = subtotal_generico
-                ivas[tasa_detectada] = iva_generico
-                baseiva_total = subtotal_generico
-                iva_total = iva_generico
+        # Si hay una sola tasa de IVA identificada, pero solo falta la base,
+        # usamos el subtotal general como base de ESA tarifa.
+        tasas_con_iva = [t for t, valor in ivas.items() if valor > 0]
+        tasas_con_base = [t for t, valor in bases_iva.items() if valor > 0]
 
-        # Compatibilidad con comprobantes donde ya se obtuvo una única tasa
-        # mediante el IVA específico pero el subtotal quedó sin etiqueta.
-        if not baseiva_total:
-            subtotal = subtotal_generico
-            if iva_total > 0:
-                tasas_con_iva = [t for t, v in ivas.items() if v]
-                if len(tasas_con_iva) == 1:
-                    bases_iva[tasas_con_iva[0]] = subtotal
-                    baseiva_total = subtotal
-            elif subtotal:
-                base0 = subtotal
+        if not any(bases_iva.values()) and len(tasas_con_iva) == 1 and subtotal_generico > 0:
+            bases_iva[tasas_con_iva[0]] = subtotal_generico
+
+        # Nunca clasificamos un subtotal como IVA 0% si existe IVA calculado
+        # para una tarifa gravada. Solo usamos base0 cuando la evidencia indica
+        # realmente una operación al 0%.
+        if not any(bases_iva.values()) and not tasas_con_iva and subtotal_generico > 0:
+            base0 = subtotal_generico
 
         return {
             "clave_acceso": val("Clave de acceso"),
