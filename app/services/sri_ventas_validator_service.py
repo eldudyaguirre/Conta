@@ -46,6 +46,7 @@ class SriVentasValidatorService:
             "errores": [],
             "paginas": 0,
             "dias_revisados": 0,
+            "dias_ok": 0,
             "dias_diferentes": 0,
             "faltantes": 0,
             "sobrantes": 0,
