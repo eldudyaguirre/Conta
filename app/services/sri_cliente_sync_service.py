@@ -624,10 +624,18 @@ class SriClienteSyncService:
                 ]
                 textos = [t for t in textos if t]
                 if len(textos) >= 2:
-                    for i in range(0, len(textos) - 1, 2):
-                        pares.append((textos[i].rstrip(":"), textos[i + 1]))
+                    # Estructuras de 2 columnas: etiqueta | valor.
                     if len(textos) == 2:
+                        pares.append((textos[0].rstrip(":"), textos[1]))
                         cab[textos[0].rstrip(":")] = textos[1]
+                    else:
+                        # Algunas tablas tienen columnas adicionales. En ese
+                        # caso el último valor de la fila suele ser el importe;
+                        # asociamos cada texto anterior con ese último valor
+                        # para poder localizar "Subtotal 15%", "IVA 15%", etc.
+                        valor_ultimo = textos[-1]
+                        for etiqueta in textos[:-1]:
+                            pares.append((etiqueta.rstrip(":"), valor_ultimo))
 
         def normalizar(s: str) -> str:
             return " ".join(s.lower().replace(":", " ").split())
