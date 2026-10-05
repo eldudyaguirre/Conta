@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import os
+
+# PostgreSQL 16: registrar explícitamente las DLL nativas antes de importar
+# el servicio SRI, que termina cargando psycopg2.
+_POSTGRES_BIN = r"C:\Program Files\PostgreSQL\16\bin"
+if os.path.isdir(_POSTGRES_BIN):
+    os.add_dll_directory(_POSTGRES_BIN)
+
 import asyncio
 import logging
 
