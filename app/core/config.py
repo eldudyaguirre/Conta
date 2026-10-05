@@ -24,9 +24,11 @@ class Settings(BaseSettings):
     AI_MAX_TOOL_CALLS: int = 5
     AI_MAX_HISTORY_MESSAGES: int = 20
 
-    SRI_HEADLESS: bool = True
-    SRI_BROWSER_CHANNEL: str = "chromium"
-    SRI_USER_DATA_DIR: str = ""
+    SRI_HEADLESS: bool = False
+    SRI_BROWSER_CHANNEL: str = "chrome"
+    SRI_USER_DATA_DIR: str = "D:/Aplicaciones/Conta/sri_profiles"
+    SRI_CHROME_PATH: str = ""
+    SRI_CDP_PORT: int = 9222
     SRI_NAVIGATION_TIMEOUT_MS: int = 45000
     SRI_WORKER_POLL_SECONDS: int = 3
 
