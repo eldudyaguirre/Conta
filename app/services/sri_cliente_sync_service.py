@@ -605,12 +605,20 @@ class SriClienteSyncService:
             or dec(val("Total IVA"))
         )
 
+        # En algunos detalles del SRI el texto de la fila de la base
+        # gravada no se identifica de forma consistente y puede terminar
+        # interpretándose como "Base IVA 0%". Si existe IVA y no hay base
+        # gravada, esa base es la base sometida al 15%, no una base 0%.
+        if not baseiva and base0 and iva:
+            baseiva = base0
+            base0 = Decimal("0")
+
         # Si SRI no entrega explícitamente el valor monetario, calculamos
-        # únicamente con la base gravada y la tarifa mostrada. Para la
-        # implementación actual del portal, la tarifa gravada es 15%.
+        # únicamente con la base gravada y la tarifa del 15%.
         if not iva and baseiva:
             iva = (baseiva * Decimal("0.15")).quantize(Decimal("0.01"))
 
+        # Último respaldo: si no encontramos ninguna base, usamos el subtotal.
         if not (base0 or baseiva or base_no):
             subtotal = dec(val("Total Sin impuestos"))
             if iva > 0:
