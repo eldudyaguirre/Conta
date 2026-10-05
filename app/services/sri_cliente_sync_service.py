@@ -622,8 +622,14 @@ class SriClienteSyncService:
                         cab[etiqueta] = valor
                     elif len(textos) == 3:
                         etiqueta, tarifa, valor = textos[0].rstrip(":"), textos[1].strip(), textos[2]
-                        if re.fullmatch(r"\d+(?:[.,]\d+)?%", tarifa):
-                            pares.append((f"{etiqueta} {tarifa}", valor))
+                        # El SRI puede devolver la tarifa como "15%", "15,00%" o
+                        # "15.00 %". Canonizamos siempre a "15%" para que la
+                        # clasificación no termine cayendo por error en la tasa 12%.
+                        match_tasa = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%", tarifa)
+                        if match_tasa:
+                            tasa_decimal = cls._dec(match_tasa.group(1))
+                            tasa_canonica = format(tasa_decimal, "f").rstrip("0").rstrip(".")
+                            pares.append((f"{etiqueta} {tasa_canonica}%", valor))
                         else:
                             pares.append((etiqueta, valor))
                             pares.append((tarifa, valor))
