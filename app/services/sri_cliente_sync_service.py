@@ -727,7 +727,7 @@ class SriClienteSyncService:
             return " ".join(celda.get_text(" ", strip=True).split())
 
         def _canon_tasa(valor: str) -> str | None:
-            match = re.fullmatch(r"(\\d+(?:[.,]\\d+)?)\\s*%?", str(valor or "").strip())
+            match = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%?", str(valor or "").strip())
             if not match:
                 return None
             tasa = cls._dec(match.group(1))
@@ -926,8 +926,8 @@ class SriClienteSyncService:
                 if len(tasas_con_iva) == 1:
                     bases_iva[tasas_con_iva[0]] = subtotal
                     baseiva_total = subtotal
-            elif subtotal:
-                base0 = subtotal
+            # Un subtotal genérico no se considera IVA 0%.
+            # baseiva0 solo se llena cuando el SRI identifica explícitamente 0%.
 
         return {
             "clave_acceso": val("Clave de acceso"),
