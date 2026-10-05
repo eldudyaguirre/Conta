@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -21,6 +22,9 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.database.client_connection import obtener_session_cliente
 from app.database.connection import engine
+
+
+logger = logging.getLogger("conta.sri_sync")
 
 
 class SriJobCancelado(Exception):
@@ -400,6 +404,14 @@ class SriClienteSyncService:
                     else:
                         bases["no_objeto"] += base
 
+
+        logger.warning(
+            "SRI COMPRA PARSER | clave=%s | bases=%s | ivas=%s | subtotal=%s",
+            cls._txt(it, "claveAcceso"),
+            {k: str(v) for k, v in bases.items()},
+            {k: str(v) for k, v in ivas.items()},
+            cls._txt(inf, "totalSinImpuestos"),
+        )
 
         pagos = inf.find("pagos")
         formas = [] if pagos is None else [cls._txt(p, "formaPago") for p in pagos.findall("pago")]
@@ -1505,6 +1517,11 @@ class SriClienteSyncService:
     def _insertar(cls, db, factura: dict[str, Any], tipo_comprobante: int) -> None:
         b, i = factura["bases"], factura["ivas"]
         db.execute(text("SELECT pg_advisory_xact_lock(hashtext('conta_comprasnue_numcompra'))"))
+        logger.warning(
+            "SRI COMPRA INSERT | clave=%s | base0=%s | base5=%s | base8=%s | base12=%s | base14=%s | base15=%s | iva15=%s",
+            factura["clave_acceso"],
+            b["0"], b["5"], b["8"], b["12"], b["14"], b["15"], i["15"],
+        )
         values = {
             "codsus": "01", "tipid": "01", "ruccedprovee": factura["ruc"],
             "tipcom": cls._tipo(tipo_comprobante), "fecreg": factura["fecha"],
