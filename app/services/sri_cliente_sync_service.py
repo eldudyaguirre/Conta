@@ -329,6 +329,8 @@ class SriClienteSyncService:
         }
 
         totals = inf.find("totalConImpuestos")
+        impuestos_clasificados = Decimal("0")
+
         if totals is not None:
             for ti in totals.findall("totalImpuesto"):
                 codigo = cls._txt(ti, "codigo")
@@ -343,12 +345,14 @@ class SriClienteSyncService:
                 if codigo != "2":
                     continue
 
-                tarifa_key = format(tarifa, "f").rstrip("0").rstrip(".")
-                tasa = (
-                    tarifa_key
-                    if tarifa_key in {"0", "5", "8", "12", "14", "15"}
-                    else codigo_a_tasa.get(codigo_pct)
-                )
+                # Para compras damos prioridad al codigoPorcentaje del SRI
+                # y usamos tarifa como respaldo. Esto evita que un XML con
+                # tarifa 0/vacía termine enviando una compra al IVA 0%.
+                tasa = codigo_a_tasa.get(codigo_pct)
+                if tasa is None:
+                    tarifa_key = format(tarifa, "f").rstrip("0").rstrip(".")
+                    if tarifa_key in {"0", "5", "8", "12", "14", "15"}:
+                        tasa = tarifa_key
 
                 if codigo_pct == "6":
                     bases["no_objeto"] += base
@@ -357,12 +361,44 @@ class SriClienteSyncService:
                 elif tasa in {"5", "8", "12", "14", "15"}:
                     bases[tasa] += base
                     ivas[tasa] += valor
+                    impuestos_clasificados += base
                 elif tasa == "0":
                     bases["0"] += base
                 else:
-                    # Nunca clasificar silenciosamente una tarifa desconocida
-                    # como IVA 0%, porque eso distorsionaría las bases.
                     bases["no_objeto"] += base
+
+        # Algunos XML de comprobantes recibidos pueden traer correctamente
+        # la tarifa en cada detalle, aunque totalConImpuestos venga incompleto
+        # o con codigoPorcentaje 0. Si no encontramos ninguna base gravada
+        # arriba, reconstruimos las bases desde los impuestos de los detalles.
+        if impuestos_clasificados == 0:
+            detalle_bases = {k: Decimal("0") for k in ("5", "8", "12", "14", "15")}
+            detalle_ivas = {k: Decimal("0") for k in ("5", "8", "12", "14", "15")}
+
+            for impuesto in inf.findall(".//detalle/impuestos/impuesto"):
+                codigo = cls._txt(impuesto, "codigo")
+                if codigo != "2":
+                    continue
+
+                codigo_pct = cls._txt(impuesto, "codigoPorcentaje")
+                tarifa = cls._dec(cls._txt(impuesto, "tarifa"))
+                base = cls._dec(cls._txt(impuesto, "baseImponible"))
+                valor = cls._dec(cls._txt(impuesto, "valor"))
+
+                tasa = codigo_a_tasa.get(codigo_pct)
+                if tasa is None:
+                    tarifa_key = format(tarifa, "f").rstrip("0").rstrip(".")
+                    if tarifa_key in {"5", "8", "12", "14", "15"}:
+                        tasa = tarifa_key
+
+                if tasa in detalle_bases:
+                    detalle_bases[tasa] += base
+                    detalle_ivas[tasa] += valor
+
+            for tasa in detalle_bases:
+                if detalle_bases[tasa]:
+                    bases[tasa] = detalle_bases[tasa]
+                    ivas[tasa] = detalle_ivas[tasa]
 
         pagos = inf.find("pagos")
         formas = [] if pagos is None else [cls._txt(p, "formaPago") for p in pagos.findall("pago")]
