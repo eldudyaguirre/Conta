@@ -332,7 +332,7 @@ class SriClienteSyncService:
         # de cada detalle. Esa estructura es la fuente principal.
         impuestos_clasificados = Decimal("0")
 
-        for impuesto in inf.findall(".//detalle/impuestos/impuesto"):
+        for impuesto in doc.findall(".//detalle/impuestos/impuesto"):
             codigo = cls._txt(impuesto, "codigo")
             if codigo != "2":
                 continue
