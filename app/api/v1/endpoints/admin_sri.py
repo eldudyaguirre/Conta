@@ -59,11 +59,19 @@ async def sincronizar_compras(
 ):
     """Inicia la sincronización en segundo plano y responde inmediatamente."""
     try:
+        SriClienteSyncService._iva_debug_log(
+            "API COMPRAS | solicitud recibida | ruc=%s | anio=%s | mes=%s | tipo=%s",
+            request.ruc, request.anio, request.mes, request.tipo_comprobante,
+        )
         resultado = SriClienteSyncService.iniciar_sincronizacion(
             ruc=request.ruc,
             anio=request.anio,
             mes=request.mes,
             tipo_comprobante=request.tipo_comprobante,
+        )
+        SriClienteSyncService._iva_debug_log(
+            "API COMPRAS | trabajo creado | resultado=%s",
+            resultado,
         )
         return {
             "usuario": usuario["usrname"],
