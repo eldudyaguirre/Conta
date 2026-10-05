@@ -23,6 +23,10 @@ from app.database.client_connection import obtener_session_cliente
 from app.database.connection import engine
 
 
+class SriJobCancelado(Exception):
+    """Señala que un trabajo SRI fue cancelado por el usuario."""
+
+
 class SriClienteSyncService:
     JOB_TABLE = "conta_sri_jobs"
 
@@ -147,6 +151,12 @@ class SriClienteSyncService:
                 estado="finalizado",
                 mensaje="Sincronización finalizada.",
             )
+        except SriJobCancelado as exc:
+            cls._job_update(
+                job_id,
+                estado="cancelado",
+                mensaje=str(exc),
+            )
         except Exception as exc:
             cls._job_update(
                 job_id,
@@ -154,6 +164,48 @@ class SriClienteSyncService:
                 mensaje=str(exc),
                 detalle=str(exc),
             )
+
+    @classmethod
+    def cancelar_sincronizacion(cls, job_id: str) -> dict[str, Any] | None:
+        """Solicita la cancelación de un trabajo pendiente o en ejecución."""
+        cls._ensure_jobs_table()
+        with engine.begin() as db:
+            row = db.execute(text(f"""
+                SELECT job_id, estado, ruc, cliente, anio, mes, operacion
+                FROM {cls.JOB_TABLE}
+                WHERE job_id = :job_id
+                FOR UPDATE
+            """), {"job_id": job_id}).mappings().first()
+            if not row:
+                return None
+            if row["estado"] in ("finalizado", "error", "cancelado"):
+                return dict(row)
+
+            db.execute(text(f"""
+                UPDATE {cls.JOB_TABLE}
+                SET estado = 'cancelado',
+                    mensaje = 'Cancelación solicitada por el usuario.',
+                    detalle = NULL,
+                    actualizado = CURRENT_TIMESTAMP
+                WHERE job_id = :job_id
+            """), {"job_id": job_id})
+
+            result = dict(row)
+            result["estado"] = "cancelado"
+            result["mensaje"] = "Cancelación solicitada por el usuario."
+            return result
+
+    @classmethod
+    def _verificar_cancelacion(cls, job_id: str | None) -> None:
+        if not job_id:
+            return
+        with engine.connect() as db:
+            estado = db.execute(text(f"""
+                SELECT estado FROM {cls.JOB_TABLE}
+                WHERE job_id = :job_id
+            """), {"job_id": job_id}).scalar()
+        if estado == "cancelado":
+            raise SriJobCancelado("Sincronización cancelada por el usuario.")
 
     @classmethod
     def estado_sincronizacion(cls, job_id: str) -> dict[str, Any] | None:
@@ -720,6 +772,7 @@ class SriClienteSyncService:
         from datetime import date
 
         for dia in range(1, ultimo_dia + 1):
+            cls._verificar_cancelacion(job_id)
             fecha_consulta = date(anio, mes, dia)
             cls._job_update(
                 job_id,
@@ -732,6 +785,7 @@ class SriClienteSyncService:
 
             pagina = 1
             while True:
+                cls._verificar_cancelacion(job_id)
                 result["paginas"] += 1
                 cls._job_update(
                     job_id,
@@ -750,6 +804,7 @@ class SriClienteSyncService:
                 # Procesamos una copia de los índices actuales. Abrir/cerrar el
                 # detalle no debe cambiar la cantidad de filas de la página.
                 for idx in range(cantidad):
+                    cls._verificar_cancelacion(job_id)
                     try:
                         fila = filas.nth(idx)
                         columnas = await fila.locator("td").all_inner_texts()
