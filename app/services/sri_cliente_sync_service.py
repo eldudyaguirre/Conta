@@ -1016,6 +1016,65 @@ class SriClienteSyncService:
         return None
 
     @classmethod
+    async def _volver_pagina_1_emitidos(cls, page) -> None:
+        """Regresa explícitamente a la página 1 antes de consultar otro día.
+
+        El SRI conserva la página actual del paginador entre consultas AJAX.
+        Si un día tuvo varias páginas, el siguiente día puede arrancar desde
+        la última página si no hacemos este reset explícito.
+        """
+        filas = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr")
+        candidatos = [
+            ".ui-paginator-first",
+            "a.ui-paginator-first",
+            "button.ui-paginator-first",
+            "[class*='ui-paginator-first']",
+        ]
+
+        for selector in candidatos:
+            boton = page.locator(selector).first
+            if await boton.count() == 0:
+                continue
+
+            try:
+                clases = (await boton.get_attribute("class") or "").lower()
+                aria = (await boton.get_attribute("aria-disabled") or "").lower()
+                disabled = await boton.get_attribute("disabled")
+
+                if (
+                    disabled is not None
+                    or aria == "true"
+                    or "ui-state-disabled" in clases
+                    or "disabled" in clases
+                ):
+                    return
+
+                primera_antes = ""
+                try:
+                    if await filas.count():
+                        primera_antes = (await filas.first.inner_text()).strip()
+                except Exception:
+                    pass
+
+                await boton.click()
+
+                for _ in range(30):
+                    await page.wait_for_timeout(300)
+                    try:
+                        if await filas.count() == 0:
+                            continue
+                        primera_despues = (await filas.first.inner_text()).strip()
+                        if not primera_antes or primera_despues != primera_antes:
+                            break
+                    except Exception:
+                        pass
+                return
+            except Exception:
+                continue
+
+        return
+
+    @classmethod
     async def _procesar_emitidos_ventas(cls, page, db, result, job_id, procesadas, anio: int, mes: int) -> None:
         """Consulta y procesa todas las fechas del mes de comprobantes emitidos."""
         import calendar
@@ -1163,6 +1222,12 @@ class SriClienteSyncService:
                         pass
 
                 pagina += 1
+
+            # Si este día tuvo más de una página, el SRI deja el paginador
+            # en la última página. Antes de cambiar al siguiente día debemos
+            # regresar SIEMPRE a la página 1 para que la nueva consulta no
+            # herede la página anterior.
+            await cls._volver_pagina_1_emitidos(page)
 
     @classmethod
     def _insertar_venta(cls, db, factura: dict[str, Any]) -> None:
