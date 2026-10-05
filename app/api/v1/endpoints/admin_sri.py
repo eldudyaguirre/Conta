@@ -79,6 +79,22 @@ async def sincronizar_compras(
         )
 
 
+@router.post("/cancelar/{job_id}")
+async def cancelar_sincronizacion(
+    job_id: str,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Solicita detener un trabajo SRI pendiente o en ejecución."""
+    resultado = SriClienteSyncService.cancelar_sincronizacion(job_id)
+    if resultado is None:
+        raise HTTPException(status_code=404, detail="Trabajo de sincronización no encontrado.")
+    return {
+        "usuario": usuario["usrname"],
+        "tipo": "sri_sync_cancelar",
+        **resultado,
+    }
+
+
 @router.get("/compras/estado/{job_id}")
 async def estado_compras(
     job_id: str,
