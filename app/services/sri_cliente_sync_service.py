@@ -876,51 +876,23 @@ class SriClienteSyncService:
 
     @classmethod
     async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
-        """Obtiene únicamente el panel de detalle devuelto por el AJAX del SRI.
-
-        No usamos el HTML completo del diálogo porque RichFaces puede mantener
-        copias/plantillas de las tablas dentro del DOM. La petición real al
-        pulsar la factura renderiza:
-            form-detalle-factura:panel-detalle-factura
-        y esa respuesta es la fuente única para el parser.
-        """
         fila = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr").nth(fila_idx)
         enlace = fila.locator("a").first
         if await enlace.count() == 0:
             return None
-
         await enlace.scroll_into_view_if_needed()
-
-        try:
-            async with page.expect_response(
-                lambda response: (
-                    "recuperarComprobantes.jsf" in response.url
-                    and response.request.method == "POST"
-                ),
-                timeout=30000,
-            ) as espera_respuesta:
-                await enlace.click(force=True)
-
-            respuesta = await espera_respuesta.value
-            texto_respuesta = await respuesta.text()
-
-            # La respuesta JSF es XML y contiene CDATA con el HTML del panel.
-            from bs4 import BeautifulSoup
-
-            xml = BeautifulSoup(texto_respuesta, "xml")
-            actualizacion = xml.find(
-                "update",
-                {"id": "form-detalle-factura:panel-detalle-factura"},
-            )
-
-            if actualizacion is not None:
-                panel_html = actualizacion.string or actualizacion.get_text()
-                if panel_html and "Clave de acceso" in panel_html:
-                    return panel_html
-
-        except Exception:
-            return None
-
+        await enlace.click(force=True)
+        for _ in range(60):
+            await page.wait_for_timeout(500)
+            dialogs = page.locator(".ui-dialog:visible")
+            for i in range(await dialogs.count()):
+                dialogo = dialogs.nth(i)
+                html = await dialogo.inner_html()
+                if "Espere por favor" not in html and "Clave de acceso" in html:
+                    boton = dialogo.locator(".ui-dialog-titlebar-close")
+                    if await boton.count():
+                        await boton.click()
+                    return html
         return None
 
     @classmethod
