@@ -26,6 +26,21 @@ from app.database.connection import engine
 
 logger = logging.getLogger("conta.sri_sync")
 
+# Log de diagnóstico específico para rastrear la clasificación de IVA
+# desde el XML del SRI hasta la fila final de comprasnue.
+IVA_DEBUG_LOG = Path(__file__).resolve().parents[2] / "logs" / "sri_iva_debug.log"
+
+
+def _iva_debug_log(message: str, *args: Any) -> None:
+    try:
+        IVA_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        text_message = message % args if args else message
+        with IVA_DEBUG_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.now().isoformat(timespec='seconds')} | {text_message}\n")
+    except Exception:
+        # El diagnóstico nunca debe detener una sincronización SRI.
+        pass
+
 
 class SriJobCancelado(Exception):
     """Señala que un trabajo SRI fue cancelado por el usuario."""
@@ -346,11 +361,21 @@ class SriClienteSyncService:
             base = cls._dec(cls._txt(impuesto, "baseImponible"))
             valor = cls._dec(cls._txt(impuesto, "valor"))
 
+            _iva_debug_log(
+                "XML DETALLE | clave=%s | codigo=%s | codigoPorcentaje=%s | tarifa=%s | baseImponible=%s | valor=%s",
+                cls._txt(it, "claveAcceso"), codigo, codigo_pct, tarifa, base, valor,
+            )
+
             tarifa_key = format(tarifa, "f").rstrip("0").rstrip(".")
             if tarifa_key in {"5", "8", "12", "14", "15"}:
                 tasa = tarifa_key
             else:
                 tasa = codigo_a_tasa.get(codigo_pct)
+
+            _iva_debug_log(
+                "XML CLASIFICACION | clave=%s | codigoPorcentaje=%s | tarifa=%s | tasa_resultante=%s | base=%s | valor=%s",
+                cls._txt(it, "claveAcceso"), codigo_pct, tarifa, tasa, base, valor,
+            )
 
             if tasa in {"5", "8", "12", "14", "15"}:
                 bases[tasa] += base
@@ -411,6 +436,14 @@ class SriClienteSyncService:
             {k: str(v) for k, v in bases.items()},
             {k: str(v) for k, v in ivas.items()},
             cls._txt(inf, "totalSinImpuestos"),
+        )
+        _iva_debug_log(
+            "XML FINAL | clave=%s | bases=%s | ivas=%s | subtotal=%s | total=%s",
+            cls._txt(it, "claveAcceso"),
+            {k: str(v) for k, v in bases.items()},
+            {k: str(v) for k, v in ivas.items()},
+            cls._txt(inf, "totalSinImpuestos"),
+            cls._txt(inf, "importeTotal"),
         )
 
         pagos = inf.find("pagos")
@@ -1550,4 +1583,35 @@ class SriClienteSyncService:
         values["numcompra"] = str(next_num)
         cols = ", ".join(f'"{k}"' if k == "año" else k for k in values)
         params = ", ".join(f":{k}" for k in values)
+        _iva_debug_log(
+            "BD ANTES INSERT | clave=%s | numcompra=%s | baseimpiva0=%s | baseimpiva5=%s | baseimpiva8=%s | baseimpiva12=%s | baseimpiva14=%s | baseimpiva15=%s | montoiva5=%s | montoiva8=%s | montoiva12=%s | montoiva14=%s | montoiva15=%s",
+            factura["clave_acceso"], values["numcompra"],
+            values["baseimpiva0"], values["baseimpiva5"], values["baseimpiva8"],
+            values["baseimpiva12"], values["baseimpiva14"], values["baseimpiva15"],
+            values["montoiva5"], values["montoiva8"], values["montoiva12"],
+            values["montoiva14"], values["montoiva15"],
+        )
+
         db.execute(text(f"INSERT INTO comprasnue ({cols}) VALUES ({params})"), values)
+
+        # Leemos inmediatamente la fila dentro de la misma transacción para
+        # comprobar qué terminó recibiendo realmente PostgreSQL.
+        almacenado = db.execute(text("""
+            SELECT numcompra, numaut,
+                   baseimpiva0, baseimpiva5, baseimpiva8,
+                   baseimpiva12, baseimpiva14, baseimpiva15,
+                   montoiva5, montoiva8, montoiva12, montoiva14, montoiva15
+            FROM comprasnue
+            WHERE numcompra = :numcompra
+            LIMIT 1
+        """), {"numcompra": values["numcompra"]}).mappings().first()
+
+        if almacenado:
+            _iva_debug_log(
+                "BD DESPUES INSERT | clave=%s | numcompra=%s | baseimpiva0=%s | baseimpiva5=%s | baseimpiva8=%s | baseimpiva12=%s | baseimpiva14=%s | baseimpiva15=%s | montoiva5=%s | montoiva8=%s | montoiva12=%s | montoiva14=%s | montoiva15=%s",
+                almacenado["numaut"], almacenado["numcompra"],
+                almacenado["baseimpiva0"], almacenado["baseimpiva5"], almacenado["baseimpiva8"],
+                almacenado["baseimpiva12"], almacenado["baseimpiva14"], almacenado["baseimpiva15"],
+                almacenado["montoiva5"], almacenado["montoiva8"], almacenado["montoiva12"],
+                almacenado["montoiva14"], almacenado["montoiva15"],
+            )
