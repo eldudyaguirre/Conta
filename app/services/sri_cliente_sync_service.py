@@ -704,7 +704,7 @@ class SriClienteSyncService:
         # Fallback para versiones del SRI que solo muestran "IVA" genérico.
         if not any(ivas.values()):
             iva_generico = buscar_valor_por_etiquetas([
-                "Valor IVA", "Importe IVA", "IVA total", "Total IVA"
+                "Valor IVA", "Importe IVA", "IVA total", "Total IVA", "IVA"
             ])
             tasas_con_base = [t for t, b in bases_iva.items() if b]
             if len(tasas_con_base) == 1 and iva_generico:
@@ -713,17 +713,43 @@ class SriClienteSyncService:
         baseiva_total = sum(bases_iva.values(), Decimal("0"))
         iva_total = sum(ivas.values(), Decimal("0"))
 
-        # Compatibilidad con comprobantes donde el SRI no etiqueta el subtotal
-        # por porcentaje pero sí entrega subtotal/IVA. Solo se reasigna cuando
-        # hay una única tasa posible o evidencia clara de impuesto.
+        # Algunos diseños del SRI no incluyen la tarifa en la etiqueta de la
+        # fila: muestran solamente "Subtotal" + monto e "IVA" + monto.
+        # En ese caso NO debemos enviar el subtotal a baseiva0. Si existe una
+        # única base y un IVA, calculamos la tasa efectiva y la asociamos a la
+        # tarifa SRI correspondiente (5/8/12/14/15).
+        subtotal_generico = buscar_valor_por_etiquetas([
+            "Total Sin impuestos", "Subtotal sin impuestos", "Subtotal"
+        ])
+        iva_generico = buscar_valor_por_etiquetas([
+            "Valor IVA", "Importe IVA", "IVA total", "Total IVA", "IVA"
+        ])
+
+        if not baseiva_total and subtotal_generico > 0 and iva_generico > 0:
+            tasa_detectada = None
+            for tasa in ("5", "8", "12", "14", "15"):
+                esperado = (
+                    subtotal_generico * Decimal(tasa) / Decimal("100")
+                ).quantize(Decimal("0.01"))
+                if abs(esperado - iva_generico) <= Decimal("0.02"):
+                    tasa_detectada = tasa
+                    break
+
+            if tasa_detectada:
+                bases_iva[tasa_detectada] = subtotal_generico
+                ivas[tasa_detectada] = iva_generico
+                baseiva_total = subtotal_generico
+                iva_total = iva_generico
+
+        # Compatibilidad con comprobantes donde ya se obtuvo una única tasa
+        # mediante el IVA específico pero el subtotal quedó sin etiqueta.
         if not baseiva_total:
-            subtotal = buscar_valor_por_etiquetas([
-                "Total Sin impuestos", "Subtotal sin impuestos", "Subtotal"
-            ])
+            subtotal = subtotal_generico
             if iva_total > 0:
                 tasas_con_iva = [t for t, v in ivas.items() if v]
                 if len(tasas_con_iva) == 1:
                     bases_iva[tasas_con_iva[0]] = subtotal
+                    baseiva_total = subtotal
             elif subtotal:
                 base0 = subtotal
 
