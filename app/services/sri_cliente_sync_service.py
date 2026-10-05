@@ -38,6 +38,7 @@ class SriClienteSyncService:
                     anio INTEGER NOT NULL,
                     mes INTEGER NOT NULL,
                     tipo_comprobante VARCHAR(2) NOT NULL,
+                    operacion VARCHAR(30) NOT NULL DEFAULT 'compras',
                     sri INTEGER NOT NULL DEFAULT 0,
                     ya_existentes INTEGER NOT NULL DEFAULT 0,
                     descargadas INTEGER NOT NULL DEFAULT 0,
@@ -51,6 +52,9 @@ class SriClienteSyncService:
                 )
             """))
             db.execute(text(
+                f"ALTER TABLE {cls.JOB_TABLE} ADD COLUMN IF NOT EXISTS operacion VARCHAR(30) NOT NULL DEFAULT 'compras'"
+            ))
+            db.execute(text(
                 f"CREATE INDEX IF NOT EXISTS idx_{cls.JOB_TABLE}_estado "
                 f"ON {cls.JOB_TABLE}(estado, creado)"
             ))
@@ -61,7 +65,7 @@ class SriClienteSyncService:
             return
         cls._ensure_jobs_table()
         allowed = {
-            "estado", "ruc", "cliente", "anio", "mes", "tipo_comprobante",
+            "estado", "ruc", "cliente", "anio", "mes", "tipo_comprobante", "operacion",
             "sri", "ya_existentes", "descargadas", "guardadas", "errores",
             "paginas", "mensaje", "detalle"
         }
@@ -83,7 +87,7 @@ class SriClienteSyncService:
             ), params)
 
     @classmethod
-    def iniciar_sincronizacion(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1) -> dict[str, Any]:
+    def iniciar_sincronizacion(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, operacion: str = "compras") -> dict[str, Any]:
         # El trabajo se guarda en PostgreSQL para que la API y el worker
         # interactivo compartan la misma cola, incluso en procesos separados.
         cred = cls._credenciales(ruc)
@@ -94,12 +98,13 @@ class SriClienteSyncService:
                 FROM {cls.JOB_TABLE}
                 WHERE ruc = :ruc AND anio = :anio AND mes = :mes
                   AND tipo_comprobante = :tipo
+                  AND operacion = :operacion
                   AND estado IN ('pendiente', 'ejecutando', 'captcha')
                 ORDER BY creado DESC
                 LIMIT 1
             """), {
                 "ruc": ruc, "anio": anio, "mes": mes,
-                "tipo": cls._tipo(tipo_comprobante),
+                "tipo": cls._tipo(tipo_comprobante), "operacion": operacion,
             }).mappings().first()
             if existente:
                 return {
@@ -111,22 +116,22 @@ class SriClienteSyncService:
             job_id = uuid.uuid4().hex
             db.execute(text(f"""
                 INSERT INTO {cls.JOB_TABLE}
-                (job_id, estado, ruc, cliente, anio, mes, tipo_comprobante, mensaje)
+                (job_id, estado, ruc, cliente, anio, mes, tipo_comprobante, operacion, mensaje)
                 VALUES
-                (:job_id, 'pendiente', :ruc, :cliente, :anio, :mes, :tipo, :mensaje)
+                (:job_id, 'pendiente', :ruc, :cliente, :anio, :mes, :tipo, :operacion, :mensaje)
             """), {
                 "job_id": job_id,
                 "ruc": ruc,
                 "cliente": cred["nombre"],
                 "anio": anio,
                 "mes": mes,
-                "tipo": cls._tipo(tipo_comprobante),
+                "tipo": cls._tipo(tipo_comprobante), "operacion": operacion,
                 "mensaje": "Sincronización en cola. Esperando al worker SRI interactivo.",
             })
         return {"job_id": job_id, "estado": "pendiente", "duplicado": False}
 
     @classmethod
-    async def _ejecutar_job(cls, job_id: str, ruc: str, anio: int, mes: int, tipo_comprobante: int) -> None:
+    async def _ejecutar_job(cls, job_id: str, ruc: str, anio: int, mes: int, tipo_comprobante: int, operacion: str = "compras") -> None:
         cls._job_update(
             job_id,
             estado="ejecutando",
@@ -134,7 +139,7 @@ class SriClienteSyncService:
         )
         try:
             resultado = await cls.sincronizar_mes(
-                ruc, anio, mes, tipo_comprobante, job_id=job_id
+                ruc, anio, mes, tipo_comprobante, job_id=job_id, operacion=operacion
             )
             cls._job_update(
                 job_id,
@@ -157,7 +162,7 @@ class SriClienteSyncService:
             row = db.execute(text(f"""
                 SELECT job_id, estado, ruc, cliente, anio, mes, tipo_comprobante,
                        sri, ya_existentes, descargadas, guardadas, errores,
-                       paginas, mensaje, detalle, creado, actualizado
+                       paginas, mensaje, detalle, creado, actualizado, operacion
                 FROM {cls.JOB_TABLE}
                 WHERE job_id = :job_id
             """), {"job_id": job_id}).mappings().first()
@@ -533,6 +538,199 @@ class SriClienteSyncService:
         await page.locator(selector).wait_for(state="visible", timeout=15000)
         await page.select_option(selector, value)
 
+    @staticmethod
+    def _tipid_emitido(identificacion: str) -> str:
+        valor = str(identificacion or "").strip()
+        if valor == "9999999999999":
+            return "07"
+        if len(valor) == 10:
+            return "05"
+        if len(valor) == 13:
+            return "04"
+        return ""
+
+    @classmethod
+    def _parsear_factura_emitida_html(cls, html: str) -> dict[str, Any]:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        cab = {}
+        tabla = soup.find("table", class_="formulario")
+        if tabla:
+            for fila in tabla.find_all("tr"):
+                celdas = fila.find_all("td")
+                if len(celdas) >= 2:
+                    clave = " ".join(celdas[0].get_text(" ", strip=True).split()).rstrip(":")
+                    valor = " ".join(celdas[1].get_text(" ", strip=True).split())
+                    cab[clave] = valor
+
+        def val(nombre: str) -> str:
+            if cab.get(nombre):
+                return cab[nombre]
+            for label in soup.find_all(["label", "td", "span"]):
+                if " ".join(label.get_text(" ", strip=True).split()).rstrip(":") == nombre.rstrip(":"):
+                    parent = label.parent
+                    if parent:
+                        cells = parent.find_all(["td", "label", "span"])
+                        for cell in cells:
+                            if cell is not label:
+                                value = " ".join(cell.get_text(" ", strip=True).split())
+                                if value:
+                                    return value
+            return ""
+
+        fecha_txt = val("Fecha Emisión")
+        fecha = datetime.strptime(fecha_txt, "%d/%m/%Y")
+        identificacion = val("Identificación Comprador")
+        def dec(v):
+            return cls._dec(v)
+
+        base0 = dec(val("Base imponible IVA 0%")) or dec(val("Base IVA 0%"))
+        baseiva = dec(val("Base imponible IVA 15%")) or dec(val("Base IVA 15%")) or dec(val("Base imponible IVA 12%")) or dec(val("Base IVA 12%"))
+        base_no = dec(val("Base imponible no objeto de IVA")) or dec(val("Base no objeto"))
+        iva = dec(val("IVA")) or dec(val("Valor IVA"))
+        if not (base0 or baseiva or base_no):
+            subtotal = dec(val("Total Sin impuestos"))
+            if iva > 0:
+                baseiva = subtotal
+            else:
+                base0 = subtotal
+
+        return {
+            "clave_acceso": val("Clave de acceso"),
+            "fecha_emision": fecha_txt,
+            "fecha": fecha,
+            "identificacion": identificacion,
+            "razon_social": val("Razón Social Comprador"),
+            "establecimiento": val("Establecimiento"),
+            "punto_emision": val("Punto de emisión"),
+            "secuencial": val("Secuencial"),
+            "base_no_objeto": base_no,
+            "base_iva0": base0,
+            "base_iva": baseiva,
+            "iva": iva,
+            "tipid": cls._tipid_emitido(identificacion),
+        }
+
+    @classmethod
+    async def _consultar_emitidos(cls, page, anio: int, mes: int) -> None:
+        await page.get_by_text("Comprobantes electrónicos emitidos", exact=True).click()
+        await page.locator("#frmPrincipal\\:calendarFechaDesde_input").wait_for(state="visible", timeout=30000)
+        await page.fill("#frmPrincipal\\:calendarFechaDesde_input", f"01/{mes:02d}/{anio}")
+        await page.click("#frmPrincipal\\:btnConsultar")
+        await page.wait_for_timeout(5000)
+        if await page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr").count() == 0:
+            raise RuntimeError("SRI no devolvió comprobantes emitidos para el período.")
+
+    @classmethod
+    async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
+        fila = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr").nth(fila_idx)
+        enlace = fila.locator("a").first
+        if await enlace.count() == 0:
+            return None
+        await enlace.scroll_into_view_if_needed()
+        await enlace.click(force=True)
+        for _ in range(60):
+            await page.wait_for_timeout(500)
+            dialogs = page.locator(".ui-dialog:visible")
+            for i in range(await dialogs.count()):
+                dialogo = dialogs.nth(i)
+                html = await dialogo.inner_html()
+                if "Espere por favor" not in html and "Clave de acceso" in html:
+                    boton = dialogo.locator(".ui-dialog-titlebar-close")
+                    if await boton.count():
+                        await boton.click()
+                    return html
+        return None
+
+    @classmethod
+    async def _procesar_emitidos_ventas(cls, page, db, result, job_id, procesadas) -> None:
+        pagina = 1
+        while True:
+            result["paginas"] = pagina
+            cls._job_update(job_id, mensaje=f"Procesando página {pagina} de facturas emitidas.", paginas=pagina)
+            filas = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr")
+            cantidad = await filas.count()
+            if cantidad == 0:
+                raise RuntimeError("La tabla de comprobantes emitidos está vacía.")
+
+            for idx in range(cantidad):
+                try:
+                    html = await cls._obtener_detalle_emitido(page, idx)
+                    if not html:
+                        continue
+                    factura = cls._parsear_factura_emitida_html(html)
+                    clave = factura["clave_acceso"].strip()
+                    if not clave:
+                        raise ValueError("La factura emitida no contiene clave de acceso.")
+                    result["sri"] += 1
+                    if clave in procesadas:
+                        result["ya_existentes"] += 1
+                        continue
+                    procesadas.add(clave)
+                    existe = db.execute(text("""
+                        SELECT 1 FROM ventas
+                        WHERE TRIM(autorizacion::text) = :clave
+                        LIMIT 1
+                    """), {"clave": clave}).first()
+                    if existe:
+                        result["ya_existentes"] += 1
+                        continue
+                    cls._insertar_venta(db, factura)
+                    db.commit()
+                    result["descargadas"] += 1
+                    result["guardadas"] += 1
+                    cls._job_update(job_id, sri=result["sri"], guardadas=result["guardadas"], descargadas=result["descargadas"], ya_existentes=result["ya_existentes"], mensaje=f"Factura emitida {result['sri']} procesada.")
+                except Exception as exc:
+                    db.rollback()
+                    result["errores"].append({"pagina": pagina, "fila": idx + 1, "detalle": str(exc)})
+                    cls._job_update(job_id, errores=result["errores"], mensaje=f"Error factura emitida fila {idx + 1}: {exc}")
+
+            boton_next = page.locator("[class*='ui-paginator-next']").first
+            if await boton_next.count() == 0:
+                break
+            clases = (await boton_next.get_attribute("class") or "").lower()
+            if "ui-state-disabled" in clases:
+                break
+            primera = await filas.first.inner_text()
+            await boton_next.click()
+            for _ in range(30):
+                await page.wait_for_timeout(500)
+                try:
+                    if await filas.first.inner_text() != primera:
+                        break
+                except Exception:
+                    pass
+            pagina += 1
+
+    @classmethod
+    def _insertar_venta(cls, db, factura: dict[str, Any]) -> None:
+        values = {
+            "numfactur": f"{factura['establecimiento']}-{factura['punto_emision']}-{factura['secuencial']}",
+            "autorizacion": factura["clave_acceso"],
+            "fecfactur": factura["fecha_emision"],
+            "ruccedcli": factura["identificacion"],
+            "nomcli": factura["razon_social"],
+            "tipid": factura["tipid"],
+            "codcomp": "18",
+            "numemi": "1",
+            "basenoobj": factura["base_no_objeto"],
+            "baseiva0": factura["base_iva0"],
+            "baseiva12": factura["base_iva"],
+            "iva": factura["iva"],
+            "ice": Decimal("0"),
+            "numret": "",
+            "autret": "",
+            "fecret": "",
+            "retiva": Decimal("0"),
+            "retrenta": Decimal("0"),
+            "mes": f"{factura['fecha'].month:02d}",
+            "año": str(factura["fecha"].year),
+            "numasiento": "",
+        }
+        cols = ", ".join(f'"{k}"' if k == "año" else k for k in values)
+        params = ", ".join(f":{k}" for k in values)
+        db.execute(text(f"INSERT INTO ventas ({cols}) VALUES ({params})"), values)
+
     @classmethod
     async def _consultar_recibidos(cls, page, anio: int, mes: int, tipo_comprobante: int) -> None:
         """Consulta recibidos y espera la tabla AJAX, no los enlaces XML.
@@ -787,7 +985,7 @@ class SriClienteSyncService:
         return False
 
     @classmethod
-    async def sincronizar_mes(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, job_id: str | None = None) -> dict[str, Any]:
+    async def sincronizar_mes(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, job_id: str | None = None, operacion: str = "compras") -> dict[str, Any]:
         cred = cls._credenciales(ruc)
         p = browser = context = page = chrome_process = None
         result = {
@@ -800,11 +998,17 @@ class SriClienteSyncService:
             cls._job_update(job_id, mensaje="Abriendo sesión del SRI.")
             p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"])
             cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI. Si aparece CAPTCHA, resuélvalo en Chromium.")
-            await cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
+            if operacion == "ventas":
+                await cls._consultar_emitidos(page, anio, mes)
+            else:
+                await cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
             cls._job_update(job_id, estado="ejecutando", mensaje="Consulta completada. Procesando comprobantes.")
             db = obtener_session_cliente(ruc)
             procesadas: set[str] = set()
             try:
+                if operacion == "ventas":
+                    await cls._procesar_emitidos_ventas(page, db, result, job_id, procesadas)
+                    return result
                 for pagina in range(1, 1001):
                     result["paginas"] = pagina
                     cls._job_update(job_id, mensaje=f"Procesando página {pagina}.", paginas=pagina)
