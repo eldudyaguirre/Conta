@@ -861,6 +861,7 @@ class SriClienteSyncService:
             return None
         await enlace.scroll_into_view_if_needed()
         await enlace.click(force=True)
+
         for _ in range(60):
             await page.wait_for_timeout(500)
             dialogs = page.locator(".ui-dialog:visible")
@@ -868,10 +869,85 @@ class SriClienteSyncService:
                 dialogo = dialogs.nth(i)
                 html = await dialogo.inner_html()
                 if "Espere por favor" not in html and "Clave de acceso" in html:
+                    # Los detalles de factura del SRI también están paginados.
+                    # Una factura puede tener varias líneas de detalle y cada
+                    # página puede mostrar su propia tabla de impuestos.
+                    # El parser anterior solo veía la primera página, por eso
+                    # 100 + 20 terminaba como 100 y el IVA como 15.
+                    paginas_html = [html]
+                    pagina_actual = 1
+                    max_paginas = 100
+
+                    while pagina_actual < max_paginas:
+                        siguiente = None
+                        candidatos = [
+                            ".rf-pg-btn-next",
+                            "input.rf-pg-btn-next",
+                            "a.rf-pg-btn-next",
+                            ".ui-paginator-next",
+                            "a[title*='Siguiente']",
+                            "button[title*='Siguiente']",
+                        ]
+
+                        for selector in candidatos:
+                            loc = dialogo.locator(selector).last
+                            if await loc.count() == 0:
+                                continue
+                            try:
+                                disabled = await loc.get_attribute("disabled")
+                                classes = (await loc.get_attribute("class") or "").lower()
+                                aria = (await loc.get_attribute("aria-disabled") or "").lower()
+                                if disabled is not None or "disabled" in classes or aria == "true":
+                                    continue
+                                if not await loc.is_visible():
+                                    continue
+                                siguiente = loc
+                                break
+                            except Exception:
+                                continue
+
+                        if siguiente is None:
+                            break
+
+                        # Esperamos a que cambie el contenido de la tabla de
+                        # detalles después del AJAX de RichFaces.
+                        tablas_antes = dialogo.locator("table.rf-dt.reporte")
+                        firma_antes = ""
+                        try:
+                            if await tablas_antes.count():
+                                firma_antes = (await tablas_antes.last.inner_text())[:1000]
+                        except Exception:
+                            pass
+
+                        try:
+                            await siguiente.click(force=True)
+                        except Exception:
+                            break
+
+                        cambio = False
+                        for _espera in range(30):
+                            await page.wait_for_timeout(300)
+                            try:
+                                tablas_despues = dialogo.locator("table.rf-dt.reporte")
+                                firma_despues = (await tablas_despues.last.inner_text())[:1000] if await tablas_despues.count() else ""
+                                if firma_despues and firma_despues != firma_antes:
+                                    cambio = True
+                                    break
+                            except Exception:
+                                pass
+
+                        if not cambio:
+                            break
+
+                        html_nuevo = await dialogo.inner_html()
+                        paginas_html.append(html_nuevo)
+                        pagina_actual += 1
+
                     boton = dialogo.locator(".ui-dialog-titlebar-close")
                     if await boton.count():
                         await boton.click()
-                    return html
+                    return "\n".join(paginas_html)
+
         return None
 
     @classmethod
