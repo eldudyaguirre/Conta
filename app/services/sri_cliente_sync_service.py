@@ -502,7 +502,13 @@ class SriClienteSyncService:
 
     @classmethod
     async def _consultar_recibidos(cls, page, anio: int, mes: int, tipo_comprobante: int) -> None:
-        """Consulta comprobantes recibidos usando Chrome real y reCAPTCHA Enterprise del SRI."""
+        """Consulta recibidos y espera la tabla AJAX, no los enlaces XML.
+
+        El SRI ejecuta dos llamadas al pulsar Consultar: una inicial sin token
+        y otra desde rcBuscar() con el token de reCAPTCHA. La segunda llamada
+        es la que llena tablaCompRecibidos. Por eso el criterio de éxito es que
+        la tabla tenga filas, no que ya existan enlaces .xml en el DOM.
+        """
         campos = {
             "ano": str(anio),
             "mes": str(mes),
@@ -519,6 +525,8 @@ class SriClienteSyncService:
             "input[value*='Consultar']",
             "button:has-text('Consultar')",
         ]
+
+        tabla_selector = "#frmPrincipal\\:tablaCompRecibidos"
 
         async def preparar_formulario():
             for nombre, value in campos.items():
@@ -559,17 +567,49 @@ class SriClienteSyncService:
                 await page.wait_for_timeout(500)
             return False
 
-        # Primera carga.
+        async def contar_filas() -> int:
+            """Cuenta filas de datos, ignorando encabezados y paginadores."""
+            try:
+                return await page.locator(
+                    f"{tabla_selector} tbody tr"
+                ).count()
+            except Exception:
+                return 0
+
+        async def esperar_resultado(segundos: int = 45) -> int:
+            """Espera a que PrimeFaces termine de pintar tablaCompRecibidos."""
+            limite = time.monotonic() + segundos
+            ultima = 0
+
+            while time.monotonic() < limite:
+                filas = await contar_filas()
+                if filas > 0:
+                    return filas
+
+                # Algunas versiones del SRI no mantienen tbody de forma estable.
+                # El texto de la tabla permite detectar igualmente que llegó el AJAX.
+                try:
+                    texto = await page.locator(tabla_selector).inner_text(timeout=1000)
+                    normalizado = " ".join(texto.split())
+                    if (
+                        "RUC y Razón social emisor" in normalizado
+                        and ("Factura " in normalizado or "Clave de acceso" in normalizado)
+                    ):
+                        return max(1, await contar_filas())
+                except Exception:
+                    pass
+
+                await page.wait_for_timeout(500)
+                ultima = filas
+
+            return ultima
+
         await page.goto(
             cls.RECIBIDOS_URL,
             wait_until="domcontentloaded",
             timeout=30000,
         )
 
-        # El SRI puede cargar la página antes de terminar de inicializar
-        # reCAPTCHA Enterprise. En las pruebas manuales, un F5 hizo que el
-        # botón pasara de bloqueado a habilitado. Reproducimos ese comportamiento
-        # automáticamente, sin intervención del usuario.
         for intento in range(1, 4):
             boton = await preparar_formulario()
 
@@ -581,14 +621,6 @@ class SriClienteSyncService:
             if await esperar_boton_habilitado(boton, segundos=5):
                 break
 
-            # El formulario del SRI llega inicialmente con Consultar deshabilitado.
-            # El propio portal expone rcBuscar(), una llamada PrimeFaces AJAX que
-            # inicializa el formulario y, en su onsuccess, ejecuta:
-            #   reactivarBoton('frmPrincipal:btnBuscar')
-            #   resetarRecaptcha('SI')
-            # En Chrome real + CDP comprobamos que esta es la inicialización que
-            # deja el botón habilitado. No forzamos disabled=false desde Conta:
-            # dejamos que sea el JavaScript del SRI quien lo reactive.
             inicializado = await page.evaluate("""
                 () => {
                     if (typeof rcBuscar !== "function") {
@@ -630,57 +662,42 @@ class SriClienteSyncService:
                     "inicializar rcBuscar() y reintentar la página. " + diagnostico
                 )
 
+        # Importante: el click genera primero un AJAX sin token. Después,
+        # executeRecaptcha() llama a onSubmit() y rcBuscar() genera el AJAX
+        # definitivo con g-recaptcha-response. No esperamos XML aquí.
         try:
-            await boton.click(timeout=15000)
-        except PlaywrightTimeoutError as exc:
+            await page.evaluate("""
+                () => {
+                    const boton = document.getElementById('frmPrincipal:btnBuscar');
+                    if (!boton || typeof boton.onclick !== 'function') {
+                        throw new Error('No se encontró el onclick oficial de frmPrincipal:btnBuscar.');
+                    }
+                    boton.onclick();
+                }
+            """)
+        except Exception as exc:
             diagnostico = await cls._diagnostico_consulta(page)
             raise RuntimeError(
-                "SRI habilitó el formulario, pero no fue posible ejecutar la consulta. "
+                "No fue posible ejecutar el flujo oficial de Consultar del SRI. "
                 + diagnostico
             ) from exc
 
-        # El SRI ha cambiado varias veces el markup del enlace de descarga XML.
-        xml_selector = (
-            'a[id*="lnkXml"], '
-            'a[id$=":lnkXml"], '
-            'input[id*="lnkXml"], '
-            'button[id*="lnkXml"], '
-            'a[title*="XML"], '
-            'a[href*="xml"]'
-        )
-        links = page.locator(xml_selector)
-        try:
-            await links.first.wait_for(state="visible", timeout=20000)
-            return
-        except PlaywrightTimeoutError:
+        filas = await esperar_resultado(segundos=45)
+        if filas <= 0:
             diagnostico = await cls._diagnostico_consulta(page)
-            if settings.SRI_HEADLESS:
-                raise RuntimeError(
-                    "SRI no devolvió los enlaces XML después de Consultar. "
-                    "El navegador está en modo headless; use SRI_HEADLESS=false para la primera prueba. "
-                    + diagnostico
-                )
-            print(
-                "SRI todavía no muestra los enlaces XML. "
-                "Esperando hasta 120 segundos por la respuesta del portal."
-            )
             try:
-                await links.first.wait_for(state="visible", timeout=120000)
-            except PlaywrightTimeoutError as exc:
-                diagnostico = await cls._diagnostico_consulta(page)
-                try:
-                    await page.screenshot(
-                        path=str(Path(tempfile.gettempdir()) / f"conta_sri_resultado_{anio}_{mes:02d}.png"),
-                        full_page=True,
-                    )
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    "SRI no mostró los enlaces XML después de 120 segundos. "
-                    "La consulta pudo quedar detenida por CAPTCHA, por un cambio del portal "
-                    "o porque la tabla no terminó de renderizar. " + diagnostico
-                ) from exc
+                await page.screenshot(
+                    path=str(Path(tempfile.gettempdir()) / f"conta_sri_sin_resultado_{anio}_{mes:02d}.png"),
+                    full_page=True,
+                )
+            except Exception:
+                pass
+            raise RuntimeError(
+                "El SRI ejecutó la consulta pero no llenó tablaCompRecibidos. "
+                + diagnostico
+            )
 
+        print(f"SRI consulta completada: {filas} filas detectadas en tablaCompRecibidos.")
     @staticmethod
     async def _diagnostico_consulta(page) -> str:
         try:
