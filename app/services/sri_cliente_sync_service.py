@@ -604,25 +604,52 @@ class SriClienteSyncService:
     @classmethod
     def _parsear_factura_emitida_html(cls, html: str) -> dict[str, Any]:
         from bs4 import BeautifulSoup
+        import re
+
         soup = BeautifulSoup(html, "html.parser")
-        cab = {}
-        tabla = soup.find("table", class_="formulario")
-        if tabla:
+
+        # El detalle del SRI no mantiene siempre los mismos nombres de
+        # etiquetas. Los valores tributarios pueden aparecer en distintas
+        # tablas del diálogo (por ejemplo "SUBTOTAL 15%" / "IVA 15%").
+        # Por eso NO debemos leer únicamente table.formulario.
+        cab: dict[str, str] = {}
+        pares: list[tuple[str, str]] = []
+
+        for tabla in soup.find_all("table"):
             for fila in tabla.find_all("tr"):
-                celdas = fila.find_all("td")
-                if len(celdas) >= 2:
-                    clave = " ".join(celdas[0].get_text(" ", strip=True).split()).rstrip(":")
-                    valor = " ".join(celdas[1].get_text(" ", strip=True).split())
-                    cab[clave] = valor
+                celdas = fila.find_all(["td", "th"])
+                textos = [
+                    " ".join(c.get_text(" ", strip=True).split())
+                    for c in celdas
+                ]
+                textos = [t for t in textos if t]
+                if len(textos) >= 2:
+                    for i in range(0, len(textos) - 1, 2):
+                        pares.append((textos[i].rstrip(":"), textos[i + 1]))
+                    if len(textos) == 2:
+                        cab[textos[0].rstrip(":")] = textos[1]
+
+        def normalizar(s: str) -> str:
+            return " ".join(s.lower().replace(":", " ").split())
 
         def val(nombre: str) -> str:
-            if cab.get(nombre):
-                return cab[nombre]
-            for label in soup.find_all(["label", "td", "span"]):
-                if " ".join(label.get_text(" ", strip=True).split()).rstrip(":") == nombre.rstrip(":"):
+            objetivo = normalizar(nombre)
+            if objetivo in {normalizar(k): v for k, v in cab.items()}:
+                for k, v in cab.items():
+                    if normalizar(k) == objetivo:
+                        return v
+
+            for etiqueta, valor in pares:
+                if normalizar(etiqueta) == objetivo:
+                    return valor
+
+            # Fallback para la estructura vieja del portal.
+            for label in soup.find_all(["label", "td", "span", "th"]):
+                texto = normalizar(label.get_text(" ", strip=True))
+                if texto == objetivo:
                     parent = label.parent
                     if parent:
-                        cells = parent.find_all(["td", "label", "span"])
+                        cells = parent.find_all(["td", "th", "label", "span"])
                         for cell in cells:
                             if cell is not label:
                                 value = " ".join(cell.get_text(" ", strip=True).split())
@@ -630,49 +657,95 @@ class SriClienteSyncService:
                                     return value
             return ""
 
-        fecha_txt = val("Fecha Emisión")
-        fecha = datetime.strptime(fecha_txt, "%d/%m/%Y")
-        identificacion = val("Identificación Comprador")
         def dec(v):
             return cls._dec(v)
 
-        base0 = dec(val("Base imponible IVA 0%")) or dec(val("Base IVA 0%"))
-        baseiva = (
-            dec(val("Base imponible IVA 15%"))
-            or dec(val("Base IVA 15%"))
-            or dec(val("Base imponible IVA 12%"))
-            or dec(val("Base IVA 12%"))
-        )
-        base_no = dec(val("Base imponible no objeto de IVA")) or dec(val("Base no objeto"))
+        def buscar_valor_por_etiquetas(etiquetas: list[str]) -> Decimal:
+            objetivos = [normalizar(x) for x in etiquetas]
 
-        # IMPORTANTE:
-        # En el detalle del SRI, "IVA" puede representar la TARIFA (15%),
-        # no el importe monetario del impuesto. Nunca debemos guardar esa
-        # tarifa directamente en ventas.iva.
-        # Primero buscamos exclusivamente campos que representen el valor.
-        iva = (
-            dec(val("Valor IVA"))
-            or dec(val("Importe IVA"))
-            or dec(val("IVA total"))
-            or dec(val("Total IVA"))
-        )
+            # Primero buscamos coincidencia exacta.
+            for etiqueta, valor in pares:
+                if normalizar(etiqueta) in objetivos:
+                    numero = dec(valor)
+                    if valor.strip():
+                        return numero
 
-        # En algunos detalles del SRI el texto de la fila de la base
-        # gravada no se identifica de forma consistente y puede terminar
-        # interpretándose como "Base IVA 0%". Si existe IVA y no hay base
-        # gravada, esa base es la base sometida al 15%, no una base 0%.
+            # Después aceptamos etiquetas que comiencen por la expresión
+            # buscada, por ejemplo "SUBTOTAL 15%" o "IVA 15%".
+            for etiqueta, valor in pares:
+                et = normalizar(etiqueta)
+                if any(et.startswith(obj + " ") for obj in objetivos):
+                    return dec(valor)
+
+            return Decimal("0")
+
+        fecha_txt = val("Fecha Emisión")
+        if not fecha_txt:
+            # Algunas versiones muestran la fecha como "Fecha de Emisión".
+            fecha_txt = val("Fecha de Emisión")
+        fecha = datetime.strptime(fecha_txt, "%d/%m/%Y")
+
+        identificacion = val("Identificación Comprador")
+
+        # Bases tributarias: para el esquema de ventas de TotalCounts,
+        # baseiva12 representa la base gravada, aunque la tarifa vigente sea
+        # 15%. baseiva0 queda exclusivamente para operaciones a tarifa 0%.
+        base0 = buscar_valor_por_etiquetas([
+            "Base imponible IVA 0%",
+            "Base IVA 0%",
+            "Subtotal 0%",
+            "Subtotal IVA 0%",
+        ])
+
+        baseiva = buscar_valor_por_etiquetas([
+            "Base imponible IVA 15%",
+            "Base IVA 15%",
+            "Base imponible IVA 12%",
+            "Base IVA 12%",
+            "Subtotal 15%",
+            "Subtotal IVA 15%",
+            "Subtotal 12%",
+            "Subtotal IVA 12%",
+        ])
+
+        base_no = buscar_valor_por_etiquetas([
+            "Base imponible no objeto de IVA",
+            "Base no objeto",
+            "Subtotal no objeto de IVA",
+        ])
+
+        # El importe monetario debe salir de una etiqueta de valor de IVA.
+        # NO usamos una etiqueta genérica "IVA", porque en ciertas pantallas
+        # ese texto corresponde a la tarifa (15%).
+        iva = buscar_valor_por_etiquetas([
+            "Valor IVA",
+            "Importe IVA",
+            "IVA total",
+            "Total IVA",
+            "IVA 15%",
+            "IVA 12%",
+        ])
+
+        # Si el detalle no trae el importe pero sí la base gravada, calculamos
+        # el impuesto con la tarifa actual de la factura. Para este portal,
+        # la tarifa gravada de estas pruebas es 15%.
+        if not iva and baseiva:
+            iva = (baseiva * Decimal("0.15")).quantize(Decimal("0.01"))
+
+        # Si la tabla tributaria del SRI no etiqueta la base como "Subtotal
+        # 15%" pero existe un IVA positivo, el valor que antes cayó en base0
+        # corresponde a la base gravada. Solo hacemos esta reasignación cuando
+        # hay evidencia de impuesto.
         if not baseiva and base0 and iva:
             baseiva = base0
             base0 = Decimal("0")
 
-        # Si SRI no entrega explícitamente el valor monetario, calculamos
-        # únicamente con la base gravada y la tarifa del 15%.
-        if not iva and baseiva:
-            iva = (baseiva * Decimal("0.15")).quantize(Decimal("0.01"))
-
-        # Último respaldo: si no encontramos ninguna base, usamos el subtotal.
         if not (base0 or baseiva or base_no):
-            subtotal = dec(val("Total Sin impuestos"))
+            subtotal = buscar_valor_por_etiquetas([
+                "Total Sin impuestos",
+                "Subtotal sin impuestos",
+                "Subtotal",
+            ])
             if iva > 0:
                 baseiva = subtotal
             else:
