@@ -52,6 +52,34 @@ async def sincronizar_ventas(
             detail=f"Error iniciando sincronización de ventas: {exc}",
         )
 
+@router.post("/ventas/validar")
+async def validar_ventas(
+    request: SincronizarVentasRequest,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Valida las ventas emitidas comparando SRI vs BD día por día."""
+    try:
+        resultado = SriClienteSyncService.iniciar_sincronizacion(
+            ruc=request.ruc,
+            anio=request.anio,
+            mes=request.mes,
+            tipo_comprobante=1,
+            operacion="ventas_validar",
+        )
+        return {
+            "usuario": usuario["usrname"],
+            "tipo": "sri_validar_ventas",
+            **resultado,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error iniciando validador de ventas SRI: {exc}",
+        )
+
+
 @router.post("/compras/sincronizar")
 async def sincronizar_compras(
     request: SincronizarComprasRequest,
