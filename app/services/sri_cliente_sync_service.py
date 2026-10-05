@@ -609,32 +609,42 @@ class SriClienteSyncService:
         soup = BeautifulSoup(html, "html.parser")
         cab: dict[str, str] = {}
         pares: list[tuple[str, str]] = []
+        tablas_impuestos_procesadas: set[str] = set()
 
         for tabla in soup.find_all("table"):
-            encabezados: list[str] = []
-            for fila in tabla.find_all("tr"):
-                celdas = fila.find_all(["td", "th"])
-                textos = [" ".join(c.get_text(" ", strip=True).split()) for c in celdas]
-                textos = [t for t in textos if t]
-                if not textos:
+            # El SRI genera una tabla de impuestos por cada línea del detalle.
+            # RichFaces puede mantener copias ocultas de una misma tabla en el
+            # DOM. Procesamos cada ID de tabla una sola vez para no duplicar
+            # 100+20 como 200+40.
+            tabla_id = tabla.get("id") or ""
+            if "tabla-impuestos-detalle-factura" in tabla_id:
+                if tabla_id in tablas_impuestos_procesadas:
                     continue
+                tablas_impuestos_procesadas.add(tabla_id)
 
-                # El detalle de impuestos del SRI tiene 5 columnas:
-                # Impuesto | Porcentaje | Tarifa | Base Imponible | Valor
-                # No se puede tratar como pares etiqueta/valor porque una fila
-                # como "IVA | 15.0 | 15.0 | 100.0 | 15.0" terminaría asociando
-                # 100.0/15.0 de forma incorrecta y el subtotal podría caer en IVA 0.
-                if len(textos) >= 4 and any(
-                    "impuesto" == t.lower().strip() for t in textos
-                ) and any(
-                    "base imponible" == t.lower().strip() for t in textos
-                ):
-                    encabezados = [t.rstrip(":") for t in textos]
-                    continue
+                filas_impuesto = tabla.find_all("tr")
+                encabezados_impuesto: list[str] = []
+                for fila in filas_impuesto:
+                    celdas = fila.find_all(["td", "th"])
+                    textos = [" ".join(c.get_text(" ", strip=True).split()) for c in celdas]
+                    if not textos:
+                        continue
 
-                if encabezados and len(textos) == len(encabezados):
-                    mapa = dict(zip(encabezados, textos))
-                    impuesto = mapa.get("Impuesto", "").strip()
+                    if not encabezados_impuesto:
+                        encabezados_impuesto = [t.rstrip(":") for t in textos]
+                        if not all(
+                            x.lower() in {"impuesto", "porcentaje", "tarifa", "base imponible", "valor"}
+                            for x in encabezados_impuesto
+                        ):
+                            encabezados_impuesto = []
+                            continue
+                        continue
+
+                    if len(textos) != len(encabezados_impuesto):
+                        continue
+
+                    mapa = dict(zip(encabezados_impuesto, textos))
+                    impuesto = mapa.get("Impuesto", "").strip().upper()
                     porcentaje = mapa.get("Porcentaje", "").strip()
                     tarifa = mapa.get("Tarifa", "").strip()
                     base = mapa.get("Base Imponible", "").strip()
@@ -644,13 +654,19 @@ class SriClienteSyncService:
                     if not match_tasa:
                         match_tasa = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*%?", tarifa)
 
-                    if match_tasa and impuesto.upper() == "IVA":
+                    if match_tasa and impuesto == "IVA":
                         tasa_decimal = cls._dec(match_tasa.group(1))
                         tasa_canonica = format(tasa_decimal, "f").rstrip("0").rstrip(".")
                         pares.append((f"Base imponible IVA {tasa_canonica}%", base))
                         pares.append((f"Valor IVA {tasa_canonica}%", valor))
-                        # También conservamos la fila completa para diagnóstico.
-                        pares.append((f"IVA {tasa_canonica}%", valor))
+                continue
+
+            encabezados: list[str] = []
+            for fila in tabla.find_all("tr"):
+                celdas = fila.find_all(["td", "th"])
+                textos = [" ".join(c.get_text(" ", strip=True).split()) for c in celdas]
+                textos = [t for t in textos if t]
+                if not textos:
                     continue
 
                 if len(textos) >= 2:
