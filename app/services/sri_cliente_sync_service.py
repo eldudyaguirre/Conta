@@ -1090,39 +1090,13 @@ class SriClienteSyncService:
         from datetime import date
 
         ultimo_dia = calendar.monthrange(anio, mes)[1]
-        # Reanudar desde el último día guardado, reprocesando ese día
-        # para cubrir una interrupción a mitad de sus páginas.
-        with db.begin() if not db.in_transaction() else db:
-            ultima_fecha_row = db.execute(text("""
-                SELECT MAX(
-                    CASE
-                        WHEN TRIM(fecfactur::text) ~ '^\\d{4}-\\d{2}-\\d{2}$'
-                        THEN TRIM(fecfactur::text)::date
-                    END
-                ) AS ultima_fecha
-                FROM ventas
-                WHERE TRIM(mes::text) = :mes
-                  AND TRIM(año::text) = :anio
-            """), {
-                "mes": f"{mes:02d}",
-                "anio": str(anio),
-            }).mappings().first()
 
-        ultima_fecha = ultima_fecha_row["ultima_fecha"] if ultima_fecha_row else None
-        dia_inicial = (
-            ultima_fecha.day
-            if ultima_fecha and ultima_fecha.year == anio and ultima_fecha.month == mes
-            else 1
-        )
-
-        if dia_inicial > 1:
-            cls._job_update(
-                job_id,
-                mensaje=(
-                    f"Retomando sincronización desde el día {dia_inicial:02d}/{mes:02d}/{anio} "
-                    f"(último día guardado: {ultima_fecha.strftime('%d/%m/%Y')})."
-                ),
-            )
+        # La sincronización mensual SIEMPRE comienza por el día 1.
+        # No usamos MAX(fecfactur) para decidir el día inicial porque tener
+        # registros del día 30 no significa que los días 1..29 hayan sido
+        # procesados correctamente. Cada factura ya existente se detecta por
+        # clave de acceso, por lo que volver a recorrer el mes es seguro.
+        dia_inicial = 1
 
         for dia in range(dia_inicial, ultimo_dia + 1):
             cls._verificar_cancelacion(job_id)
