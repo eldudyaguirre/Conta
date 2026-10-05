@@ -135,10 +135,6 @@ class SriVentasValidatorService:
                     result["faltantes"] += len(faltantes)
                     result["sobrantes"] += len(sobrantes)
 
-                    # Los faltantes se insertan durante la revisión.
-                    result["guardadas"] += len(faltantes)
-                    result["descargadas"] += len(faltantes)
-
                     SriClienteSyncService._job_update(
                         job_id,
                         guardadas=result["guardadas"],
@@ -272,6 +268,7 @@ class SriVentasValidatorService:
         await SriClienteSyncService._consultar_emitidos_dia(page, fecha)
 
         claves_sri: set[str] = set()
+        faltantes: list[str] = []
         pagina = 1
 
         while True:
@@ -310,7 +307,9 @@ class SriVentasValidatorService:
                         # falta en la base. Nunca borramos sobrantes locales.
                         SriClienteSyncService._insertar_venta(db, factura)
                         db.commit()
+                        faltantes.append(clave)
                         result["guardadas"] += 1
+                        result["descargadas"] += 1
 
                     SriClienteSyncService._job_update(
                         job_id,
@@ -390,7 +389,9 @@ class SriVentasValidatorService:
         }).scalars().all()
         claves_bd = {str(k).strip() for k in db_keys if k}
 
-        faltantes = sorted(claves_sri - claves_bd)
+        # "faltantes" conserva las claves que realmente no estaban en BD antes
+        # de insertarlas. Se deduplica por seguridad.
+        faltantes = sorted(set(faltantes))
         sobrantes = sorted(claves_bd - claves_sri)
 
         await SriClienteSyncService._volver_pagina_1_emitidos(page)
