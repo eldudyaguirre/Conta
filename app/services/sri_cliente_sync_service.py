@@ -1058,7 +1058,7 @@ class SriClienteSyncService:
         values = {
             "numfactur": f"{factura['establecimiento']}-{factura['punto_emision']}-{factura['secuencial']}",
             "autorizacion": factura["clave_acceso"],
-            "fecfactur": factura["fecha_emision"],
+            "fecfactur": factura["fecha"].strftime("%Y-%m-%d"),
             "ruccedcli": factura["identificacion"],
             "nomcli": factura["razon_social"],
             "tipid": factura["tipid"],
