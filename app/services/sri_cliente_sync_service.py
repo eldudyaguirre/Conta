@@ -1131,7 +1131,7 @@ class SriClienteSyncService:
             procesadas: set[str] = set()
             try:
                 if operacion == "ventas":
-                    await cls._procesar_emitidos_ventas(page, db, result, job_id, procesadas)
+                    await cls._procesar_emitidos_ventas(page, db, result, job_id, procesadas, anio, mes)
                     return result
                 for pagina in range(1, 1001):
                     result["paginas"] = pagina
