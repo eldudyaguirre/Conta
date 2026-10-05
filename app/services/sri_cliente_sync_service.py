@@ -690,17 +690,22 @@ class SriClienteSyncService:
             return ""
 
         def buscar_valor_por_etiquetas(etiquetas: list[str]) -> Decimal:
+            # Una factura puede tener varias líneas con la misma tarifa.
+            # El SRI entrega una fila de impuesto por cada detalle, por lo que
+            # NO debemos devolver solo la primera coincidencia.
             objetivos = [normalizar(x) for x in etiquetas]
-            for etiqueta, valor in pares:
-                if normalizar(etiqueta) in objetivos:
-                    if "%" not in valor:
-                        return cls._dec(valor)
+            total = Decimal("0")
+            encontrado = False
+
             for etiqueta, valor in pares:
                 et = normalizar(etiqueta)
-                if any(et.startswith(obj + " ") for obj in objetivos):
-                    if "%" not in valor:
-                        return cls._dec(valor)
-            return Decimal("0")
+                if "%" in valor:
+                    continue
+                if et in objetivos or any(et.startswith(obj + " ") for obj in objetivos):
+                    total += cls._dec(valor)
+                    encontrado = True
+
+            return total if encontrado else Decimal("0")
 
         def buscar_tasa(tipo: str, etiquetas_base: list[str], etiquetas_iva: list[str]) -> tuple[Decimal, Decimal]:
             base = buscar_valor_por_etiquetas(etiquetas_base)
