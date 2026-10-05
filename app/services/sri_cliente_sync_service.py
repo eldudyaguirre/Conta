@@ -1091,7 +1091,37 @@ class SriClienteSyncService:
             ultima_fecha_row = db.execute(text("""
                 SELECT MAX(
                     CASE
-                        WHEN TRIM(fecfactur::text) ~ '^\\d{4}-\\d{2}-\\d{2}            cls._verificar_cancelacion(job_id)
+                        WHEN TRIM(fecfactur::text) ~ '^\\d{4}-\\d{2}-\\d{2}$'
+                        THEN TRIM(fecfactur::text)::date
+                    END
+                ) AS ultima_fecha
+                FROM ventas
+                WHERE TRIM(mes::text) = :mes
+                  AND TRIM(año::text) = :anio
+            """), {
+                "mes": f"{mes:02d}",
+                "anio": str(anio),
+            }).mappings().first()
+
+        ultima_fecha = ultima_fecha_row["ultima_fecha"] if ultima_fecha_row else None
+        dia_inicial = (
+            ultima_fecha.day
+            if ultima_fecha and ultima_fecha.year == anio and ultima_fecha.month == mes
+            else 1
+        )
+
+        if dia_inicial > 1:
+            cls._job_update(
+                job_id,
+                mensaje=(
+                    f"Retomando sincronización desde el día "
+                    f"{dia_inicial:02d}/{mes:02d}/{anio} "
+                    f"(último día guardado: {ultima_fecha.strftime('%d/%m/%Y')})."
+                ),
+            )
+
+        for dia in range(dia_inicial, ultimo_dia + 1):
+            cls._verificar_cancelacion(job_id)
             fecha_consulta = date(anio, mes, dia)
             cls._job_update(
                 job_id,
