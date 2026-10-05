@@ -657,9 +657,15 @@ class SriClienteSyncService:
                 try:
                     fila = filas.nth(idx)
                     columnas = await fila.locator("td").all_inner_texts()
-                    # En Emitidos SRI la columna de tipo identifica el documento.
-                    # Esta primera implementación importa únicamente facturas (01).
-                    if len(columnas) >= 2 and columnas[1].strip() not in ("01", "Factura", "FACTURA"):
+                    # En Emitidos SRI la segunda columna suele venir como
+                    # "Factura 001-102-0000260", no solamente como "Factura".
+                    # Importamos únicamente comprobantes de tipo factura (01).
+                    tipo_texto = " ".join(columnas[1].strip().split()) if len(columnas) >= 2 else ""
+                    if tipo_texto and not (
+                        tipo_texto == "01"
+                        or tipo_texto.lower().startswith("factura")
+                        or " factura " in f" {tipo_texto.lower()} "
+                    ):
                         continue
                     html = await cls._obtener_detalle_emitido(page, idx)
                     if not html:
