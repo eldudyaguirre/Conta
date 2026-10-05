@@ -624,7 +624,6 @@ class SriClienteSyncService:
                 # No se puede tratar como pares etiqueta/valor porque una fila
                 # como "IVA | 15.0 | 15.0 | 100.0 | 15.0" terminaría asociando
                 # 100.0/15.0 de forma incorrecta y el subtotal podría caer en IVA 0.
-                normalizados = [normalizar_texto for normalizar_texto in textos]
                 if len(textos) >= 4 and any(
                     "impuesto" == t.lower().strip() for t in textos
                 ) and any(
