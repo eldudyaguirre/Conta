@@ -1,3 +1,8 @@
+import os
+
+if os.name == "nt":
+    os.add_dll_directory(r"C:\Program Files\PostgreSQL\16\bin")
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
