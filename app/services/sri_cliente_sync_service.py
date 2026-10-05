@@ -613,13 +613,51 @@ class SriClienteSyncService:
 
     @classmethod
     async def _consultar_emitidos(cls, page, anio: int, mes: int) -> None:
+        """Abre la consulta de comprobantes emitidos.
+        
+        La pantalla del SRI consulta por una fecha exacta, no por todo el mes.
+        La iteración diaria se realiza en _procesar_emitidos_ventas().
+        """
         await page.get_by_text("Comprobantes electrónicos emitidos", exact=True).click()
-        await page.locator("#frmPrincipal\\:calendarFechaDesde_input").wait_for(state="visible", timeout=30000)
-        await page.fill("#frmPrincipal\\:calendarFechaDesde_input", f"01/{mes:02d}/{anio}")
+        await page.locator("#frmPrincipal\\:calendarFechaDesde_input").wait_for(
+            state="visible", timeout=30000
+        )
+
+    @classmethod
+    async def _consultar_emitidos_dia(cls, page, fecha) -> int:
+        """Consulta un día concreto y devuelve el número de filas de resultados."""
+        selector_fecha = "#frmPrincipal\\:calendarFechaDesde_input"
+        selector_tabla = "#frmPrincipal\\:tablaCompEmitidos_data tr"
+
+        await page.locator(selector_fecha).fill(fecha.strftime("%d/%m/%Y"))
+
+        # Guardamos una referencia al primer resultado para poder esperar el AJAX.
+        filas = page.locator(selector_tabla)
+        primera_antes = ""
+        try:
+            if await filas.count():
+                primera_antes = (await filas.first.inner_text()).strip()
+        except Exception:
+            pass
+
         await page.click("#frmPrincipal\\:btnConsultar")
-        await page.wait_for_timeout(5000)
-        if await page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr").count() == 0:
-            raise RuntimeError("SRI no devolvió comprobantes emitidos para el período.")
+
+        # PrimeFaces actualiza la tabla mediante AJAX. Esperamos a que termine
+        # sin asumir que siempre habrá resultados.
+        for _ in range(30):
+            await page.wait_for_timeout(500)
+            try:
+                cantidad = await filas.count()
+                if cantidad == 0:
+                    continue
+                primera_despues = (await filas.first.inner_text()).strip()
+                if not primera_antes or primera_despues != primera_antes:
+                    break
+            except Exception:
+                pass
+
+        await page.wait_for_timeout(1000)
+        return await filas.count()
 
     @classmethod
     async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
@@ -643,76 +681,150 @@ class SriClienteSyncService:
         return None
 
     @classmethod
-    async def _procesar_emitidos_ventas(cls, page, db, result, job_id, procesadas) -> None:
-        pagina = 1
-        while True:
-            result["paginas"] = pagina
-            cls._job_update(job_id, mensaje=f"Procesando página {pagina} de facturas emitidas.", paginas=pagina)
-            filas = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr")
-            cantidad = await filas.count()
-            if cantidad == 0:
-                raise RuntimeError("La tabla de comprobantes emitidos está vacía.")
+    async def _procesar_emitidos_ventas(cls, page, db, result, job_id, procesadas, anio: int, mes: int) -> None:
+        """Consulta y procesa todas las fechas del mes de comprobantes emitidos."""
+        import calendar
 
-            for idx in range(cantidad):
-                try:
-                    fila = filas.nth(idx)
-                    columnas = await fila.locator("td").all_inner_texts()
-                    # En Emitidos SRI la segunda columna suele venir como
-                    # "Factura 001-102-0000260", no solamente como "Factura".
-                    # Importamos únicamente comprobantes de tipo factura (01).
-                    tipo_texto = " ".join(columnas[1].strip().split()) if len(columnas) >= 2 else ""
-                    if tipo_texto and not (
-                        tipo_texto == "01"
-                        or tipo_texto.lower().startswith("factura")
-                        or " factura " in f" {tipo_texto.lower()} "
-                    ):
-                        continue
-                    html = await cls._obtener_detalle_emitido(page, idx)
-                    if not html:
-                        continue
-                    factura = cls._parsear_factura_emitida_html(html)
-                    clave = factura["clave_acceso"].strip()
-                    if not clave:
-                        raise ValueError("La factura emitida no contiene clave de acceso.")
-                    result["sri"] += 1
-                    if clave in procesadas:
-                        result["ya_existentes"] += 1
-                        continue
-                    procesadas.add(clave)
-                    existe = db.execute(text("""
-                        SELECT 1 FROM ventas
-                        WHERE TRIM(autorizacion::text) = :clave
-                        LIMIT 1
-                    """), {"clave": clave}).first()
-                    if existe:
-                        result["ya_existentes"] += 1
-                        continue
-                    cls._insertar_venta(db, factura)
-                    db.commit()
-                    result["descargadas"] += 1
-                    result["guardadas"] += 1
-                    cls._job_update(job_id, sri=result["sri"], guardadas=result["guardadas"], descargadas=result["descargadas"], ya_existentes=result["ya_existentes"], mensaje=f"Factura emitida {result['sri']} procesada.")
-                except Exception as exc:
-                    db.rollback()
-                    result["errores"].append({"pagina": pagina, "fila": idx + 1, "detalle": str(exc)})
-                    cls._job_update(job_id, errores=result["errores"], mensaje=f"Error factura emitida fila {idx + 1}: {exc}")
+        ultimo_dia = calendar.monthrange(anio, mes)[1]
+        from datetime import date
 
-            boton_next = page.locator("[class*='ui-paginator-next']").first
-            if await boton_next.count() == 0:
-                break
-            clases = (await boton_next.get_attribute("class") or "").lower()
-            if "ui-state-disabled" in clases:
-                break
-            primera = await filas.first.inner_text()
-            await boton_next.click()
-            for _ in range(30):
-                await page.wait_for_timeout(500)
+        for dia in range(1, ultimo_dia + 1):
+            fecha_consulta = date(anio, mes, dia)
+            cls._job_update(
+                job_id,
+                mensaje=f"Consultando comprobantes emitidos del {fecha_consulta.strftime('%d/%m/%Y')}.",
+            )
+
+            cantidad_inicial = await cls._consultar_emitidos_dia(page, fecha_consulta)
+            if cantidad_inicial == 0:
+                continue
+
+            pagina = 1
+            while True:
+                result["paginas"] += 1
+                cls._job_update(
+                    job_id,
+                    mensaje=(
+                        f"Procesando facturas emitidas del {fecha_consulta.strftime('%d/%m/%Y')} "
+                        f"(página {pagina})."
+                    ),
+                    paginas=result["paginas"],
+                )
+
+                filas = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr")
+                cantidad = await filas.count()
+                if cantidad == 0:
+                    break
+
+                # Procesamos una copia de los índices actuales. Abrir/cerrar el
+                # detalle no debe cambiar la cantidad de filas de la página.
+                for idx in range(cantidad):
+                    try:
+                        fila = filas.nth(idx)
+                        columnas = await fila.locator("td").all_inner_texts()
+
+                        # El SRI suele devolver: "Factura 001-102-0000260".
+                        tipo_texto = (
+                            " ".join(columnas[1].strip().split())
+                            if len(columnas) >= 2 else ""
+                        )
+                        if tipo_texto and not (
+                            tipo_texto == "01"
+                            or tipo_texto.lower().startswith("factura")
+                            or " factura " in f" {tipo_texto.lower()} "
+                        ):
+                            continue
+
+                        html = await cls._obtener_detalle_emitido(page, idx)
+                        if not html:
+                            continue
+
+                        factura = cls._parsear_factura_emitida_html(html)
+
+                        # Seguridad adicional: si el SRI conserva temporalmente
+                        # la tabla anterior después de un AJAX, nunca guardamos
+                        # una factura de otro día.
+                        if factura["fecha"].date() != fecha_consulta:
+                            continue
+
+                        clave = factura["clave_acceso"].strip()
+                        if not clave:
+                            raise ValueError("La factura emitida no contiene clave de acceso.")
+
+                        result["sri"] += 1
+
+                        if clave in procesadas:
+                            result["ya_existentes"] += 1
+                            continue
+
+                        procesadas.add(clave)
+
+                        existe = db.execute(text("""
+                            SELECT 1 FROM ventas
+                            WHERE TRIM(autorizacion::text) = :clave
+                            LIMIT 1
+                        """), {"clave": clave}).first()
+
+                        if existe:
+                            result["ya_existentes"] += 1
+                            continue
+
+                        cls._insertar_venta(db, factura)
+                        db.commit()
+                        result["descargadas"] += 1
+                        result["guardadas"] += 1
+
+                        cls._job_update(
+                            job_id,
+                            sri=result["sri"],
+                            guardadas=result["guardadas"],
+                            descargadas=result["descargadas"],
+                            ya_existentes=result["ya_existentes"],
+                            mensaje=f"Factura emitida {result['sri']} procesada.",
+                        )
+
+                    except Exception as exc:
+                        db.rollback()
+                        result["errores"].append({
+                            "fecha": fecha_consulta.isoformat(),
+                            "pagina": pagina,
+                            "fila": idx + 1,
+                            "detalle": str(exc),
+                        })
+                        cls._job_update(
+                            job_id,
+                            errores=result["errores"],
+                            mensaje=(
+                                f"Error factura emitida {fecha_consulta.strftime('%d/%m/%Y')} "
+                                f"fila {idx + 1}: {exc}"
+                            ),
+                        )
+
+                boton_next = page.locator("[class*='ui-paginator-next']").first
+                if await boton_next.count() == 0:
+                    break
+
+                clases = (await boton_next.get_attribute("class") or "").lower()
+                if "ui-state-disabled" in clases:
+                    break
+
                 try:
-                    if await filas.first.inner_text() != primera:
-                        break
+                    primera = await filas.first.inner_text()
                 except Exception:
-                    pass
-            pagina += 1
+                    primera = ""
+
+                await boton_next.click()
+
+                # Esperamos el cambio de página.
+                for _ in range(30):
+                    await page.wait_for_timeout(500)
+                    try:
+                        if not primera or await filas.first.inner_text() != primera:
+                            break
+                    except Exception:
+                        pass
+
+                pagina += 1
 
     @classmethod
     def _insertar_venta(cls, db, factura: dict[str, Any]) -> None:
