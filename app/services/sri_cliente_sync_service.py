@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import socket
+import subprocess
+import time
+import urllib.request
 import tempfile
 import uuid
 import xml.etree.ElementTree as ET
@@ -305,62 +310,99 @@ class SriClienteSyncService:
             "tipopago": next((x for x in formas if x), ""),
         }
 
+    @staticmethod
+    def _chrome_executable() -> str:
+        configured = str(settings.SRI_CHROME_PATH or "").strip()
+        candidates = [
+            configured,
+            str(Path(os.environ.get("ProgramFiles", "")) / "Google/Chrome/Application/chrome.exe"),
+            str(Path(os.environ.get("ProgramFiles(x86)", "")) / "Google/Chrome/Application/chrome.exe"),
+            str(Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe"),
+        ]
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                return candidate
+        raise RuntimeError(
+            "No se encontró Google Chrome. Configure SRI_CHROME_PATH en .env "
+            "con la ruta completa de chrome.exe."
+        )
+
+    @staticmethod
+    def _puerto_libre(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            return sock.connect_ex(("127.0.0.1", port)) != 0
+
+    @classmethod
+    async def _esperar_cdp(cls, port: int, timeout: float = 20.0) -> None:
+        url = f"http://127.0.0.1:{port}/json/version"
+        limite = time.monotonic() + timeout
+        ultimo_error = None
+        while time.monotonic() < limite:
+            try:
+                with urllib.request.urlopen(url, timeout=1.5) as response:
+                    if response.status == 200:
+                        return
+            except Exception as exc:
+                ultimo_error = exc
+            await asyncio.sleep(0.25)
+        raise RuntimeError(
+            f"Chrome no abrió el puerto CDP {port} dentro de {timeout:.0f} segundos. "
+            f"Último error: {ultimo_error}"
+        )
+
     @classmethod
     async def _login(cls, ruc: str, clave: str):
         p = await async_playwright().start()
         browser = None
         context = None
+        chrome_process = None
+
         profile_root = str(settings.SRI_USER_DATA_DIR or "").strip()
-        if profile_root:
-            # Nunca compartimos el perfil del RUC que pueda estar abierto por
-            # un navegador manual. Chromium bloquea un user-data-dir cuando
-            # otra instancia ya lo está usando.
-            profile_base = Path(profile_root)
-            profile_dir = profile_base / f"{ruc}_conta"
-            profile_dir.mkdir(parents=True, exist_ok=True)
-            launch_kwargs = {
-                "headless": settings.SRI_HEADLESS,
-                "channel": (settings.SRI_BROWSER_CHANNEL or "chromium").strip() or "chromium",
-                "accept_downloads": True,
-                "locale": "es-EC",
-                "viewport": {"width": 1366, "height": 900},
-            }
-            try:
-                context = await p.chromium.launch_persistent_context(
-                    str(profile_dir),
-                    **launch_kwargs,
-                )
-            except Exception as exc:
-                # Si el perfil dedicado quedó bloqueado por una ejecución
-                # anterior, usamos un perfil aislado para esta ejecución.
-                # Esto evita que el servicio muera por "Se está abriendo en
-                # una sesión de navegador existente".
-                fallback_dir = profile_base / f"{ruc}_conta_run"
-                fallback_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    context = await p.chromium.launch_persistent_context(
-                        str(fallback_dir),
-                        **launch_kwargs,
-                    )
-                except Exception as fallback_exc:
-                    raise RuntimeError(
-                        "Chromium no pudo abrir el perfil SRI de Conta. "
-                        f"Perfil={profile_dir}; primer error={exc}; "
-                        f"perfil alterno={fallback_dir}; segundo error={fallback_exc}"
-                    ) from fallback_exc
-        else:
-            browser = await p.chromium.launch(
-                headless=settings.SRI_HEADLESS,
-                channel=(settings.SRI_BROWSER_CHANNEL or "chromium").strip() or "chromium",
+        if not profile_root:
+            profile_root = str(Path.cwd() / "sri_profiles")
+
+        profile_dir = Path(profile_root) / f"{ruc}_chrome"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        port = int(settings.SRI_CDP_PORT or 9222)
+        if not cls._puerto_libre(port):
+            await p.stop()
+            raise RuntimeError(
+                f"El puerto CDP {port} ya está ocupado. Cierre el Chrome SRI de prueba "
+                "o configure otro SRI_CDP_PORT en .env."
             )
-            context = await browser.new_context(
-                accept_downloads=True,
-                locale="es-EC",
-                viewport={"width": 1366, "height": 900},
-            )
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+
+        chrome_path = cls._chrome_executable()
+        args = [
+            chrome_path,
+            f"--user-data-dir={profile_dir}",
+            f"--remote-debugging-port={port}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--lang=es-EC",
+            "--window-size=1366,900",
+        ]
+        if settings.SRI_HEADLESS:
+            args.append("--headless=new")
+
         try:
+            chrome_process = subprocess.Popen(
+                args,
+                cwd=str(profile_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            await cls._esperar_cdp(port)
+
+            browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+            context = browser.contexts[0]
+            page = context.pages[0] if context.pages else await context.new_page()
+
+            # No usamos evasión de automatización. Chrome real + CDP es el navegador
+            # que ya fue validado manualmente contra reCAPTCHA Enterprise del SRI.
+
             try:
                 await page.goto(
                     cls.PORTAL_URL,
@@ -368,10 +410,10 @@ class SriClienteSyncService:
                     timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
                 )
                 if "perfil" not in page.url and "login" not in page.url.lower():
-                    return p, browser, context, page
+                    return p, browser, context, page, chrome_process
             except PlaywrightTimeoutError:
                 if page.url != "about:blank" and "perfil" not in page.url and "login" not in page.url.lower():
-                    return p, browser, context, page
+                    return p, browser, context, page, chrome_process
 
             try:
                 await page.goto(
@@ -380,18 +422,26 @@ class SriClienteSyncService:
                     timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
                 )
             except PlaywrightTimeoutError as exc:
-                # El portal puede tardar en responder desde el proceso de Windows.
-                # Reintentamos una sola vez antes de declarar caída la conexión.
                 try:
-                    await page.goto("https://srienlinea.sri.gob.ec/", wait_until="domcontentloaded", timeout=20000)
-                    await page.goto(cls.LOGIN_URL, wait_until="domcontentloaded", timeout=settings.SRI_NAVIGATION_TIMEOUT_MS)
+                    await page.goto(
+                        "https://srienlinea.sri.gob.ec/",
+                        wait_until="domcontentloaded",
+                        timeout=20000,
+                    )
+                    await page.goto(
+                        cls.LOGIN_URL,
+                        wait_until="domcontentloaded",
+                        timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
+                    )
                 except Exception as retry_exc:
                     raise RuntimeError(
-                        "No se pudo abrir el portal del SRI desde Conta. "
+                        "No se pudo abrir el portal del SRI desde Chrome real. "
                         f"Primer intento: {exc}. Reintento: {retry_exc}"
                     ) from retry_exc
 
-            usuario = page.locator('input[name="username"]:visible, #username:visible, #usuario:visible').first
+            usuario = page.locator(
+                'input[name="username"]:visible, #username:visible, #usuario:visible'
+            ).first
             password = page.locator("#password:visible").first
             await usuario.wait_for(state="visible", timeout=30000)
             await password.wait_for(state="visible", timeout=10000)
@@ -401,27 +451,47 @@ class SriClienteSyncService:
             except Exception:
                 pass
             await password.fill(clave)
+
             login_button = page.locator("#kc-login").first
             await login_button.wait_for(state="visible", timeout=30000)
-            try:
-                await login_button.scroll_into_view_if_needed(timeout=5000)
-            except Exception:
-                pass
             await login_button.click(force=True)
+
             await page.wait_for_timeout(1500)
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=5000)
             except Exception:
                 pass
+
             if "perfil" in page.url and await page.locator("#password").count():
                 raise ValueError("El SRI no aceptó las credenciales del cliente.")
-            await page.goto(cls.PORTAL_URL, wait_until="domcontentloaded", timeout=60000)
-            return p, browser, context, page
+
+            await page.goto(
+                cls.PORTAL_URL,
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+            return p, browser, context, page, chrome_process
+
         except Exception:
-            if context is not None:
-                await context.close()
-            elif browser is not None:
-                await browser.close()
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            elif context is not None:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+            if chrome_process is not None:
+                try:
+                    chrome_process.terminate()
+                    chrome_process.wait(timeout=5)
+                except Exception:
+                    try:
+                        chrome_process.kill()
+                    except Exception:
+                        pass
             await p.stop()
             raise
 
@@ -446,6 +516,8 @@ class SriClienteSyncService:
             await cls._seleccionar(page, f"#frmPrincipal\\:{nombre}", value)
 
         boton_selectores = [
+            "#frmPrincipal\\:btnBuscar",
+            "button[id$=':btnBuscar']",
             "#frmPrincipal\\:btnConsultarSinRe",
             "input[id$=':btnConsultarSinRe']",
             "button[id$=':btnConsultarSinRe']",
@@ -523,7 +595,7 @@ class SriClienteSyncService:
             if settings.SRI_HEADLESS:
                 raise RuntimeError(
                     "SRI no devolvió los enlaces XML después de Consultar. "
-                    "Es posible que haya presentado reCAPTCHA o que el portal haya cambiado el selector de descarga. "
+                    "El navegador está en modo headless; use SRI_HEADLESS=false para la primera prueba. "
                     + diagnostico
                 )
             print(
@@ -559,6 +631,8 @@ class SriClienteSyncService:
                 "[class*='captcha'], [id*='captcha']"
             ).count()
             boton = await page.locator(
+                "#frmPrincipal\\:btnBuscar, "
+                "button[id$=':btnBuscar'], "
                 "#frmPrincipal\\:btnConsultarSinRe, "
                 "input[id$=':btnConsultarSinRe'], button[id$=':btnConsultarSinRe']"
             ).count()
@@ -599,7 +673,7 @@ class SriClienteSyncService:
     @classmethod
     async def sincronizar_mes(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, job_id: str | None = None) -> dict[str, Any]:
         cred = cls._credenciales(ruc)
-        p = browser = context = page = None
+        p = browser = context = page = chrome_process = None
         result = {
             "ruc": ruc, "cliente": cred["nombre"], "anio": anio, "mes": mes,
             "tipo_comprobante": cls._tipo(tipo_comprobante),
@@ -608,7 +682,7 @@ class SriClienteSyncService:
         }
         try:
             cls._job_update(job_id, mensaje="Abriendo sesión del SRI.")
-            p, browser, context, page = await cls._login(ruc, cred["clave"])
+            p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"])
             cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI. Si aparece CAPTCHA, resuélvalo en Chromium.")
             await cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
             cls._job_update(job_id, estado="ejecutando", mensaje="Consulta completada. Procesando comprobantes.")
@@ -672,10 +746,25 @@ class SriClienteSyncService:
             finally:
                 db.close()
         finally:
-            if context is not None:
-                await context.close()
-            elif browser is not None:
-                await browser.close()
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            elif context is not None:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+            if chrome_process is not None:
+                try:
+                    chrome_process.terminate()
+                    chrome_process.wait(timeout=5)
+                except Exception:
+                    try:
+                        chrome_process.kill()
+                    except Exception:
+                        pass
             if p is not None:
                 await p.stop()
 
