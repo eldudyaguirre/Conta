@@ -1578,7 +1578,7 @@ class SriClienteSyncService:
             "numsec": factura["numsec"], "fecemi": factura["fecha_emision"],
             "numaut": factura["clave_acceso"], "baseimpnoobj": b["no_objeto"],
             "baseimpiva0": b["0"], "baseimpiva12": b["12"], "baseexenta": b["exenta"],
-            "montoice": factura["ice"], "montoiva": sum(i.values(), Decimal("0")),
+            "montoice": factura["ice"], "montoiva": Decimal("0"),
             "retencioniva10": 0, "retencioniva20": 0, "retencioniva30": 0,
             "retencioniva70": 0, "retencioniva100": 0,
             "totbases": sum(b.values(), Decimal("0")), "codret": "", "baseimpret": "",
