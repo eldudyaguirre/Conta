@@ -139,6 +139,7 @@ class SriVentasValidatorService:
                             f"Diferencia {fecha_ui}: SRI={cantidad_sri}, "
                             f"BD={cantidad_bd}. Revisando factura por factura."
                         ),
+                    )
                     faltantes, sobrantes = await cls._revisar_dia_uno_por_uno(
                         page, db, fecha_consulta, result, job_id
                     )
