@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 
 # PostgreSQL 16: registrar explícitamente las DLL nativas antes de importar
 # el servicio SRI, que termina cargando psycopg2.
@@ -24,13 +25,21 @@ logger = logging.getLogger("conta.sri_worker")
 
 
 async def _procesar_trabajo(worker_numero: int) -> None:
-    worker_id = f"{socket.gethostname()}-{worker_numero}"
-    logger.info("Worker SRI %s iniciado.", worker_id)
+    usuario_worker = (settings.SRI_WORKER_USER or socket.gethostname()).strip()
+    worker_id = usuario_worker if max(1, settings.SRI_WORKER_CONCURRENCY) == 1 else f"{usuario_worker}-{worker_numero}"
+    SriClienteSyncService.registrar_worker(worker_id, usuario_worker)
+    ultimo_heartbeat = 0.0
+    logger.info("Worker SRI %s iniciado para usuario %s.", worker_id, usuario_worker)
 
     while True:
         trabajo = None
         try:
-            trabajo = SriClienteSyncService.obtener_trabajo_pendiente()
+            ahora = time.monotonic()
+            if ahora - ultimo_heartbeat >= max(5, settings.SRI_WORKER_HEARTBEAT_SECONDS):
+                SriClienteSyncService.registrar_worker(worker_id, usuario_worker)
+                ultimo_heartbeat = ahora
+
+            trabajo = SriClienteSyncService.obtener_trabajo_pendiente(worker_id)
             if trabajo:
                 SriClienteSyncService._iva_debug_log(
                     "WORKER | trabajo reclamado | worker=%s | job_id=%s | ruc=%s | anio=%s | mes=%s | tipo=%s | operacion=%s",
