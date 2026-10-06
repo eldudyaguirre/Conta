@@ -1580,7 +1580,7 @@ class SriClienteSyncService:
             cls._job_update(job_id, mensaje="Abriendo sesión del SRI.")
             p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"])
             cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI. Si aparece CAPTCHA, resuélvalo en Chromium.")
-            if operacion == "ventas":
+            if operacion in ("ventas", "notas_credito_emitidas"):
                 await cls._consultar_emitidos(page, anio, mes)
             else:
                 await cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
