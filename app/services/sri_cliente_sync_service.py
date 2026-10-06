@@ -1143,7 +1143,13 @@ class SriClienteSyncService:
 
     @classmethod
     def _parsear_retencion_emitida_html(cls, html: str) -> dict[str, Any]:
-        """Parsea una retención emitida desde el detalle HTML del SRI."""
+        """Parsea una retención emitida del SRI conservando cada bloque de renta.
+
+        Una misma retención puede contener varias retenciones de renta para la
+        misma factura. El sistema legacy representa cada renta en un registro
+        independiente de comprasnue y asocia al mismo registro el IVA que
+        corresponde a ese bloque de renta.
+        """
         from bs4 import BeautifulSoup
         import re
 
@@ -1153,7 +1159,14 @@ class SriClienteSyncService:
             return " ".join(celda.get_text(" ", strip=True).split())
 
         def norm(valor: str) -> str:
-            return " ".join(str(valor or "").lower().replace(":", " ").replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u").split())
+            return " ".join(
+                str(valor or "")
+                .lower()
+                .replace(":", " ")
+                .replace("á", "a").replace("é", "e")
+                .replace("í", "i").replace("ó", "o").replace("ú", "u")
+                .split()
+            )
 
         pares = []
         for tabla in soup.find_all("table"):
@@ -1173,7 +1186,6 @@ class SriClienteSyncService:
                     return valor
             return ""
 
-        import re
         fecha_txt = buscar(["Fecha Emisión", "Fecha de Emisión"])
         mf = re.search(r"\d{2}/\d{2}/\d{4}", fecha_txt)
         if mf:
@@ -1189,15 +1201,37 @@ class SriClienteSyncService:
         numest = buscar(["Establecimiento"])
         numptoemi = buscar(["Punto de Emisión", "Punto Emisión"])
         numsec = buscar(["Secuencial"])
-        ne, np, ns = comp(buscar(["Número de Comprobante", "Numero de Comprobante", "Comprobante"]))
+        ne, np, ns = comp(
+            buscar(["Número de Comprobante", "Numero de Comprobante", "Comprobante"])
+        )
         numest, numptoemi, numsec = numest or ne, numptoemi or np, numsec or ns
 
         clave = buscar(["Clave de Acceso", "Clave acceso"])
-        autorizacion = buscar(["Número de Autorización", "Numero de Autorización", "Autorización"])
-        ruc = buscar(["Identificación Sujeto Retenido", "Identificacion Sujeto Retenido", "RUC Sujeto Retenido"])
-        nombre = buscar(["Razón Social Sujeto Retenido", "Razon Social Sujeto Retenido", "Sujeto Retenido", "Proveedor"])
+        autorizacion = buscar([
+            "Número de Autorización", "Numero de Autorización", "Autorización"
+        ])
+        ruc = buscar([
+            "Identificación Sujeto Retenido",
+            "Identificacion Sujeto Retenido",
+            "RUC Sujeto Retenido",
+        ])
+        nombre = buscar([
+            "Razón Social Sujeto Retenido",
+            "Razon Social Sujeto Retenido",
+            "Sujeto Retenido",
+            "Proveedor",
+        ])
 
-        documentos = {}
+        # Cada fila del detalle SRI es una retención individual. El patrón
+        # real puede ser, por ejemplo:
+        #   Renta 3% -> IVA 70% -> Renta 2% -> IVA 30%
+        # Por eso NO agrupamos todo por factura. Cada fila de renta abre un
+        # bloque nuevo y las filas de IVA siguientes se asocian al último
+        # bloque de renta de esa misma factura.
+        bloques = []
+        ultimo_renta_por_doc = {}
+        iva_pendiente_por_doc = {}
+
         for tabla in soup.find_all("table"):
             filas = tabla.find_all("tr")
             for pos, fila in enumerate(filas):
@@ -1205,57 +1239,159 @@ class SriClienteSyncService:
                 joined = " | ".join(headers)
                 if "base imponible" not in joined or "valor retenido" not in joined:
                     continue
+
                 idx = {
-                    "impuesto": next((i for i,x in enumerate(headers) if "impuesto" in x), None),
-                    "codigo": next((i for i,x in enumerate(headers) if "codigo" in x), None),
-                    "base": next((i for i,x in enumerate(headers) if "base imponible" in x), None),
-                    "por": next((i for i,x in enumerate(headers) if "porcentaje" in x or "tarifa" in x), None),
-                    "valor": next((i for i,x in enumerate(headers) if "valor retenido" in x or x == "valor"), None),
-                    "doc": next((i for i,x in enumerate(headers) if "documento sustento" in x or "numdoc" in x), None),
+                    "impuesto": next(
+                        (i for i, x in enumerate(headers) if "impuesto" in x), None
+                    ),
+                    "codigo": next(
+                        (i for i, x in enumerate(headers)
+                         if "codigo retencion" in x or x == "codigo" or "codigo" in x),
+                        None,
+                    ),
+                    "base": next(
+                        (i for i, x in enumerate(headers) if "base imponible" in x), None
+                    ),
+                    "por": next(
+                        (i for i, x in enumerate(headers)
+                         if "porcentaje" in x or "tarifa" in x),
+                        None,
+                    ),
+                    "valor": next(
+                        (i for i, x in enumerate(headers)
+                         if "valor retenido" in x or x == "valor"),
+                        None,
+                    ),
+                    "doc": next(
+                        (i for i, x in enumerate(headers)
+                         if "numero" in x or "número" in x or "comprobante" in x
+                         or "documento sustento" in x or "numdoc" in x),
+                        None,
+                    ),
                 }
                 if idx["base"] is None or idx["valor"] is None:
                     continue
+
                 for fila_dato in filas[pos + 1:]:
                     textos = [txt(x) for x in fila_dato.find_all(["td", "th"])]
                     if not textos:
                         continue
+
                     indices = [i for i in idx.values() if i is not None]
-                    if max(indices) >= len(textos):
+                    if not indices or max(indices) >= len(textos):
                         continue
-                    impuesto = textos[idx["impuesto"]] if idx["impuesto"] is not None else ""
-                    codigo = textos[idx["codigo"]] if idx["codigo"] is not None else ""
+
+                    impuesto = (
+                        textos[idx["impuesto"]]
+                        if idx["impuesto"] is not None else ""
+                    )
+                    codigo = (
+                        textos[idx["codigo"]]
+                        if idx["codigo"] is not None else ""
+                    )
                     base = cls._dec(textos[idx["base"]])
-                    por = cls._dec(re.sub(r"[^0-9.,-]", "", textos[idx["por"]])) if idx["por"] is not None else Decimal("0")
+                    porcentaje = (
+                        cls._dec(re.sub(r"[^0-9.,-]", "", textos[idx["por"]]))
+                        if idx["por"] is not None else Decimal("0")
+                    )
                     valor = cls._dec(textos[idx["valor"]])
-                    doc = textos[idx["doc"]] if idx["doc"] is not None else " ".join(textos)
-                    md = re.search(r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b", doc)
+
+                    texto_doc = (
+                        textos[idx["doc"]]
+                        if idx["doc"] is not None
+                        else " ".join(textos)
+                    )
+                    md = re.search(
+                        r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
+                        texto_doc,
+                    )
                     if not md:
-                        md = re.search(r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b", " ".join(textos))
+                        md = re.search(
+                            r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
+                            " ".join(textos),
+                        )
                     if not md:
                         continue
+
                     numdoc = re.sub(r"\D", "", md.group(0))
-                    item = documentos.setdefault(numdoc, {
-                        "num_doc_sustento": numdoc, "impuesto": "", "codigo_retencion": "",
-                        "base": Decimal("0"), "porcentaje": Decimal("0"), "valor": Decimal("0"),
-                        "retiva": Decimal("0"), "retrenta": Decimal("0"),
-                    })
-                    item["impuesto"] = impuesto or item["impuesto"]
-                    item["codigo_retencion"] = re.sub(r"\D", "", codigo) or item["codigo_retencion"]
-                    item["base"] += base
-                    item["porcentaje"] = por or item["porcentaje"]
-                    item["valor"] += valor
-                    if "iva" in norm(impuesto):
-                        item["retiva"] += valor
-                    elif "renta" in norm(impuesto):
-                        item["retrenta"] += valor
+                    if len(numdoc) != 15:
+                        continue
+
+                    es_iva = "iva" in norm(impuesto)
+                    es_renta = "renta" in norm(impuesto)
+
+                    if es_renta:
+                        bloque = {
+                            "num_doc_sustento": numdoc,
+                            "codigo_retencion": re.sub(r"\D", "", codigo),
+                            "base": base,
+                            "porcentaje": porcentaje,
+                            "retrenta": valor,
+                            "retiva": Decimal("0"),
+                            "retiva_porcentajes": {},
+                        }
+                        bloques.append(bloque)
+                        ultimo_renta_por_doc[numdoc] = bloque
+
+                        # Si por alguna variante del HTML apareció un IVA antes
+                        # de la renta, lo asociamos ahora al bloque recién creado.
+                        for tasa, iva_valor in iva_pendiente_por_doc.pop(numdoc, {}).items():
+                            bloque["retiva_porcentajes"][tasa] = (
+                                bloque["retiva_porcentajes"].get(tasa, Decimal("0"))
+                                + iva_valor
+                            )
+                            bloque["retiva"] += iva_valor
+
+                    elif es_iva:
+                        tasa_txt = str(porcentaje).rstrip("0").rstrip(".")
+                        if not tasa_txt:
+                            tasa_txt = "0"
+
+                        bloque = ultimo_renta_por_doc.get(numdoc)
+                        if bloque is None:
+                            pendiente = iva_pendiente_por_doc.setdefault(numdoc, {})
+                            pendiente[tasa_txt] = pendiente.get(
+                                tasa_txt, Decimal("0")
+                            ) + valor
+                        else:
+                            bloque["retiva_porcentajes"][tasa_txt] = (
+                                bloque["retiva_porcentajes"].get(
+                                    tasa_txt, Decimal("0")
+                                ) + valor
+                            )
+                            bloque["retiva"] += valor
+
+        # Si una retención trae solamente IVA, no perdemos el documento.
+        for numdoc, tasas in iva_pendiente_por_doc.items():
+            bloques.append({
+                "num_doc_sustento": numdoc,
+                "codigo_retencion": "",
+                "base": Decimal("0"),
+                "porcentaje": Decimal("0"),
+                "retrenta": Decimal("0"),
+                "retiva": sum(tasas.values(), Decimal("0")),
+                "retiva_porcentajes": tasas,
+            })
+
+        if not bloques:
+            raise ValueError("No se encontraron líneas de retención en el detalle SRI.")
 
         return {
-            "numest": numest.strip(), "numptoemi": numptoemi.strip(), "numsec": numsec.strip(),
-            "clave_acceso": clave.strip(), "numero_autorizacion": (autorizacion.strip() or clave.strip()),
-            "fecha_emision": fecha_txt, "fecha": fecha,
+            "numest": numest.strip(),
+            "numptoemi": numptoemi.strip(),
+            "numsec": numsec.strip(),
+            "clave_acceso": clave.strip(),
+            "numero_autorizacion": (
+                autorizacion.strip() or clave.strip()
+            ),
+            "fecha_emision": fecha_txt,
+            "fecha": fecha,
             "identificacion_sujeto_retenido": ruc.strip(),
             "razon_social_sujeto_retenido": nombre.strip(),
-            "documentos_sustento": list(documentos.values()),
+            # Conservamos ambos nombres para compatibilidad con el resto
+            # del servicio.
+            "documentos_sustento": bloques,
+            "retenciones_sustento": bloques,
         }
 
     @classmethod
@@ -1657,62 +1793,323 @@ class SriClienteSyncService:
 
     @classmethod
     def _actualizar_retencion_emitida_compras(cls, db, retencion: dict[str, Any]) -> int:
-        """Actualiza comprasnue con la retención emitida que afecta cada factura."""
+        """Registra una retención emitida sobre comprasnue.
+
+        Regla legacy de TotalCounts:
+        - una renta ocupa un registro de comprasnue;
+        - si una misma retención trae dos rentas para la misma factura,
+          se duplica la compra para poder guardar ambos codret/baseimpret/
+          porret/valret;
+        - el IVA correspondiente acompaña al registro de su renta;
+        - una retención con solo IVA se guarda en un único registro.
+        """
         import re
 
-        documentos = retencion.get("documentos_sustento") or []
-        if not documentos:
-            raise ValueError("La retención emitida no contiene documentos de sustento.")
+        bloques = retencion.get("retenciones_sustento") or retencion.get(
+            "documentos_sustento"
+        ) or []
+        if not bloques:
+            raise ValueError("La retención emitida no contiene líneas de sustento.")
 
-        numret = f"{retencion['numest']}-{retencion['numptoemi']}-{retencion['numsec']}"
-        autret = str(retencion.get("numero_autorizacion") or retencion.get("clave_acceso") or "").strip()
+        numret = (
+            f"{retencion['numest']}-{retencion['numptoemi']}-"
+            f"{retencion['numsec']}"
+        )
+        autret = str(
+            retencion.get("numero_autorizacion")
+            or retencion.get("clave_acceso")
+            or ""
+        ).strip()
         fecret = retencion["fecha"].strftime("%Y-%m-%d")
-        ruc = str(retencion.get("identificacion_sujeto_retenido") or "").strip()
+        ruc = str(
+            retencion.get("identificacion_sujeto_retenido") or ""
+        ).strip()
+
+        iva_fields = {
+            "10": "retencioniva10",
+            "20": "retencioniva20",
+            "30": "retencioniva30",
+            "50": "retencioniva50",
+            "70": "retencioniva70",
+            "100": "retencioniva100",
+        }
+        retencion_fields = (
+            "numestret", "numptoemiret", "numsecret", "numautret", "fecret",
+            "codret", "baseimpret", "porret", "valret",
+            "retencioniva10", "retencioniva20", "retencioniva30",
+            "retencioniva50", "retencioniva70", "retencioniva100",
+        )
+
+        def normalizar_numdoc(valor: Any) -> str:
+            digitos = re.sub(r"\D", "", str(valor or ""))
+            if len(digitos) != 15:
+                return ""
+            return digitos
+
+        def partes_factura(numdoc: str) -> tuple[str, str, str]:
+            return numdoc[:3], numdoc[3:6], numdoc[6:]
+
+        def limpiar_valor(valor: Any) -> Any:
+            return valor
+
+        def obtener_columnas_clon() -> list[str]:
+            filas = db.execute(text("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'comprasnue'
+                  AND is_generated = 'NEVER'
+                  AND is_identity = 'NO'
+                ORDER BY ordinal_position
+            """)).scalars().all()
+            return [str(x) for x in filas]
+
+        def obtener_pk() -> set[str]:
+            filas = db.execute(text("""
+                SELECT a.attname
+                FROM pg_index i
+                JOIN pg_attribute a
+                  ON a.attrelid = i.indrelid
+                 AND a.attnum = ANY(i.indkey)
+                WHERE i.indrelid = 'public.comprasnue'::regclass
+                  AND i.indisprimary
+            """)).scalars().all()
+            return {str(x) for x in filas}
+
+        def nuevo_numcompra() -> str:
+            db.execute(text(
+                "SELECT pg_advisory_xact_lock(hashtext('conta_comprasnue_numcompra'))"
+            ))
+            valor = db.execute(
+                text("SELECT siguiente_parametro('numcompra')")
+            ).scalar()
+            if valor is None or not str(valor).strip():
+                raise RuntimeError(
+                    "No se pudo obtener el consecutivo numcompra desde parametros."
+                )
+            return str(valor).strip()
+
+        def buscar_compras(numdoc: str) -> list[dict[str, Any]]:
+            ne, np, ns = partes_factura(numdoc)
+            sql = """
+                SELECT *
+                FROM comprasnue
+                WHERE REPLACE(REPLACE(REPLACE(TRIM(numest::text), '-', ''), ' ', ''), '.', '') = :numest
+                  AND REPLACE(REPLACE(REPLACE(TRIM(numptoemi::text), '-', ''), ' ', ''), '.', '') = :numptoemi
+                  AND REPLACE(REPLACE(REPLACE(TRIM(numsec::text), '-', ''), ' ', ''), '.', '') = :numsec
+                  AND (:ruc = '' OR TRIM(ruccedprovee::text) = TRIM(:ruc))
+                  AND TRIM(tipcom::text) IN ('01', '02', '04')
+                ORDER BY
+                    CASE
+                        WHEN COALESCE(TRIM(numautret::text), '') = '' THEN 0
+                        ELSE 1
+                    END,
+                    numcompra DESC NULLS LAST
+            """
+            rows = db.execute(text(sql), {
+                "numest": ne,
+                "numptoemi": np,
+                "numsec": ns,
+                "ruc": ruc,
+            }).mappings().all()
+            return [dict(row) for row in rows]
+
+        def ya_registrada(rows: list[dict[str, Any]], bloque: dict[str, Any]) -> bool:
+            codigo = str(bloque.get("codigo_retencion") or "").strip()
+            valor = cls._dec(bloque.get("retrenta"))
+            for row in rows:
+                if str(row.get("numautret") or "").strip() != autret:
+                    continue
+                if codigo and str(row.get("codret") or "").strip() != codigo:
+                    continue
+                if codigo and abs(cls._dec(row.get("valret")) - valor) > Decimal("0.0001"):
+                    continue
+                return True
+            return False
+
+        def clonar_compra(template: dict[str, Any]) -> dict[str, Any]:
+            columnas = obtener_columnas_clon()
+            if "numcompra" not in columnas:
+                raise RuntimeError("La tabla comprasnue no contiene numcompra.")
+
+            pk = obtener_pk()
+            valores = {
+                k: v for k, v in template.items()
+                if k in columnas and (k not in pk or k == "numcompra")
+            }
+
+            valores["numcompra"] = nuevo_numcompra()
+
+            # El clon representa la misma compra, pero una nueva retención.
+            # Limpiamos todos los campos de retención antes de aplicar el
+            # bloque actual.
+            for campo in retencion_fields:
+                if campo in valores:
+                    valores[campo] = "" if campo not in (
+                        "baseimpret", "porret", "valret",
+                        "retencioniva10", "retencioniva20",
+                        "retencioniva30", "retencioniva50",
+                        "retencioniva70", "retencioniva100",
+                    ) else Decimal("0")
+
+            nombres = ", ".join(
+                f'"{col}"' if col == "año" else col
+                for col in valores
+            )
+            parametros = ", ".join(f":{col}" for col in valores)
+            db.execute(
+                text(
+                    f"INSERT INTO comprasnue ({nombres}) "
+                    f"VALUES ({parametros})"
+                ),
+                valores,
+            )
+
+            nuevo = dict(template)
+            nuevo.update(valores)
+            return nuevo
+
+        def actualizar_fila(row: dict[str, Any], bloque: dict[str, Any]) -> None:
+            set_parts = [
+                "numestret = :numestret",
+                "numptoemiret = :numptoemiret",
+                "numsecret = :numsecret",
+                "numautret = :numautret",
+                "fecret = :fecret",
+                "codret = :codret",
+                "baseimpret = :baseimpret",
+                "porret = :porret",
+                "valret = :valret",
+                "retencioniva10 = :retencioniva10",
+                "retencioniva20 = :retencioniva20",
+                "retencioniva30 = :retencioniva30",
+                "retencioniva50 = :retencioniva50",
+                "retencioniva70 = :retencioniva70",
+                "retencioniva100 = :retencioniva100",
+            ]
+
+            iva_porcentajes = bloque.get("retiva_porcentajes") or {}
+            iva_values = {
+                "10": Decimal("0"),
+                "20": Decimal("0"),
+                "30": Decimal("0"),
+                "50": Decimal("0"),
+                "70": Decimal("0"),
+                "100": Decimal("0"),
+            }
+            for tasa, valor in iva_porcentajes.items():
+                tasa_norm = str(tasa).replace(",", ".").rstrip("0").rstrip(".")
+                if tasa_norm in iva_values:
+                    iva_values[tasa_norm] += cls._dec(valor)
+
+            # Compatibilidad con bloques antiguos que solo traían retiva.
+            if not iva_porcentajes and bloque.get("retiva"):
+                tasa = str(bloque.get("porcentaje") or "").replace(",", ".").rstrip("0").rstrip(".")
+                if tasa in iva_values:
+                    iva_values[tasa] = cls._dec(bloque.get("retiva"))
+
+            params = {
+                "numcompra": row["numcompra"],
+                "numestret": retencion["numest"],
+                "numptoemiret": retencion["numptoemi"],
+                "numsecret": retencion["numsec"],
+                "numautret": autret,
+                "fecret": fecret,
+                "codret": str(bloque.get("codigo_retencion") or ""),
+                "baseimpret": cls._dec(bloque.get("base")),
+                "porret": cls._dec(bloque.get("porcentaje")),
+                "valret": cls._dec(bloque.get("retrenta")),
+                **{
+                    f"retencioniva{tasa}": valor
+                    for tasa, valor in iva_values.items()
+                },
+            }
+
+            db.execute(
+                text(
+                    f"UPDATE comprasnue SET {', '.join(set_parts)} "
+                    "WHERE numcompra = :numcompra"
+                ),
+                params,
+            )
+
         actualizadas = 0
         no_encontradas = []
 
-        for documento in documentos:
-            numdoc = re.sub(r"[^0-9]", "", str(documento.get("num_doc_sustento") or ""))
+        # Agrupamos por factura solamente para localizar la compra. Los
+        # bloques de renta permanecen separados y cada uno genera su registro.
+        for bloque in bloques:
+            numdoc = normalizar_numdoc(bloque.get("num_doc_sustento"))
             if not numdoc:
                 continue
 
-            tasa = str(documento.get("porcentaje") or "").replace(",", ".").rstrip("0").rstrip(".")
-            iva_fields = {"10": "retencioniva10", "20": "retencioniva20", "30": "retencioniva30", "70": "retencioniva70", "100": "retencioniva100"}
-            iva_field = iva_fields.get(tasa)
-            set_iva = f", {iva_field} = :retiva" if iva_field else ""
-            set_renta = ", codret = :codret, baseimpret = :baseimpret, porret = :porret, valret = :valret" if documento.get("retrenta") else ""
-            sql = f"""
-                UPDATE comprasnue
-                SET numestret = :numestret, numptoemiret = :numptoemiret, numsecret = :numsecret,
-                    numautret = :numautret, fecret = :fecret
-                    {set_renta}
-                    {set_iva}
-                WHERE REPLACE(REPLACE(REPLACE(TRIM(numest::text), '-', ''), ' ', ''), '.', '') = SUBSTRING(:numdoc FROM 1 FOR 3)
-                  AND REPLACE(REPLACE(REPLACE(TRIM(numptoemi::text), '-', ''), ' ', ''), '.', '') = SUBSTRING(:numdoc FROM 4 FOR 3)
-                  AND REPLACE(REPLACE(REPLACE(TRIM(numsec::text), '-', ''), ' ', ''), '.', '') = SUBSTRING(:numdoc FROM 7)
-                  AND (:ruc = '' OR TRIM(ruccedprovee::text) = TRIM(:ruc))
-            """
-            params = {
-                "numdoc": numdoc, "ruc": ruc,
-                "numestret": retencion["numest"], "numptoemiret": retencion["numptoemi"], "numsecret": retencion["numsec"],
-                "numautret": autret, "fecret": fecret,
-                "codret": str(documento.get("codigo_retencion") or ""),
-                "baseimpret": documento.get("base") or Decimal("0"),
-                "porret": documento.get("porcentaje") or Decimal("0"),
-                "valret": documento.get("retrenta") or Decimal("0"),
-                "retiva": documento.get("retiva") or Decimal("0"),
-            }
-            result = db.execute(text(sql), params)
-            if not result.rowcount and ruc:
-                params["ruc"] = ""
-                result = db.execute(text(sql), params)
-            if result.rowcount:
-                actualizadas += result.rowcount
-            else:
+            filas = buscar_compras(numdoc)
+            if not filas:
                 no_encontradas.append(numdoc)
+                continue
+
+            if ya_registrada(filas, bloque):
+                actualizadas += 1
+                continue
+
+            es_renta = bool(
+                str(bloque.get("codigo_retencion") or "").strip()
+                or cls._dec(bloque.get("retrenta")) != 0
+            )
+
+            # Para la primera renta usamos una compra limpia. Para una segunda
+            # renta de la misma factura, duplicamos el registro como hacía el
+            # módulo VB6. Nunca sobrescribimos una renta distinta ya guardada.
+            template = next(
+                (
+                    row for row in filas
+                    if not str(row.get("numautret") or "").strip()
+                    and not str(row.get("codret") or "").strip()
+                ),
+                filas[0],
+            )
+
+            if es_renta:
+                fila_objetivo = template
+                if str(template.get("numautret") or "").strip():
+                    fila_objetivo = clonar_compra(template)
+                elif any(
+                    str(row.get("numautret") or "").strip() == autret
+                    and str(row.get("codret") or "").strip()
+                    for row in filas
+                ):
+                    fila_objetivo = clonar_compra(template)
+
+                actualizar_fila(fila_objetivo, bloque)
+                actualizadas += 1
+            else:
+                # IVA sin renta: se registra en una sola compra y no se
+                # duplica por cada porcentaje IVA.
+                fila_objetivo = template
+                if str(template.get("numautret") or "").strip():
+                    fila_objetivo = clonar_compra(template)
+                actualizar_fila(fila_objetivo, bloque)
+                actualizadas += 1
 
         if actualizadas == 0:
-            raise ValueError(f"No se encontró en comprasnue ninguna factura de la retención emitida {numret}. Facturas sustento: {', '.join(no_encontradas) or 'sin número'}.")
+            detalle = ", ".join(no_encontradas) or "sin número de factura"
+            raise ValueError(
+                f"No se encontró en comprasnue ninguna factura de la retención "
+                f"emitida {numret}. Facturas sustento: {detalle}."
+            )
+
+        if no_encontradas:
+            logger.warning(
+                "RETENCION EMITIDA | algunas facturas no fueron encontradas | "
+                "retencion=%s | facturas=%s",
+                numret, ", ".join(no_encontradas),
+            )
+
+        logger.info(
+            "RETENCION EMITIDA | registrada | retencion=%s | bloques=%s | "
+            "registros=%s | ruc=%s",
+            numret, len(bloques), actualizadas, ruc,
+        )
         return actualizadas
 
     @classmethod
