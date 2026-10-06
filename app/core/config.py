@@ -36,12 +36,6 @@ class Settings(BaseSettings):
     SRI_WORKER_CONCURRENCY: int = 1
     SRI_WORKER_USER: str = ""
     SRI_WORKER_HEARTBEAT_SECONDS: int = 10
-    BUG_REPORT_EMAIL: str = "eldudyaguirre@gmail.com"
-    SMTP_HOST: str = "smtp.gmail.com"
-    SMTP_PORT: int = 587
-    SMTP_USER: str = ""
-    SMTP_PASSWORD: str = ""
-    SMTP_USE_TLS: bool = True
 
     # Token interno compartido con el administrador web de TotalCounts.
     # No se expone al navegador.
