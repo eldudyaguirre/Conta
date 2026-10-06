@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     # Cantidad de tareas simultáneas por instancia del worker.
     # Para una arquitectura de 5 PCs, usar 1 en cada PC.
     SRI_WORKER_CONCURRENCY: int = 1
+    SRI_WORKER_USER: str = ""
+    SRI_WORKER_HEARTBEAT_SECONDS: int = 10
 
     # Token interno compartido con el administrador web de TotalCounts.
     # No se expone al navegador.
