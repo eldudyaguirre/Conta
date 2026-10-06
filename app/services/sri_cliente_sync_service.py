@@ -1097,8 +1097,11 @@ class SriClienteSyncService:
         return
 
     @classmethod
-    async def _procesar_emitidos_ventas(cls, page, db, result, job_id, procesadas, anio: int, mes: int) -> None:
-        """Consulta y procesa todas las fechas del mes de comprobantes emitidos."""
+    async def _procesar_emitidos_ventas(
+        cls, page, db, result, job_id, procesadas, anio: int, mes: int,
+        texto_tipo: str = "factura", codcomp: str = "18",
+    ) -> None:
+        """Consulta y procesa comprobantes emitidos de un tipo durante todo el mes."""
         import calendar
         from datetime import date
 
@@ -1130,7 +1133,7 @@ class SriClienteSyncService:
                 cls._job_update(
                     job_id,
                     mensaje=(
-                        f"Procesando facturas emitidas del {fecha_consulta.strftime('%d/%m/%Y')} "
+                        f"Procesando {texto_tipo}s emitidas del {fecha_consulta.strftime('%d/%m/%Y')} "
                         f"(página {pagina})."
                     ),
                     paginas=result["paginas"],
@@ -1154,11 +1157,19 @@ class SriClienteSyncService:
                             " ".join(columnas[1].strip().split())
                             if len(columnas) >= 2 else ""
                         )
-                        if tipo_texto and not (
-                            tipo_texto == "01"
-                            or tipo_texto.lower().startswith("factura")
-                            or " factura " in f" {tipo_texto.lower()} "
-                        ):
+                        tipo_normalizado = tipo_texto.lower()
+                        if texto_tipo == "factura":
+                            es_tipo = (
+                                tipo_texto == "01"
+                                or tipo_normalizado.startswith("factura")
+                                or " factura " in f" {tipo_normalizado} "
+                            )
+                        else:
+                            es_tipo = (
+                                tipo_normalizado.startswith(texto_tipo)
+                                or f" {texto_tipo} " in f" {tipo_normalizado} "
+                            )
+                        if tipo_texto and not es_tipo:
                             continue
 
                         html = await cls._obtener_detalle_emitido(page, idx)
@@ -1195,7 +1206,7 @@ class SriClienteSyncService:
                             result["ya_existentes"] += 1
                             continue
 
-                        cls._insertar_venta(db, factura)
+                        cls._insertar_venta(db, factura, codcomp=codcomp)
                         db.commit()
                         result["descargadas"] += 1
                         result["guardadas"] += 1
@@ -1206,7 +1217,7 @@ class SriClienteSyncService:
                             guardadas=result["guardadas"],
                             descargadas=result["descargadas"],
                             ya_existentes=result["ya_existentes"],
-                            mensaje=f"Factura emitida {result['sri']} procesada.",
+                            mensaje=f"{texto_tipo.title()} emitida {result['sri']} procesada.",
                         )
 
                     except Exception as exc:
@@ -1259,7 +1270,7 @@ class SriClienteSyncService:
             await cls._volver_pagina_1_emitidos(page)
 
     @classmethod
-    def _insertar_venta(cls, db, factura: dict[str, Any]) -> None:
+    def _insertar_venta(cls, db, factura: dict[str, Any], codcomp: str = "18") -> None:
         b = factura["bases_iva"]
         i = factura["ivas"]
         values = {
@@ -1269,7 +1280,7 @@ class SriClienteSyncService:
             "ruccedcli": factura["identificacion"],
             "nomcli": factura["razon_social"],
             "tipid": factura["tipid"],
-            "codcomp": "18",
+            "codcomp": codcomp,
             "numemi": "1",
             "basenoobj": factura["base_no_objeto"],
             "baseiva0": factura["base_iva0"],
@@ -1578,7 +1589,16 @@ class SriClienteSyncService:
             procesadas: set[str] = set()
             try:
                 if operacion == "ventas":
-                    await cls._procesar_emitidos_ventas(page, db, result, job_id, procesadas, anio, mes)
+                    await cls._procesar_emitidos_ventas(
+                        page, db, result, job_id, procesadas, anio, mes,
+                        texto_tipo="factura", codcomp="18",
+                    )
+                    return result
+                if operacion == "notas_credito_emitidas":
+                    await cls._procesar_emitidos_ventas(
+                        page, db, result, job_id, procesadas, anio, mes,
+                        texto_tipo="nota de crédito", codcomp="04",
+                    )
                     return result
                 for pagina in range(1, 1001):
                     result["paginas"] = pagina
