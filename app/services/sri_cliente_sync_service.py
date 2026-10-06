@@ -1897,7 +1897,7 @@ class SriClienteSyncService:
                   AND REPLACE(REPLACE(REPLACE(TRIM(numptoemi::text), '-', ''), ' ', ''), '.', '') = :numptoemi
                   AND REPLACE(REPLACE(REPLACE(TRIM(numsec::text), '-', ''), ' ', ''), '.', '') = :numsec
                   AND (:ruc = '' OR TRIM(ruccedprovee::text) = TRIM(:ruc))
-                  AND TRIM(tipcom::text) IN ('01', '02', '04')
+                  AND TRIM(tipcom::text) IN ('01', '02')
                 ORDER BY
                     CASE
                         WHEN COALESCE(TRIM(numautret::text), '') = '' THEN 0
