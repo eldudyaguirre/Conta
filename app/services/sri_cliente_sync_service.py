@@ -56,6 +56,7 @@ class SriJobCancelado(Exception):
 
 class SriClienteSyncService:
     JOB_TABLE = "conta_sri_jobs"
+    WORKER_TABLE = "conta_sri_workers"
 
     @staticmethod
     def _iva_debug_log(message: str, *args: Any) -> None:
@@ -74,6 +75,7 @@ class SriClienteSyncService:
                     mes INTEGER NOT NULL,
                     tipo_comprobante VARCHAR(2) NOT NULL,
                     operacion VARCHAR(30) NOT NULL DEFAULT 'compras',
+                    worker VARCHAR(150),
                     sri INTEGER NOT NULL DEFAULT 0,
                     ya_existentes INTEGER NOT NULL DEFAULT 0,
                     descargadas INTEGER NOT NULL DEFAULT 0,
@@ -94,6 +96,22 @@ class SriClienteSyncService:
             db.execute(text(
                 f"ALTER TABLE {cls.JOB_TABLE} ADD COLUMN IF NOT EXISTS operacion VARCHAR(30) NOT NULL DEFAULT 'compras'"
             ))
+            db.execute(text(
+                f"ALTER TABLE {cls.JOB_TABLE} ADD COLUMN IF NOT EXISTS worker VARCHAR(150)"
+            ))
+            db.execute(text(f"""
+                CREATE TABLE IF NOT EXISTS {cls.WORKER_TABLE} (
+                    worker_id VARCHAR(150) PRIMARY KEY,
+                    usuario VARCHAR(150) NOT NULL,
+                    equipo VARCHAR(150) NOT NULL,
+                    estado VARCHAR(20) NOT NULL DEFAULT 'activo',
+                    job_actual VARCHAR(64),
+                    ultimo_heartbeat TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            db.execute(text(
+                f"CREATE INDEX IF NOT EXISTS idx_{cls.WORKER_TABLE}_heartbeat ON {cls.WORKER_TABLE}(ultimo_heartbeat)"
+            ))
             for columna in (
                 "dias_revisados", "dias_ok", "dias_diferentes", "faltantes", "sobrantes"
             ):
@@ -112,7 +130,7 @@ class SriClienteSyncService:
             return
         cls._ensure_jobs_table()
         allowed = {
-            "estado", "ruc", "cliente", "anio", "mes", "tipo_comprobante", "operacion",
+            "estado", "ruc", "cliente", "anio", "mes", "tipo_comprobante", "operacion", "worker",
             "sri", "ya_existentes", "descargadas", "guardadas", "errores",
             "paginas", "dias_revisados", "dias_ok", "dias_diferentes",
             "faltantes", "sobrantes", "mensaje", "detalle"
@@ -280,8 +298,32 @@ class SriClienteSyncService:
         return result
 
     @classmethod
-    def obtener_trabajo_pendiente(cls) -> dict[str, Any] | None:
-        """Reclama atómicamente un trabajo para el worker SRI interactivo."""
+    def registrar_worker(cls, worker_id: str, usuario: str) -> None:
+        """Registra y renueva una estación worker."""
+        cls._ensure_jobs_table()
+        equipo = socket.gethostname()
+        with engine.begin() as db:
+            db.execute(text(f"""
+                UPDATE {cls.WORKER_TABLE}
+                SET estado = 'inactivo'
+                WHERE estado = 'activo'
+                  AND ultimo_heartbeat < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
+            """))
+            db.execute(text(f"""
+                INSERT INTO {cls.WORKER_TABLE}
+                    (worker_id, usuario, equipo, estado, ultimo_heartbeat)
+                VALUES
+                    (:worker_id, :usuario, :equipo, 'activo', CURRENT_TIMESTAMP)
+                ON CONFLICT (worker_id) DO UPDATE SET
+                    usuario = EXCLUDED.usuario,
+                    equipo = EXCLUDED.equipo,
+                    estado = 'activo',
+                    ultimo_heartbeat = CURRENT_TIMESTAMP
+            """), {"worker_id": worker_id, "usuario": usuario, "equipo": equipo})
+
+    @classmethod
+    def obtener_trabajo_pendiente(cls, worker_id: str | None = None) -> dict[str, Any] | None:
+        """Reclama atómicamente un trabajo y lo identifica con el worker."""
         cls._ensure_jobs_table()
         with engine.begin() as db:
             row = db.execute(text(f"""
@@ -297,11 +339,21 @@ class SriClienteSyncService:
             db.execute(text(f"""
                 UPDATE {cls.JOB_TABLE}
                 SET estado = 'ejecutando',
-                    mensaje = 'Trabajo reclamado por el worker SRI interactivo.',
+                    worker = :worker,
+                    mensaje = 'Trabajo reclamado por el worker SRI.',
                     actualizado = CURRENT_TIMESTAMP
                 WHERE job_id = :job_id
-            """), {"job_id": row["job_id"]})
+            """), {"job_id": row["job_id"], "worker": worker_id})
+            if worker_id:
+                db.execute(text(f"""
+                    UPDATE {cls.WORKER_TABLE}
+                    SET job_actual = :job_id,
+                        ultimo_heartbeat = CURRENT_TIMESTAMP,
+                        estado = 'activo'
+                    WHERE worker_id = :worker
+                """), {"job_id": row["job_id"], "worker": worker_id})
         return dict(row)
+
 
     """Sincroniza automáticamente comprobantes recibidos del SRI hacia comprasnue.
 
