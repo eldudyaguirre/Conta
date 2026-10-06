@@ -1939,6 +1939,17 @@ class SriClienteSyncService:
             if not num_doc:
                 continue
 
+            # SRI suele entregar numDocSustento sin separadores
+            # (001201000019912), mientras ventas.numfactur usa
+            # 001-201-000019912.
+            num_doc_digitos = num_doc.replace("-", "").replace(" ", "")
+            if len(num_doc_digitos) == 15 and num_doc_digitos.isdigit():
+                num_doc = (
+                    f"{num_doc_digitos[:3]}-"
+                    f"{num_doc_digitos[3:6]}-"
+                    f"{num_doc_digitos[6:]}"
+                )
+
             params = {
                 "num_doc": num_doc,
                 "ruc_sujeto": ruc_sujeto,
