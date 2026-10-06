@@ -1829,7 +1829,6 @@ class SriClienteSyncService:
             "10": "retencioniva10",
             "20": "retencioniva20",
             "30": "retencioniva30",
-            "50": "retencioniva50",
             "70": "retencioniva70",
             "100": "retencioniva100",
         }
@@ -1837,7 +1836,7 @@ class SriClienteSyncService:
             "numestret", "numptoemiret", "numsecret", "numautret", "fecret",
             "codret", "baseimpret", "porret", "valret",
             "retencioniva10", "retencioniva20", "retencioniva30",
-            "retencioniva50", "retencioniva70", "retencioniva100",
+            "retencioniva70", "retencioniva100",
         )
 
         def normalizar_numdoc(valor: Any) -> str:
@@ -1983,7 +1982,6 @@ class SriClienteSyncService:
                 "retencioniva10 = :retencioniva10",
                 "retencioniva20 = :retencioniva20",
                 "retencioniva30 = :retencioniva30",
-                "retencioniva50 = :retencioniva50",
                 "retencioniva70 = :retencioniva70",
                 "retencioniva100 = :retencioniva100",
             ]
@@ -1993,7 +1991,6 @@ class SriClienteSyncService:
                 "10": Decimal("0"),
                 "20": Decimal("0"),
                 "30": Decimal("0"),
-                "50": Decimal("0"),
                 "70": Decimal("0"),
                 "100": Decimal("0"),
             }
