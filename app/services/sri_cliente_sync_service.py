@@ -216,11 +216,15 @@ class SriClienteSyncService:
                 resultado = await cls.sincronizar_mes(
                     ruc, anio, mes, tipo_comprobante, job_id=job_id, operacion=operacion
                 )
+            mensaje_final = str(
+                resultado.get("mensaje")
+                or "Sincronización finalizada."
+            )
             cls._job_update(
                 job_id,
                 **resultado,
                 estado="finalizado",
-                mensaje="Sincronización finalizada.",
+                mensaje=mensaje_final,
             )
         except SriJobCancelado as exc:
             cls._job_update(
