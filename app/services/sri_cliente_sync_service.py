@@ -359,6 +359,61 @@ class SriClienteSyncService:
         doc = ET.fromstring(raw)
         it = doc.find("infoTributaria")
         cod_doc = cls._txt(it, "codDoc")
+
+        # Las retenciones recibidas (codDoc 07) no tienen infoFactura.
+        # Una retención puede afectar una o varias facturas dentro de
+        # docsSustento; cada factura debe recibir la suma de sus propias
+        # retenciones IVA y renta.
+        if cod_doc == "07":
+            info_ret = doc.find("infoCompRetencion")
+            if it is None or info_ret is None:
+                raise ValueError("La retención no contiene la estructura tributaria esperada.")
+
+            fecha_txt = cls._txt(info_ret, "fechaEmision")
+            try:
+                fecha = datetime.strptime(fecha_txt, "%d/%m/%Y")
+            except ValueError as exc:
+                raise ValueError(f"Fecha de retención inválida: {fecha_txt}") from exc
+
+            documentos = []
+            for sustento in doc.findall("./docsSustento/docSustento"):
+                num_doc = cls._txt(sustento, "numDocSustento")
+                if not num_doc:
+                    continue
+
+                retiva = Decimal("0")
+                retrenta = Decimal("0")
+                for retencion in sustento.findall("./retenciones/retencion"):
+                    codigo = cls._txt(retencion, "codigo")
+                    valor = cls._dec(cls._txt(retencion, "valorRetenido"))
+                    if codigo == "2":
+                        retiva += valor
+                    elif codigo == "1":
+                        retrenta += valor
+
+                documentos.append({
+                    "num_doc_sustento": num_doc,
+                    "fecha_doc_sustento": cls._txt(sustento, "fechaEmisionDocSustento"),
+                    "num_aut_doc_sustento": cls._txt(sustento, "numAutDocSustento"),
+                    "retiva": retiva,
+                    "retrenta": retrenta,
+                })
+
+            return {
+                "ruc": cls._txt(it, "ruc"),
+                "razon_social": cls._txt(it, "razonSocial"),
+                "cod_doc": cod_doc,
+                "numest": cls._txt(it, "estab"),
+                "numptoemi": cls._txt(it, "ptoEmi"),
+                "numsec": cls._txt(it, "secuencial"),
+                "clave_acceso": cls._txt(it, "claveAcceso"),
+                "numero_autorizacion": cls._txt(root, "numeroAutorizacion"),
+                "fecha_emision": fecha_txt,
+                "fecha": fecha,
+                "identificacion_sujeto_retenido": cls._txt(info_ret, "identificacionSujetoRetenido"),
+                "documentos_sustento": documentos,
+            }
+
         inf = doc.find("infoNotaCredito") if cod_doc == "04" else doc.find("infoFactura")
         if it is None or inf is None:
             raise ValueError("El comprobante no contiene la estructura tributaria esperada.")
@@ -1767,6 +1822,7 @@ class SriClienteSyncService:
                     )
                     return result
                 es_nota_credito_recibida = operacion == "notas_credito_recibidas"
+                es_retencion_recibida = operacion == "retenciones_recibidas"
                 for pagina in range(1, 1001):
                     result["paginas"] = pagina
                     cls._job_update(job_id, mensaje=f"Procesando página {pagina}.", paginas=pagina)
@@ -1800,6 +1856,23 @@ class SriClienteSyncService:
                                 result["ya_existentes"] += 1
                                 continue
                             procesadas.add(clave)
+
+                            if es_retencion_recibida:
+                                actualizadas = cls._actualizar_retencion_ventas(db, factura)
+                                db.commit()
+                                result["descargadas"] += 1
+                                result["guardadas"] += actualizadas
+                                cls._job_update(
+                                    job_id,
+                                    guardadas=result["guardadas"],
+                                    descargadas=result["descargadas"],
+                                    ya_existentes=result["ya_existentes"],
+                                    mensaje=(
+                                        f"Retención {factura['numest']}-{factura['numptoemi']}-"
+                                        f"{factura['numsec']} actualizada en {actualizadas} factura(s)."
+                                    ),
+                                )
+                                continue
 
                             exists = db.execute(text("""
                                 SELECT 1 FROM comprasnue
@@ -1845,6 +1918,76 @@ class SriClienteSyncService:
 
         result["ok"] = not result["errores"]
         return result
+
+    @classmethod
+    def _actualizar_retencion_ventas(cls, db, retencion: dict[str, Any]) -> int:
+        """Actualiza en ventas las facturas afectadas por una retención recibida."""
+        documentos = retencion.get("documentos_sustento") or []
+        if not documentos:
+            raise ValueError("La retención no contiene documentos de sustento.")
+
+        numero_retencion = (
+            f"{retencion['numest']}-{retencion['numptoemi']}-{retencion['numsec']}"
+        )
+        autorizacion = str(retencion.get("numero_autorizacion") or "").strip()
+        fecha = retencion["fecha"].strftime("%Y-%m-%d")
+        ruc_sujeto = str(retencion.get("identificacion_sujeto_retenido") or "").strip()
+
+        actualizadas = 0
+        for documento in documentos:
+            num_doc = str(documento.get("num_doc_sustento") or "").strip()
+            if not num_doc:
+                continue
+
+            params = {
+                "num_doc": num_doc,
+                "ruc_sujeto": ruc_sujeto,
+                "numret": numero_retencion,
+                "autret": autorizacion,
+                "fecret": fecha,
+                "retiva": documento["retiva"],
+                "retrenta": documento["retrenta"],
+            }
+
+            # numDocSustento es la referencia principal. El RUC del sujeto
+            # retenido se usa como filtro adicional cuando viene informado.
+            if ruc_sujeto:
+                result = db.execute(text("""
+                    UPDATE ventas
+                    SET numret = :numret,
+                        autret = :autret,
+                        fecret = :fecret,
+                        retiva = :retiva,
+                        retrenta = :retrenta
+                    WHERE TRIM(numfactur::text) = TRIM(:num_doc)
+                      AND TRIM(ruccedcli::text) = TRIM(:ruc_sujeto)
+                """), params)
+            else:
+                result = db.execute(text("""
+                    UPDATE ventas
+                    SET numret = :numret,
+                        autret = :autret,
+                        fecret = :fecret,
+                        retiva = :retiva,
+                        retrenta = :retrenta
+                    WHERE TRIM(numfactur::text) = TRIM(:num_doc)
+                """), params)
+
+            if result.rowcount:
+                actualizadas += result.rowcount
+            else:
+                logger.warning(
+                    "RETENCION RECIBIDA | factura no encontrada en ventas | "
+                    "retencion=%s | numDocSustento=%s | ruc=%s",
+                    numero_retencion, num_doc, ruc_sujeto,
+                )
+
+        if actualizadas == 0:
+            raise ValueError(
+                f"No se encontró en ventas ninguna factura de la retención {numero_retencion}."
+            )
+
+        return actualizadas
 
     @classmethod
     def _insertar_nota_credito_recibida(cls, db, factura: dict[str, Any]) -> None:
