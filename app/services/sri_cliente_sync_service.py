@@ -1884,6 +1884,7 @@ class SriClienteSyncService:
                         raise RuntimeError("SRI no devolvió comprobantes en la tabla actual.")
 
                     for idx in range(total_links):
+                        factura = None
                         try:
                             # Mantener el mismo selector usado para detectar los
                             # enlaces. El SRI puede cambiar el id exacto de lnkXml.
@@ -1941,10 +1942,45 @@ class SriClienteSyncService:
                             cls._job_update(job_id, guardadas=result["guardadas"], descargadas=result["descargadas"], ya_existentes=result["ya_existentes"])
                         except Exception as exc:
                             db.rollback()
+
+                            numero_retencion = ""
+                            proveedor_retencion = ""
+                            factura_sustento = ""
+                            if isinstance(factura, dict):
+                                numero_retencion = (
+                                    f"{factura.get('numest', '')}-"
+                                    f"{factura.get('numptoemi', '')}-"
+                                    f"{factura.get('numsec', '')}"
+                                ).strip("-")
+                                proveedor_retencion = str(
+                                    factura.get("razon_social") or ""
+                                ).strip()
+                                documentos = factura.get("documentos_sustento") or []
+                                if documentos:
+                                    factura_sustento = ", ".join(
+                                        str(d.get("num_doc_sustento") or "").strip()
+                                        for d in documentos
+                                        if d.get("num_doc_sustento")
+                                    )
+
                             result["errores"].append({
-                                "pagina": pagina, "fila": idx + 1, "detalle": str(exc)
+                                "pagina": pagina,
+                                "fila": idx + 1,
+                                "cliente": result.get("cliente", ""),
+                                "num_retencion": numero_retencion,
+                                "proveedor_retencion": proveedor_retencion,
+                                "factura_sustento": factura_sustento,
+                                "detalle": str(exc),
                             })
-                            cls._job_update(job_id, errores=result["errores"], mensaje=f"Error procesando fila {idx + 1}: {exc}")
+                            cls._job_update(
+                                job_id,
+                                errores=result["errores"],
+                                mensaje=(
+                                    f"Error procesando retención "
+                                    f"{numero_retencion or 'desconocida'} "
+                                    f"del cliente {result.get('cliente', '')}: {exc}"
+                                ),
+                            )
 
                     if not await cls._siguiente_pagina(page):
                         break
@@ -1983,6 +2019,7 @@ class SriClienteSyncService:
         ruc_sujeto = str(retencion.get("identificacion_sujeto_retenido") or "").strip()
 
         actualizadas = 0
+        no_encontradas: list[str] = []
         for documento in documentos:
             num_doc = str(documento.get("num_doc_sustento") or "").strip()
             if not num_doc:
@@ -2052,6 +2089,7 @@ class SriClienteSyncService:
                     documento["retiva"], documento["retrenta"], filas,
                 )
             else:
+                no_encontradas.append(num_doc)
                 logger.warning(
                     "RETENCION RECIBIDA | factura no encontrada en ventas | "
                     "retencion=%s | numDocSustento=%s | ruc=%s",
@@ -2059,8 +2097,16 @@ class SriClienteSyncService:
                 )
 
         if actualizadas == 0:
+            detalle_facturas = ", ".join(no_encontradas) or "sin número de factura"
             raise ValueError(
-                f"No se encontró en ventas ninguna factura de la retención {numero_retencion}."
+                f"No se encontró en ventas ninguna factura de la retención "
+                f"{numero_retencion}. Facturas sustento: {detalle_facturas}."
+            )
+        if no_encontradas:
+            logger.warning(
+                "RETENCION RECIBIDA | algunas facturas no fueron encontradas | "
+                "retencion=%s | facturas=%s",
+                numero_retencion, ", ".join(no_encontradas),
             )
 
         return actualizadas
