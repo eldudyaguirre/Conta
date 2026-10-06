@@ -1225,7 +1225,7 @@ class SriClienteSyncService:
                     impuesto = textos[idx["impuesto"]] if idx["impuesto"] is not None else ""
                     codigo = textos[idx["codigo"]] if idx["codigo"] is not None else ""
                     base = cls._dec(textos[idx["base"]])
-                    por = cls._dec(textos[idx["por"]]) if idx["por"] is not None else Decimal("0")
+                    por = cls._dec(re.sub(r"[^0-9.,-]", "", textos[idx["por"]])) if idx["por"] is not None else Decimal("0")
                     valor = cls._dec(textos[idx["valor"]])
                     doc = textos[idx["doc"]] if idx["doc"] is not None else " ".join(textos)
                     md = re.search(r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b", doc)
@@ -1658,6 +1658,8 @@ class SriClienteSyncService:
     @classmethod
     def _actualizar_retencion_emitida_compras(cls, db, retencion: dict[str, Any]) -> int:
         """Actualiza comprasnue con la retención emitida que afecta cada factura."""
+        import re
+
         documentos = retencion.get("documentos_sustento") or []
         if not documentos:
             raise ValueError("La retención emitida no contiene documentos de sustento.")
