@@ -375,29 +375,65 @@ class SriClienteSyncService:
             except ValueError as exc:
                 raise ValueError(f"Fecha de retención inválida: {fecha_txt}") from exc
 
-            documentos = []
+            # En las retenciones reales del SRI, los documentos sustento
+            # pueden venir directamente dentro de <impuestos><impuesto>,
+            # no necesariamente dentro de <docsSustento>.
+            # Agrupamos por numDocSustento para sumar IVA y renta de cada factura.
+            documentos_map: dict[str, dict[str, Any]] = {}
+
+            for impuesto in doc.findall("./impuestos/impuesto"):
+                num_doc = cls._txt(impuesto, "numDocSustento")
+                if not num_doc:
+                    continue
+
+                if num_doc not in documentos_map:
+                    documentos_map[num_doc] = {
+                        "num_doc_sustento": num_doc,
+                        "fecha_doc_sustento": cls._txt(
+                            impuesto, "fechaEmisionDocSustento"
+                        ),
+                        "num_aut_doc_sustento": "",
+                        "retiva": Decimal("0"),
+                        "retrenta": Decimal("0"),
+                    }
+
+                codigo = cls._txt(impuesto, "codigo")
+                valor = cls._dec(cls._txt(impuesto, "valorRetenido"))
+
+                # codigo 1 = renta; codigo 2 = IVA.
+                if codigo == "2":
+                    documentos_map[num_doc]["retiva"] += valor
+                elif codigo == "1":
+                    documentos_map[num_doc]["retrenta"] += valor
+
+            # Compatibilidad con XML que sí utilicen docsSustento.
             for sustento in doc.findall("./docsSustento/docSustento"):
                 num_doc = cls._txt(sustento, "numDocSustento")
                 if not num_doc:
                     continue
 
-                retiva = Decimal("0")
-                retrenta = Decimal("0")
+                if num_doc not in documentos_map:
+                    documentos_map[num_doc] = {
+                        "num_doc_sustento": num_doc,
+                        "fecha_doc_sustento": cls._txt(
+                            sustento, "fechaEmisionDocSustento"
+                        ),
+                        "num_aut_doc_sustento": cls._txt(
+                            sustento, "numAutDocSustento"
+                        ),
+                        "retiva": Decimal("0"),
+                        "retrenta": Decimal("0"),
+                    }
+
                 for retencion in sustento.findall("./retenciones/retencion"):
                     codigo = cls._txt(retencion, "codigo")
                     valor = cls._dec(cls._txt(retencion, "valorRetenido"))
                     if codigo == "2":
-                        retiva += valor
+                        documentos_map[num_doc]["retiva"] += valor
                     elif codigo == "1":
-                        retrenta += valor
+                        documentos_map[num_doc]["retrenta"] += valor
 
-                documentos.append({
-                    "num_doc_sustento": num_doc,
-                    "fecha_doc_sustento": cls._txt(sustento, "fechaEmisionDocSustento"),
-                    "num_aut_doc_sustento": cls._txt(sustento, "numAutDocSustento"),
-                    "retiva": retiva,
-                    "retrenta": retrenta,
-                })
+            documentos = list(documentos_map.values())
 
             return {
                 "ruc": cls._txt(it, "ruc"),
@@ -410,7 +446,12 @@ class SriClienteSyncService:
                 "numero_autorizacion": cls._txt(root, "numeroAutorizacion"),
                 "fecha_emision": fecha_txt,
                 "fecha": fecha,
-                "identificacion_sujeto_retenido": cls._txt(info_ret, "identificacionSujetoRetenido"),
+                "identificacion_sujeto_retenido": cls._txt(
+                    info_ret, "identificacionSujetoRetenido"
+                ),
+                "razon_social_sujeto_retenido": cls._txt(
+                    info_ret, "razonSocialSujetoRetenido"
+                ),
                 "documentos_sustento": documentos,
             }
 
