@@ -358,9 +358,10 @@ class SriClienteSyncService:
             raise ValueError("El XML no contiene comprobante.")
         doc = ET.fromstring(raw)
         it = doc.find("infoTributaria")
-        inf = doc.find("infoFactura")
+        cod_doc = cls._txt(it, "codDoc")
+        inf = doc.find("infoNotaCredito") if cod_doc == "04" else doc.find("infoFactura")
         if it is None or inf is None:
-            raise ValueError("El comprobante no contiene infoTributaria/infoFactura.")
+            raise ValueError("El comprobante no contiene la estructura tributaria esperada.")
 
         fecha_txt = cls._txt(inf, "fechaEmision")
         try:
@@ -483,6 +484,18 @@ class SriClienteSyncService:
         pagos = inf.find("pagos")
         formas = [] if pagos is None else [cls._txt(p, "formaPago") for p in pagos.findall("pago")]
 
+        datos_modificacion = {}
+        if cod_doc == "04":
+            num_doc_mod = cls._txt(inf, "numDocModificado")
+            fecha_doc_mod = cls._txt(inf, "fechaEmisionDocSustento")
+            partes = num_doc_mod.split("-")
+            datos_modificacion = {
+                "numestmod": partes[0] if len(partes) == 3 else "",
+                "numptoemimod": partes[1] if len(partes) == 3 else "",
+                "numsecmod": partes[2] if len(partes) == 3 else num_doc_mod,
+                "fecfac": fecha_doc_mod,
+            }
+
         return {
             "ruc": cls._txt(it, "ruc"),
             "razon_social": cls._txt(it, "razonSocial"),
@@ -500,6 +513,7 @@ class SriClienteSyncService:
             "subtotal": cls._dec(cls._txt(inf, "totalSinImpuestos")),
             "total": cls._dec(cls._txt(inf, "importeTotal")),
             "tipopago": next((x for x in formas if x), ""),
+            **datos_modificacion,
         }
 
     @staticmethod
@@ -1752,6 +1766,7 @@ class SriClienteSyncService:
                         destino="ncventas",
                     )
                     return result
+                es_nota_credito_recibida = operacion == "notas_credito_recibidas"
                 for pagina in range(1, 1001):
                     result["paginas"] = pagina
                     cls._job_update(job_id, mensaje=f"Procesando página {pagina}.", paginas=pagina)
@@ -1794,7 +1809,10 @@ class SriClienteSyncService:
                                 result["ya_existentes"] += 1
                                 continue
 
-                            cls._insertar(db, factura, tipo_comprobante)
+                            if es_nota_credito_recibida:
+                                cls._insertar_nota_credito_recibida(db, factura)
+                            else:
+                                cls._insertar(db, factura, tipo_comprobante)
                             db.commit()
                             result["descargadas"] += 1
                             result["guardadas"] += 1
@@ -1827,6 +1845,88 @@ class SriClienteSyncService:
 
         result["ok"] = not result["errores"]
         return result
+
+    @classmethod
+    def _insertar_nota_credito_recibida(cls, db, factura: dict[str, Any]) -> None:
+        """Guarda una nota de crédito recibida en comprasnue con la estructura legacy."""
+        b, i = factura["bases"], factura["ivas"]
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext('conta_comprasnue_numcompra'))"))
+
+        numestmod = str(factura.get("numestmod") or "").strip()
+        numptoemimod = str(factura.get("numptoemimod") or "").strip()
+        numsecmod = str(factura.get("numsecmod") or "").strip()
+        ruc = str(factura.get("ruc") or "").strip()
+
+        numautmod = "9999999999"
+        if numestmod and numptoemimod and numsecmod and ruc:
+            original = db.execute(text("""
+                SELECT numaut
+                FROM comprasnue
+                WHERE TRIM(numest::text) = TRIM(:numestmod)
+                  AND TRIM(numptoemi::text) = TRIM(:numptoemimod)
+                  AND TRIM(numsec::text) = TRIM(:numsecmod)
+                  AND TRIM(ruccedprovee::text) = TRIM(:ruc)
+                  AND TRIM(tipcom::text) IN ('01', '02')
+                ORDER BY numcompra DESC NULLS LAST
+                LIMIT 1
+            """), {
+                "numestmod": numestmod,
+                "numptoemimod": numptoemimod,
+                "numsecmod": numsecmod,
+                "ruc": ruc,
+            }).scalar()
+            if original:
+                numautmod = str(original).strip() or "9999999999"
+
+        # numcompra debe provenir del consecutivo de parametros, no de MAX().
+        numcompra = db.execute(text("SELECT siguiente_parametro('numcompra')")).scalar()
+        if numcompra is None:
+            raise RuntimeError("No se pudo obtener el consecutivo numcompra desde parametros.")
+        numcompra = str(numcompra).strip()
+        if not numcompra:
+            raise RuntimeError("El consecutivo numcompra obtenido desde parametros está vacío.")
+
+        values = {
+            "numcompra": numcompra,
+            "codsus": "01",
+            "tipid": "01",
+            "ruccedprovee": ruc,
+            "tipcom": "04",
+            "fecreg": factura["fecha"],
+            "numest": factura["numest"],
+            "numptoemi": factura["numptoemi"],
+            "numsec": factura["numsec"],
+            "fecemi": factura["fecha_emision"],
+            "numaut": factura["clave_acceso"],
+            "baseimpnoobj": b["no_objeto"],
+            "baseimpiva0": b["0"],
+            "baseimpiva12": b["12"],
+            "baseexenta": b["exenta"],
+            "montoice": factura["ice"],
+            "montoiva": sum(i.values(), Decimal("0")),
+            "retencioniva10": 0, "retencioniva20": 0, "retencioniva30": 0,
+            "retencioniva70": 0, "retencioniva100": 0,
+            "totbases": sum(b.values(), Decimal("0")),
+            "codret": "", "baseimpret": "", "porret": "", "valret": "",
+            "numestret": "", "numptoemiret": "", "numsecret": "",
+            "numautret": "", "fecret": "", "tipopago": factura["tipopago"],
+            "codtipodoc": "01",
+            "numestmod": numestmod,
+            "numptoemimod": numptoemimod,
+            "numsecmod": numsecmod,
+            "numautmod": numautmod,
+            "mes": f"{factura['fecha'].month:02d}",
+            "año": str(factura["fecha"].year),
+            "nomprovee": factura["razon_social"],
+            "baseimpiva5": b["5"], "baseimpiva8": b["8"],
+            "baseimpiva14": b["14"], "baseimpiva15": b["15"],
+            "montoiva5": i["5"], "montoiva8": i["8"],
+            "montoiva12": i["12"], "montoiva14": i["14"],
+            "montoiva15": i["15"],
+        }
+        cols = ", ".join(f'"{k}"' if k == "año" else k for k in values)
+        params = ", ".join(f":{k}" for k in values)
+        db.execute(text(f"INSERT INTO comprasnue ({cols}) VALUES ({params})"), values)
 
     @classmethod
     def _insertar(cls, db, factura: dict[str, Any], tipo_comprobante: int) -> None:
