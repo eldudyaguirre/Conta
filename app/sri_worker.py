@@ -12,6 +12,9 @@ if os.path.isdir(_POSTGRES_BIN):
 
 import asyncio
 import logging
+import smtplib
+import traceback
+from email.message import EmailMessage
 
 from app.core.config import settings
 from app.services.sri_cliente_sync_service import SriClienteSyncService
@@ -22,6 +25,46 @@ logging.basicConfig(
     format="%(asctime)s | SRI-WORKER | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger("conta.sri_worker")
+
+_ALERT_COOLDOWN_SECONDS = 300
+_ULTIMOS_ALERTAS: dict[str, float] = {}
+
+def _enviar_alerta_error_worker(worker_id: str, usuario: str, trabajo: dict | None, exc: Exception) -> None:
+    smtp_user = settings.SMTP_USER.strip()
+    smtp_password = settings.SMTP_PASSWORD.strip()
+    destino = settings.BUG_REPORT_EMAIL.strip()
+    if not smtp_user or not smtp_password or not destino:
+        logger.warning("Alerta por correo no enviada: SMTP no configurado.")
+        return
+    clave = f"{worker_id}|{type(exc).__name__}|{str(exc)}"
+    ahora = time.monotonic()
+    if ahora - _ULTIMOS_ALERTAS.get(clave, 0.0) < _ALERT_COOLDOWN_SECONDS:
+        return
+    _ULTIMOS_ALERTAS[clave] = ahora
+    job_id = (trabajo or {}).get("job_id", "-")
+    cuerpo = (
+        "Conta - ERROR AUTOMÁTICO DEL SRI WORKER\n\n"
+        f"Worker: {worker_id}\nUsuario: {usuario}\nEquipo: {socket.gethostname()}\n"
+        f"Job ID: {job_id}\nRUC: {(trabajo or {}).get("ruc", "-")}\n"
+        f"Año: {(trabajo or {}).get("anio", "-")}\nMes: {(trabajo or {}).get("mes", "-")}\n"
+        f"Tipo comprobante: {(trabajo or {}).get("tipo_comprobante", "-")}\n"
+        f"Operación: {(trabajo or {}).get("operacion", "-")}\n\n"
+        f"Error: {type(exc).__name__}: {exc}\n\nTraceback completo:\n{traceback.format_exc()}"
+    )
+    mensaje = EmailMessage()
+    mensaje["From"] = smtp_user
+    mensaje["To"] = destino
+    mensaje["Subject"] = f"[Conta] Error SRI Worker | {worker_id} | job {job_id}"
+    mensaje.set_content(cuerpo)
+    try:
+        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as servidor:
+            if settings.SMTP_USE_TLS:
+                servidor.starttls()
+            servidor.login(smtp_user, smtp_password)
+            servidor.send_message(mensaje)
+        logger.info("Alerta de error enviada a %s.", destino)
+    except Exception:
+        logger.exception("No se pudo enviar la alerta de error por correo.")
 
 
 async def _procesar_trabajo(worker_numero: int) -> None:
@@ -69,8 +112,9 @@ async def _procesar_trabajo(worker_numero: int) -> None:
                 await asyncio.sleep(max(1, settings.SRI_WORKER_POLL_SECONDS))
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("Error en el worker SRI %s.", worker_id)
+            _enviar_alerta_error_worker(worker_id, usuario_worker, trabajo, exc)
             if trabajo:
                 SriClienteSyncService._job_update(
                     trabajo["job_id"],
