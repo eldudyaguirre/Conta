@@ -12,9 +12,9 @@ if os.path.isdir(_POSTGRES_BIN):
 
 import asyncio
 import logging
-import smtplib
 import traceback
-from email.message import EmailMessage
+import json
+from urllib import error as url_error, request as url_request
 
 from app.core.config import settings
 from app.services.sri_cliente_sync_service import SriClienteSyncService
@@ -30,42 +30,46 @@ _ALERT_COOLDOWN_SECONDS = 300
 _ULTIMOS_ALERTAS: dict[str, float] = {}
 
 def _enviar_alerta_error_worker(worker_id: str, usuario: str, trabajo: dict | None, exc: Exception) -> None:
-    smtp_user = settings.SMTP_USER.strip()
-    smtp_password = settings.SMTP_PASSWORD.strip()
-    destino = settings.BUG_REPORT_EMAIL.strip()
-    if not smtp_user or not smtp_password or not destino:
-        logger.warning("Alerta por correo no enviada: SMTP no configurado.")
+    token = settings.TOTALCOUNTS_INTERNAL_TOKEN.strip()
+    base_url = os.getenv("TOTALCOUNTS_URL", "https://totalcounts.com.ec").rstrip("/")
+    if not token:
+        logger.warning("Alerta no enviada: TOTALCOUNTS_INTERNAL_TOKEN no está configurado.")
         return
     clave = f"{worker_id}|{type(exc).__name__}|{str(exc)}"
     ahora = time.monotonic()
     if ahora - _ULTIMOS_ALERTAS.get(clave, 0.0) < _ALERT_COOLDOWN_SECONDS:
         return
     _ULTIMOS_ALERTAS[clave] = ahora
-    job_id = (trabajo or {}).get("job_id", "-")
-    cuerpo = (
-        "Conta - ERROR AUTOMÁTICO DEL SRI WORKER\n\n"
-        f"Worker: {worker_id}\nUsuario: {usuario}\nEquipo: {socket.gethostname()}\n"
-        f"Job ID: {job_id}\nRUC: {(trabajo or {}).get("ruc", "-")}\n"
-        f"Año: {(trabajo or {}).get("anio", "-")}\nMes: {(trabajo or {}).get("mes", "-")}\n"
-        f"Tipo comprobante: {(trabajo or {}).get("tipo_comprobante", "-")}\n"
-        f"Operación: {(trabajo or {}).get("operacion", "-")}\n\n"
-        f"Error: {type(exc).__name__}: {exc}\n\nTraceback completo:\n{traceback.format_exc()}"
+    trabajo = trabajo or {}
+    payload = {
+        "worker": worker_id,
+        "usuario": usuario,
+        "equipo": socket.gethostname(),
+        "job_id": trabajo.get("job_id", "-"),
+        "ruc": trabajo.get("ruc", "-"),
+        "anio": trabajo.get("anio", "-"),
+        "mes": trabajo.get("mes", "-"),
+        "tipo_comprobante": trabajo.get("tipo_comprobante", "-"),
+        "operacion": trabajo.get("operacion", "-"),
+        "error_tipo": type(exc).__name__,
+        "error_mensaje": str(exc),
+        "traceback": traceback.format_exc(),
+    }
+    req = url_request.Request(
+        f"{base_url}/internal/conta/worker-error/",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-TotalCounts-Internal": token},
+        method="POST",
     )
-    mensaje = EmailMessage()
-    mensaje["From"] = smtp_user
-    mensaje["To"] = destino
-    mensaje["Subject"] = f"[Conta] Error SRI Worker | {worker_id} | job {job_id}"
-    mensaje.set_content(cuerpo)
     try:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as servidor:
-            if settings.SMTP_USE_TLS:
-                servidor.starttls()
-            servidor.login(smtp_user, smtp_password)
-            servidor.send_message(mensaje)
-        logger.info("Alerta de error enviada a %s.", destino)
+        with url_request.urlopen(req, timeout=20) as response:
+            if response.status >= 300:
+                raise RuntimeError(f"TtCWeb respondió HTTP {response.status}")
+        logger.info("Reporte de error enviado a TtCWeb para job %s.", payload["job_id"])
+    except url_error.HTTPError as exc_http:
+        logger.error("TtCWeb rechazó el reporte de error: HTTP %s.", exc_http.code)
     except Exception:
-        logger.exception("No se pudo enviar la alerta de error por correo.")
-
+        logger.exception("No se pudo enviar el reporte de error a TtCWeb.")
 
 async def _procesar_trabajo(worker_numero: int) -> None:
     usuario_worker = (settings.SRI_WORKER_USER or os.getenv("USERNAME") or socket.gethostname()).strip()
