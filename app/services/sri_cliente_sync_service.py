@@ -1142,6 +1142,123 @@ class SriClienteSyncService:
         return factura
 
     @classmethod
+    def _parsear_retencion_emitida_html(cls, html: str) -> dict[str, Any]:
+        """Parsea una retención emitida desde el detalle HTML del SRI."""
+        from bs4 import BeautifulSoup
+        import re
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        def txt(celda) -> str:
+            return " ".join(celda.get_text(" ", strip=True).split())
+
+        def norm(valor: str) -> str:
+            return " ".join(str(valor or "").lower().replace(":", " ").replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u").split())
+
+        pares = []
+        for tabla in soup.find_all("table"):
+            for fila in tabla.find_all("tr"):
+                textos = [txt(x) for x in fila.find_all(["td", "th"])]
+                textos = [x for x in textos if x]
+                if len(textos) == 2:
+                    pares.append((textos[0], textos[1]))
+                elif len(textos) == 3:
+                    pares.append((textos[0], textos[-1]))
+
+        def buscar(etiquetas):
+            objetivos = [norm(x) for x in etiquetas]
+            for etiqueta, valor in pares:
+                ne = norm(etiqueta)
+                if ne in objetivos or any(ne.startswith(o + " ") for o in objetivos):
+                    return valor
+            return ""
+
+        import re
+        fecha_txt = buscar(["Fecha Emisión", "Fecha de Emisión"])
+        mf = re.search(r"\d{2}/\d{2}/\d{4}", fecha_txt)
+        if mf:
+            fecha_txt = mf.group(0)
+        fecha = datetime.strptime(fecha_txt, "%d/%m/%Y")
+
+        def comp(valor):
+            m = re.search(r"(\d{3})\s*[- ]\s*(\d{3})\s*[- ]\s*(\d{9})", str(valor or ""))
+            if not m:
+                m = re.search(r"\b(\d{3})(\d{3})(\d{9})\b", str(valor or ""))
+            return m.groups() if m else ("", "", "")
+
+        numest = buscar(["Establecimiento"])
+        numptoemi = buscar(["Punto de Emisión", "Punto Emisión"])
+        numsec = buscar(["Secuencial"])
+        ne, np, ns = comp(buscar(["Número de Comprobante", "Numero de Comprobante", "Comprobante"]))
+        numest, numptoemi, numsec = numest or ne, numptoemi or np, numsec or ns
+
+        clave = buscar(["Clave de Acceso", "Clave acceso"])
+        autorizacion = buscar(["Número de Autorización", "Numero de Autorización", "Autorización"])
+        ruc = buscar(["Identificación Sujeto Retenido", "Identificacion Sujeto Retenido", "RUC Sujeto Retenido"])
+        nombre = buscar(["Razón Social Sujeto Retenido", "Razon Social Sujeto Retenido", "Sujeto Retenido", "Proveedor"])
+
+        documentos = {}
+        for tabla in soup.find_all("table"):
+            filas = tabla.find_all("tr")
+            for pos, fila in enumerate(filas):
+                headers = [norm(x) for x in fila.find_all(["td", "th"])]
+                joined = " | ".join(headers)
+                if "base imponible" not in joined or "valor retenido" not in joined:
+                    continue
+                idx = {
+                    "impuesto": next((i for i,x in enumerate(headers) if "impuesto" in x), None),
+                    "codigo": next((i for i,x in enumerate(headers) if "codigo" in x), None),
+                    "base": next((i for i,x in enumerate(headers) if "base imponible" in x), None),
+                    "por": next((i for i,x in enumerate(headers) if "porcentaje" in x or "tarifa" in x), None),
+                    "valor": next((i for i,x in enumerate(headers) if "valor retenido" in x or x == "valor"), None),
+                    "doc": next((i for i,x in enumerate(headers) if "documento sustento" in x or "numdoc" in x), None),
+                }
+                if idx["base"] is None or idx["valor"] is None:
+                    continue
+                for fila_dato in filas[pos + 1:]:
+                    textos = [txt(x) for x in fila_dato.find_all(["td", "th"])]
+                    if not textos:
+                        continue
+                    indices = [i for i in idx.values() if i is not None]
+                    if max(indices) >= len(textos):
+                        continue
+                    impuesto = textos[idx["impuesto"]] if idx["impuesto"] is not None else ""
+                    codigo = textos[idx["codigo"]] if idx["codigo"] is not None else ""
+                    base = cls._dec(textos[idx["base"]])
+                    por = cls._dec(textos[idx["por"]]) if idx["por"] is not None else Decimal("0")
+                    valor = cls._dec(textos[idx["valor"]])
+                    doc = textos[idx["doc"]] if idx["doc"] is not None else " ".join(textos)
+                    md = re.search(r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b", doc)
+                    if not md:
+                        md = re.search(r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b", " ".join(textos))
+                    if not md:
+                        continue
+                    numdoc = re.sub(r"\D", "", md.group(0))
+                    item = documentos.setdefault(numdoc, {
+                        "num_doc_sustento": numdoc, "impuesto": "", "codigo_retencion": "",
+                        "base": Decimal("0"), "porcentaje": Decimal("0"), "valor": Decimal("0"),
+                        "retiva": Decimal("0"), "retrenta": Decimal("0"),
+                    })
+                    item["impuesto"] = impuesto or item["impuesto"]
+                    item["codigo_retencion"] = re.sub(r"\D", "", codigo) or item["codigo_retencion"]
+                    item["base"] += base
+                    item["porcentaje"] = por or item["porcentaje"]
+                    item["valor"] += valor
+                    if "iva" in norm(impuesto):
+                        item["retiva"] += valor
+                    elif "renta" in norm(impuesto):
+                        item["retrenta"] += valor
+
+        return {
+            "numest": numest.strip(), "numptoemi": numptoemi.strip(), "numsec": numsec.strip(),
+            "clave_acceso": clave.strip(), "numero_autorizacion": (autorizacion.strip() or clave.strip()),
+            "fecha_emision": fecha_txt, "fecha": fecha,
+            "identificacion_sujeto_retenido": ruc.strip(),
+            "razon_social_sujeto_retenido": nombre.strip(),
+            "documentos_sustento": list(documentos.values()),
+        }
+
+    @classmethod
     async def _consultar_emitidos(cls, page, anio: int, mes: int) -> None:
         """Abre la consulta de comprobantes emitidos.
         
@@ -1455,6 +1572,146 @@ class SriClienteSyncService:
             # regresar SIEMPRE a la página 1 para que la nueva consulta no
             # herede la página anterior.
             await cls._volver_pagina_1_emitidos(page)
+
+    @classmethod
+    async def _procesar_emitidos_retenciones(cls, page, db, result, job_id, procesadas, anio: int, mes: int) -> None:
+        """Procesa retenciones emitidas y actualiza las compras afectadas."""
+        import calendar
+        from datetime import date
+
+        ultimo_dia = calendar.monthrange(anio, mes)[1]
+        for dia in range(1, ultimo_dia + 1):
+            cls._verificar_cancelacion(job_id)
+            fecha_consulta = date(anio, mes, dia)
+            cls._job_update(job_id, mensaje=f"Consultando retenciones emitidas del {fecha_consulta.strftime('%d/%m/%Y')}.")
+            if await cls._consultar_emitidos_dia(page, fecha_consulta) == 0:
+                continue
+
+            pagina = 1
+            while True:
+                cls._verificar_cancelacion(job_id)
+                result["paginas"] += 1
+                cls._job_update(job_id, paginas=result["paginas"], mensaje=f"Procesando retenciones emitidas del {fecha_consulta.strftime('%d/%m/%Y')} (página {pagina}).")
+                filas = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr")
+                cantidad = await filas.count()
+
+                for idx in range(cantidad):
+                    cls._verificar_cancelacion(job_id)
+                    try:
+                        columnas = await filas.nth(idx).locator("td").all_inner_texts()
+                        tipo = " ".join(columnas[1].strip().split()).lower() if len(columnas) >= 2 else ""
+                        if tipo and not (tipo == "07" or tipo.startswith("retención") or tipo.startswith("retencion") or " retención " in f" {tipo} " or " retencion " in f" {tipo} "):
+                            continue
+
+                        html = await cls._obtener_detalle_emitido(page, idx)
+                        if not html:
+                            continue
+                        retencion = cls._parsear_retencion_emitida_html(html)
+                        if retencion["fecha"].date() != fecha_consulta:
+                            continue
+
+                        clave = retencion["clave_acceso"].strip()
+                        if not clave:
+                            raise ValueError("La retención emitida no contiene clave de acceso.")
+                        if clave in procesadas:
+                            result["ya_existentes"] += 1
+                            continue
+                        procesadas.add(clave)
+                        result["sri"] += 1
+
+                        actualizadas = cls._actualizar_retencion_emitida_compras(db, retencion)
+                        db.commit()
+                        result["descargadas"] += 1
+                        result["guardadas"] += actualizadas
+                        cls._job_update(
+                            job_id, sri=result["sri"], guardadas=result["guardadas"],
+                            descargadas=result["descargadas"], ya_existentes=result["ya_existentes"],
+                            mensaje=f"Retención emitida {retencion['numest']}-{retencion['numptoemi']}-{retencion['numsec']} procesada.",
+                        )
+                    except Exception as exc:
+                        db.rollback()
+                        result["errores"].append({"fecha": fecha_consulta.isoformat(), "pagina": pagina, "fila": idx + 1, "detalle": str(exc)})
+                        cls._job_update(job_id, errores=result["errores"], mensaje=f"Error retención emitida {fecha_consulta.strftime('%d/%m/%Y')} fila {idx + 1}: {exc}")
+
+                boton_next = page.locator("[class*='ui-paginator-next']").first
+                if await boton_next.count() == 0:
+                    break
+                clases = (await boton_next.get_attribute("class") or "").lower()
+                if "ui-state-disabled" in clases:
+                    break
+                try:
+                    primera = await filas.first.inner_text()
+                except Exception:
+                    primera = ""
+                await boton_next.click()
+                for _ in range(30):
+                    await page.wait_for_timeout(500)
+                    try:
+                        if not primera or await filas.first.inner_text() != primera:
+                            break
+                    except Exception:
+                        pass
+                pagina += 1
+
+            await cls._volver_pagina_1_emitidos(page)
+
+    @classmethod
+    def _actualizar_retencion_emitida_compras(cls, db, retencion: dict[str, Any]) -> int:
+        """Actualiza comprasnue con la retención emitida que afecta cada factura."""
+        documentos = retencion.get("documentos_sustento") or []
+        if not documentos:
+            raise ValueError("La retención emitida no contiene documentos de sustento.")
+
+        numret = f"{retencion['numest']}-{retencion['numptoemi']}-{retencion['numsec']}"
+        autret = str(retencion.get("numero_autorizacion") or retencion.get("clave_acceso") or "").strip()
+        fecret = retencion["fecha"].strftime("%Y-%m-%d")
+        ruc = str(retencion.get("identificacion_sujeto_retenido") or "").strip()
+        actualizadas = 0
+        no_encontradas = []
+
+        for documento in documentos:
+            numdoc = re.sub(r"[^0-9]", "", str(documento.get("num_doc_sustento") or ""))
+            if not numdoc:
+                continue
+
+            tasa = str(documento.get("porcentaje") or "").replace(",", ".").rstrip("0").rstrip(".")
+            iva_fields = {"10": "retencioniva10", "20": "retencioniva20", "30": "retencioniva30", "70": "retencioniva70", "100": "retencioniva100"}
+            iva_field = iva_fields.get(tasa)
+            set_iva = f", {iva_field} = :retiva" if iva_field else ""
+            set_renta = ", codret = :codret, baseimpret = :baseimpret, porret = :porret, valret = :valret" if documento.get("retrenta") else ""
+            sql = f"""
+                UPDATE comprasnue
+                SET numestret = :numestret, numptoemiret = :numptoemiret, numsecret = :numsecret,
+                    numautret = :numautret, fecret = :fecret
+                    {set_renta}
+                    {set_iva}
+                WHERE REPLACE(REPLACE(REPLACE(TRIM(numest::text), '-', ''), ' ', ''), '.', '') = SUBSTRING(:numdoc FROM 1 FOR 3)
+                  AND REPLACE(REPLACE(REPLACE(TRIM(numptoemi::text), '-', ''), ' ', ''), '.', '') = SUBSTRING(:numdoc FROM 4 FOR 3)
+                  AND REPLACE(REPLACE(REPLACE(TRIM(numsec::text), '-', ''), ' ', ''), '.', '') = SUBSTRING(:numdoc FROM 7)
+                  AND (:ruc = '' OR TRIM(ruccedprovee::text) = TRIM(:ruc))
+            """
+            params = {
+                "numdoc": numdoc, "ruc": ruc,
+                "numestret": retencion["numest"], "numptoemiret": retencion["numptoemi"], "numsecret": retencion["numsec"],
+                "numautret": autret, "fecret": fecret,
+                "codret": str(documento.get("codigo_retencion") or ""),
+                "baseimpret": documento.get("base") or Decimal("0"),
+                "porret": documento.get("porcentaje") or Decimal("0"),
+                "valret": documento.get("retrenta") or Decimal("0"),
+                "retiva": documento.get("retiva") or Decimal("0"),
+            }
+            result = db.execute(text(sql), params)
+            if not result.rowcount and ruc:
+                params["ruc"] = ""
+                result = db.execute(text(sql), params)
+            if result.rowcount:
+                actualizadas += result.rowcount
+            else:
+                no_encontradas.append(numdoc)
+
+        if actualizadas == 0:
+            raise ValueError(f"No se encontró en comprasnue ninguna factura de la retención emitida {numret}. Facturas sustento: {', '.join(no_encontradas) or 'sin número'}.")
+        return actualizadas
 
     @classmethod
     def _insertar_nota_credito(cls, db, factura: dict[str, Any]) -> None:
@@ -1890,7 +2147,7 @@ class SriClienteSyncService:
             cls._job_update(job_id, mensaje="Abriendo sesión del SRI.")
             p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"])
             cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI. Si aparece CAPTCHA, resuélvalo en Chromium.")
-            if operacion in ("ventas", "notas_credito_emitidas"):
+            if operacion in ("ventas", "notas_credito_emitidas", "retenciones_emitidas"):
                 await cls._consultar_emitidos(page, anio, mes)
             else:
                 await cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
@@ -1909,6 +2166,11 @@ class SriClienteSyncService:
                         page, db, result, job_id, procesadas, anio, mes,
                         texto_tipo="nota de crédito", codcomp="04",
                         destino="ncventas",
+                    )
+                    return result
+                if operacion == "retenciones_emitidas":
+                    await cls._procesar_emitidos_retenciones(
+                        page, db, result, job_id, procesadas, anio, mes,
                     )
                     return result
                 es_nota_credito_recibida = operacion == "notas_credito_recibidas"
