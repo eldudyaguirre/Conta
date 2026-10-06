@@ -119,7 +119,9 @@ async def sincronizar_notas_credito_recibidas(
             ruc=request.ruc,
             anio=request.anio,
             mes=request.mes,
-            tipo_comprobante=4,
+            # En la consulta RECIBIDOS del SRI, 3 corresponde a Nota de Crédito.
+            # El 04 se guarda en comprasnue.tipcom, pero no es el valor del combo del SRI.
+            tipo_comprobante=3,
             operacion="notas_credito_recibidas",
         )
         return {
