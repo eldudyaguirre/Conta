@@ -1988,10 +1988,13 @@ class SriClienteSyncService:
             if not num_doc:
                 continue
 
-            # SRI suele entregar numDocSustento sin separadores
-            # (001201000019912), mientras ventas.numfactur usa
-            # 001-201-000019912.
-            num_doc_digitos = num_doc.replace("-", "").replace(" ", "")
+            # numDocSustento puede venir como 001201000019912 o
+            # 001-201-000019912. Comparamos ambos formatos de forma normalizada.
+            num_doc_digitos = (
+                num_doc.replace("-", "")
+                .replace(" ", "")
+                .replace(".", "")
+            )
             if len(num_doc_digitos) == 15 and num_doc_digitos.isdigit():
                 num_doc = (
                     f"{num_doc_digitos[:3]}-"
@@ -2001,6 +2004,7 @@ class SriClienteSyncService:
 
             params = {
                 "num_doc": num_doc,
+                "num_doc_digitos": num_doc_digitos,
                 "ruc_sujeto": ruc_sujeto,
                 "numret": numero_retencion,
                 "autret": autorizacion,
@@ -2009,32 +2013,44 @@ class SriClienteSyncService:
                 "retrenta": documento["retrenta"],
             }
 
-            # numDocSustento es la referencia principal. El RUC del sujeto
-            # retenido se usa como filtro adicional cuando viene informado.
+            # La referencia principal de la retención es numDocSustento.
+            # Primero intentamos número + RUC; si el RUC del XML no coincide
+            # exactamente con ruccedcli, hacemos un segundo intento solo por
+            # número de factura. Esto evita perder retenciones válidas por
+            # diferencias de formato o identificación.
+            sql_base = """
+                UPDATE ventas
+                SET numret = :numret,
+                    autret = :autret,
+                    fecret = :fecret,
+                    retiva = :retiva,
+                    retrenta = :retrenta
+                WHERE REPLACE(REPLACE(REPLACE(TRIM(numfactur::text), '-', ''), ' ', ''), '.', '')
+                      = :num_doc_digitos
+            """
+
+            result = None
             if ruc_sujeto:
-                result = db.execute(text("""
-                    UPDATE ventas
-                    SET numret = :numret,
-                        autret = :autret,
-                        fecret = :fecret,
-                        retiva = :retiva,
-                        retrenta = :retrenta
-                    WHERE TRIM(numfactur::text) = TRIM(:num_doc)
-                      AND TRIM(ruccedcli::text) = TRIM(:ruc_sujeto)
-                """), params)
-            else:
-                result = db.execute(text("""
-                    UPDATE ventas
-                    SET numret = :numret,
-                        autret = :autret,
-                        fecret = :fecret,
-                        retiva = :retiva,
-                        retrenta = :retrenta
-                    WHERE TRIM(numfactur::text) = TRIM(:num_doc)
+                result = db.execute(text(sql_base + """
+                    AND TRIM(ruccedcli::text) = TRIM(:ruc_sujeto)
                 """), params)
 
-            if result.rowcount:
-                actualizadas += result.rowcount
+            # Fallback: numDocSustento es la clave de la factura retenida.
+            # No bloqueamos la actualización si el RUC del sujeto retenido
+            # viene con un formato distinto al almacenado en ventas.
+            if not result or not result.rowcount:
+                result = db.execute(text(sql_base), params)
+
+            filas = result.rowcount if result else 0
+            if filas:
+                actualizadas += filas
+                logger.info(
+                    "RETENCION RECIBIDA | factura actualizada | "
+                    "retencion=%s | numDocSustento=%s | ruc=%s | "
+                    "retiva=%s | retrenta=%s | filas=%s",
+                    numero_retencion, num_doc, ruc_sujeto,
+                    documento["retiva"], documento["retrenta"], filas,
+                )
             else:
                 logger.warning(
                     "RETENCION RECIBIDA | factura no encontrada en ventas | "
