@@ -25,7 +25,7 @@ logger = logging.getLogger("conta.sri_worker")
 
 
 async def _procesar_trabajo(worker_numero: int) -> None:
-    usuario_worker = (settings.SRI_WORKER_USER or socket.gethostname()).strip()
+    usuario_worker = (settings.SRI_WORKER_USER or os.getenv("USERNAME") or socket.gethostname()).strip()
     worker_id = usuario_worker if max(1, settings.SRI_WORKER_CONCURRENCY) == 1 else f"{usuario_worker}-{worker_numero}"
     SriClienteSyncService.registrar_worker(worker_id, usuario_worker)
     ultimo_heartbeat = 0.0
