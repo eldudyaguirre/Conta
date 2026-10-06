@@ -1559,7 +1559,56 @@ class SriClienteSyncService:
 
         async def preparar_formulario():
             for nombre, value in campos.items():
-                await cls._seleccionar(page, f"#frmPrincipal\\:{nombre}", value)
+                selector = f"#frmPrincipal\\:{nombre}"
+
+                if nombre == "cmbTipoComprobante":
+                    # El SRI ha cambiado el value interno del combo en algunas
+                    # versiones. Para retenciones (07) no dependemos únicamente
+                    # de value="7": buscamos también la opción por su texto.
+                    combo = page.locator(selector)
+                    await combo.wait_for(state="visible", timeout=30000)
+
+                    seleccionado = False
+                    try:
+                        opciones = await combo.locator("option").evaluate_all(
+                            "(els) => els.map(o => ({value:o.value, text:(o.textContent || '').trim()}))"
+                        )
+                    except Exception:
+                        opciones = []
+
+                    for opcion in opciones:
+                        texto_opcion = " ".join(str(opcion["text"]).lower().split())
+                        valor_opcion = str(opcion["value"]).strip()
+                        if valor_opcion == str(value):
+                            await combo.select_option(value=valor_opcion)
+                            seleccionado = True
+                            break
+
+                    if not seleccionado:
+                        etiquetas = {
+                            "7": ("retencion", "retención", "comprobante de retención"),
+                            "4": ("nota de crédito", "nota crédito"),
+                            "1": ("factura",),
+                        }
+                        candidatos = etiquetas.get(str(value), ())
+                        for opcion in opciones:
+                            texto_opcion = " ".join(str(opcion["text"]).lower().split())
+                            if any(candidato in texto_opcion for candidato in candidatos):
+                                await combo.select_option(value=str(opcion["value"]))
+                                seleccionado = True
+                                print(
+                                    "SRI tipo comprobante: value=%s seleccionado por texto=%r"
+                                    % (opcion["value"], opcion["text"])
+                                )
+                                break
+
+                    if not seleccionado:
+                        raise RuntimeError(
+                            "El combo Tipo de Comprobante del SRI no contiene la opción "
+                            f"solicitada ({value}). Opciones disponibles: {opciones}"
+                        )
+                else:
+                    await cls._seleccionar(page, selector, value)
 
             boton = None
             for selector in boton_selectores:
