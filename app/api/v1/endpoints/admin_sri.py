@@ -136,6 +136,34 @@ async def sincronizar_retenciones_recibidas(
         )
 
 
+@router.post("/compras/retenciones-emitidas/sincronizar")
+async def sincronizar_retenciones_emitidas(
+    request: SincronizarComprasRequest,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Sincroniza retenciones emitidas y actualiza las compras afectadas."""
+    try:
+        resultado = SriClienteSyncService.iniciar_sincronizacion(
+            ruc=request.ruc,
+            anio=request.anio,
+            mes=request.mes,
+            tipo_comprobante=7,
+            operacion="retenciones_emitidas",
+        )
+        return {
+            "usuario": usuario["usrname"],
+            "tipo": "sri_sync_retenciones_emitidas",
+            **resultado,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error iniciando sincronización de retenciones emitidas: {exc}",
+        )
+
+
 @router.post("/compras/notas-credito/sincronizar")
 async def sincronizar_notas_credito_recibidas(
     request: SincronizarComprasRequest,
