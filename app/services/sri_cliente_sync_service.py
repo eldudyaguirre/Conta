@@ -1348,25 +1348,77 @@ class SriClienteSyncService:
 
     @classmethod
     def _insertar_nota_credito(cls, db, factura: dict[str, Any]) -> None:
+        """Guarda una nota de crédito emitida con la estructura completa de ncventas.
+
+        La autorización de la factura modificada se obtiene desde ventas usando
+        el número de factura (numfac). Si SRI no entrega la fecha modificada,
+        se usa como respaldo la fecha registrada en ventas.
+        """
         b = factura["bases_iva"]
         i = factura["ivas"]
+
+        numnc = (
+            f"{factura['establecimiento']}-"
+            f"{factura['punto_emision']}-"
+            f"{factura['secuencial']}"
+        )
+        numfac = str(factura.get("numfac") or "").strip()
+
+        # La NC debe enlazarse con la factura original registrada en ventas.
+        autfac = ""
+        fecfac = factura.get("fecfac") or ""
+
+        if numfac:
+            factura_original = db.execute(text("""
+                SELECT autorizacion, fecfactur
+                FROM ventas
+                WHERE TRIM(numfactur::text) = TRIM(:numfac)
+                LIMIT 1
+            """), {"numfac": numfac}).mappings().first()
+
+            if factura_original:
+                autfac = str(factura_original["autorizacion"] or "").strip()
+                if not fecfac and factura_original["fecfactur"]:
+                    fecfac = factura_original["fecfactur"]
+            else:
+                logger.warning(
+                    "NC EMITIDA | no se encontró factura modificada en ventas | "
+                    "numnc=%s | numfac=%s",
+                    numnc,
+                    numfac,
+                )
+
         values = {
-            "numnc": f"{factura['establecimiento']}-{factura['punto_emision']}-{factura['secuencial']}",
+            "numnc": numnc,
             "autorizacion": factura["clave_acceso"],
             "fecnc": factura["fecha"].strftime("%Y-%m-%d"),
             "ruccedcli": factura["identificacion"],
             "nomcli": factura["razon_social"],
+            "tipid": factura.get("tipid") or cls._tipid_emitido(factura["identificacion"]),
+            "codcomp": "04",
+            "numemi": 1,
             "basenoobj": factura["base_no_objeto"],
             "baseiva0": factura["base_iva0"],
             "baseiva12": b["12"],
             "iva": sum(i.values(), Decimal("0")),
-            "numfac": factura.get("numfac", ""),
-            "fecfac": factura.get("fecfac", ""),
+            "ice": Decimal("0"),
+            "numfac": numfac,
+            "autfac": autfac,
+            "fecfac": fecfac or None,
+            "mes": f"{factura['fecha'].month:02d}",
+            "año": str(factura["fecha"].year),
         }
-        cols = ", ".join(values)
-        params = ", ".join(f":{k}" for k in values)
-        db.execute(text(f"INSERT INTO ncventas ({cols}) VALUES ({params})"), values)
 
+        cols = ", ".join(
+            f'"{k}"' if k == "año" else k
+            for k in values
+        )
+        params = ", ".join(f":{k}" for k in values)
+
+        db.execute(
+            text(f"INSERT INTO ncventas ({cols}) VALUES ({params})"),
+            values,
+        )
 
     @classmethod
     def _insertar_venta(cls, db, factura: dict[str, Any], codcomp: str = "18") -> None:
