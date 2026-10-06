@@ -2512,6 +2512,27 @@ class SriClienteSyncService:
 
         filas = await esperar_resultado(segundos=45)
         if filas <= 0:
+            # El SRI puede responder correctamente con una tabla vacía cuando
+            # no existen comprobantes para el año/mes/tipo solicitado.
+            # Eso NO es un error de sincronización. Antes se lanzaba una
+            # excepción aquí y el job quedaba como error aunque la consulta
+            # hubiera terminado correctamente.
+            try:
+                texto = await page.locator("body").inner_text(timeout=3000)
+            except Exception:
+                texto = ""
+            texto_normalizado = " ".join(texto.split()).lower()
+
+            if (
+                "no existen datos para los parámetros ingresados" in texto_normalizado
+                or "no existen datos para los parametros ingresados" in texto_normalizado
+            ):
+                print(
+                    f"SRI consulta completada sin comprobantes: "
+                    f"anio={anio}, mes={mes}, tipo={tipo_comprobante}."
+                )
+                return 0
+
             diagnostico = await cls._diagnostico_consulta(page)
             try:
                 await page.screenshot(
@@ -2526,6 +2547,7 @@ class SriClienteSyncService:
             )
 
         print(f"SRI consulta completada: {filas} filas detectadas en tablaCompRecibidos.")
+        return filas
     @staticmethod
     async def _diagnostico_consulta(page) -> str:
         try:
@@ -2598,7 +2620,26 @@ class SriClienteSyncService:
             if operacion in ("ventas", "notas_credito_emitidas", "retenciones_emitidas"):
                 await cls._consultar_emitidos(page, anio, mes)
             else:
-                await cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
+                filas_recibidos = await cls._consultar_recibidos(
+                    page, anio, mes, tipo_comprobante
+                )
+                if filas_recibidos == 0:
+                    result["mensaje"] = (
+                        "El SRI terminó la consulta y no encontró comprobantes "
+                        "para los parámetros seleccionados."
+                    )
+                    cls._job_update(
+                        job_id,
+                        estado="ejecutando",
+                        mensaje=result["mensaje"],
+                        sri=0,
+                        ya_existentes=0,
+                        descargadas=0,
+                        guardadas=0,
+                        errores=[],
+                        paginas=0,
+                    )
+                    return result
             cls._job_update(job_id, estado="ejecutando", mensaje="Consulta completada. Procesando comprobantes.")
             db = obtener_session_cliente(ruc)
             procesadas: set[str] = set()
