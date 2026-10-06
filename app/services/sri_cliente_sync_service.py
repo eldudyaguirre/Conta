@@ -969,6 +969,69 @@ class SriClienteSyncService:
         }
 
     @classmethod
+    def _parsear_nota_credito_emitida_html(cls, html: str) -> dict[str, Any]:
+        """Parsea una nota de crédito emitida y conserva la factura modificada."""
+        factura = cls._parsear_factura_emitida_html(html)
+
+        from bs4 import BeautifulSoup
+        import re
+
+        soup = BeautifulSoup(html, "html.parser")
+        pares = []
+
+        def txt(celda):
+            return " ".join(celda.get_text(" ", strip=True).split())
+
+        for fila in soup.find_all("tr"):
+            textos = [txt(c) for c in fila.find_all(["td", "th"])]
+            textos = [x for x in textos if x]
+            if len(textos) >= 2:
+                pares.append((" ".join(textos[:-1]), textos[-1]))
+
+        def buscar(etiquetas):
+            for etiqueta, valor in pares:
+                normal = etiqueta.lower()
+                if any(x in normal for x in etiquetas):
+                    return valor
+            return ""
+
+        numfac = buscar([
+            "número de documento modificado",
+            "numero de documento modificado",
+            "documento modificado",
+            "factura modificada",
+            "comprobante modificado",
+            "documento que modifica",
+        ])
+        fecfac = buscar([
+            "fecha de emisión documento modificado",
+            "fecha de emision documento modificado",
+            "fecha documento modificado",
+            "fecha del documento modificado",
+            "fecha comprobante modificado",
+            "fecha documento que modifica",
+        ])
+
+        # Si la etiqueta trae texto adicional, extraemos el número de factura.
+        match = re.search(r"\b\d{3}-\d{3}-\d{9}\b", str(numfac))
+        if match:
+            numfac = match.group(0)
+
+        match_fecha = re.search(r"\b\d{2}/\d{2}/\d{4}\b", str(fecfac))
+        if match_fecha:
+            fecfac = match_fecha.group(0)
+
+        if fecfac:
+            try:
+                fecfac = datetime.strptime(fecfac, "%d/%m/%Y").strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+
+        factura["numfac"] = numfac
+        factura["fecfac"] = fecfac
+        return factura
+
+    @classmethod
     async def _consultar_emitidos(cls, page, anio: int, mes: int) -> None:
         """Abre la consulta de comprobantes emitidos.
         
@@ -1100,6 +1163,7 @@ class SriClienteSyncService:
     async def _procesar_emitidos_ventas(
         cls, page, db, result, job_id, procesadas, anio: int, mes: int,
         texto_tipo: str = "factura", codcomp: str = "18",
+        destino: str = "ventas",
     ) -> None:
         """Consulta y procesa comprobantes emitidos de un tipo durante todo el mes."""
         import calendar
@@ -1176,7 +1240,10 @@ class SriClienteSyncService:
                         if not html:
                             continue
 
-                        factura = cls._parsear_factura_emitida_html(html)
+                        if destino == "ncventas":
+                            factura = cls._parsear_nota_credito_emitida_html(html)
+                        else:
+                            factura = cls._parsear_factura_emitida_html(html)
 
                         # Seguridad adicional: si el SRI conserva temporalmente
                         # la tabla anterior después de un AJAX, nunca guardamos
@@ -1196,17 +1263,27 @@ class SriClienteSyncService:
 
                         procesadas.add(clave)
 
-                        existe = db.execute(text("""
-                            SELECT 1 FROM ventas
-                            WHERE TRIM(autorizacion::text) = :clave
-                            LIMIT 1
-                        """), {"clave": clave}).first()
+                        if destino == "ncventas":
+                            existe = db.execute(text("""
+                                SELECT 1 FROM ncventas
+                                WHERE TRIM(autorizacion::text) = :clave
+                                LIMIT 1
+                            """), {"clave": clave}).first()
+                        else:
+                            existe = db.execute(text("""
+                                SELECT 1 FROM ventas
+                                WHERE TRIM(autorizacion::text) = :clave
+                                LIMIT 1
+                            """), {"clave": clave}).first()
 
                         if existe:
                             result["ya_existentes"] += 1
                             continue
 
-                        cls._insertar_venta(db, factura, codcomp=codcomp)
+                        if destino == "ncventas":
+                            cls._insertar_nota_credito(db, factura)
+                        else:
+                            cls._insertar_venta(db, factura, codcomp=codcomp)
                         db.commit()
                         result["descargadas"] += 1
                         result["guardadas"] += 1
@@ -1268,6 +1345,28 @@ class SriClienteSyncService:
             # regresar SIEMPRE a la página 1 para que la nueva consulta no
             # herede la página anterior.
             await cls._volver_pagina_1_emitidos(page)
+
+    @classmethod
+    def _insertar_nota_credito(cls, db, factura: dict[str, Any]) -> None:
+        b = factura["bases_iva"]
+        i = factura["ivas"]
+        values = {
+            "numnc": f"{factura['establecimiento']}-{factura['punto_emision']}-{factura['secuencial']}",
+            "autorizacion": factura["clave_acceso"],
+            "fecnc": factura["fecha"].strftime("%Y-%m-%d"),
+            "ruccedcli": factura["identificacion"],
+            "nomcli": factura["razon_social"],
+            "basenoobj": factura["base_no_objeto"],
+            "baseiva0": factura["base_iva0"],
+            "baseiva12": b["12"],
+            "iva": sum(i.values(), Decimal("0")),
+            "numfac": factura.get("numfac", ""),
+            "fecfac": factura.get("fecfac", ""),
+        }
+        cols = ", ".join(values)
+        params = ", ".join(f":{k}" for k in values)
+        db.execute(text(f"INSERT INTO ncventas ({cols}) VALUES ({params})"), values)
+
 
     @classmethod
     def _insertar_venta(cls, db, factura: dict[str, Any], codcomp: str = "18") -> None:
@@ -1598,6 +1697,7 @@ class SriClienteSyncService:
                     await cls._procesar_emitidos_ventas(
                         page, db, result, job_id, procesadas, anio, mes,
                         texto_tipo="nota de crédito", codcomp="04",
+                        destino="ncventas",
                     )
                     return result
                 for pagina in range(1, 1001):
