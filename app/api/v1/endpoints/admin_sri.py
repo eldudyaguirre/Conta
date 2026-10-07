@@ -259,3 +259,24 @@ async def estado_compras(
         "tipo": "sri_sync_status",
         **resultado,
     }
+
+
+@router.post("/certificados-ruc/descargar-todos")
+async def descargar_certificados_ruc(
+    usuario: dict = Depends(get_admin_user),
+):
+    """Inicia la descarga de Certificados de RUC de todos los clientes activos."""
+    from app.services.sri_certificado_ruc_service import SriCertificadoRucService
+
+    try:
+        resultado = SriCertificadoRucService.iniciar_todos()
+        return {
+            "usuario": usuario["usrname"],
+            "tipo": "sri_certificados_ruc",
+            **resultado,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error iniciando descarga de Certificados de RUC: {exc}",
+        )
