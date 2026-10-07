@@ -5,6 +5,7 @@ import hashlib
 import logging
 import mimetypes
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 import uuid
@@ -34,6 +35,7 @@ RUC_SELECTOR = 'img[src*="RUC.svg"]'
 
 class SriCertificadoRucService:
     _running = False
+    _thread: threading.Thread | None = None
 
     @classmethod
     def _clientes_activos(cls) -> list[dict[str, str]]:
@@ -70,12 +72,32 @@ class SriCertificadoRucService:
             }
 
         cls._running = True
-        asyncio.create_task(cls._procesar_todos(clientes))
+        cls._thread = threading.Thread(
+            target=cls._ejecutar_en_hilo,
+            args=(clientes,),
+            name="Conta-Certificados-RUC",
+            daemon=True,
+        )
+        cls._thread.start()
+        logger.info(
+            "CERTIFICADOS RUC | proceso iniciado | total=%s",
+            len(clientes),
+        )
         return {
             "estado": "iniciado",
             "total": len(clientes),
             "mensaje": "La descarga masiva de Certificados de RUC fue iniciada.",
         }
+
+    @classmethod
+    def _ejecutar_en_hilo(cls, clientes: list[dict[str, str]]) -> None:
+        """Ejecuta el proceso fuera del event loop de la petición HTTP."""
+        try:
+            asyncio.run(cls._procesar_todos(clientes))
+        except Exception:
+            logger.exception("CERTIFICADOS RUC | error fatal del proceso masivo")
+            cls._running = False
+            cls._thread = None
 
     @classmethod
     async def _procesar_todos(cls, clientes: list[dict[str, str]]) -> None:
@@ -107,6 +129,7 @@ class SriCertificadoRucService:
             )
         finally:
             cls._running = False
+            cls._thread = None
 
     @classmethod
     async def descargar_cliente(cls, ruc: str) -> dict[str, Any]:
