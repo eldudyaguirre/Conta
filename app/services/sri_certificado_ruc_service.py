@@ -36,6 +36,15 @@ RUC_SELECTOR = 'img[src*="RUC.svg"]'
 class SriCertificadoRucService:
     _running = False
     _thread: threading.Thread | None = None
+    _status: dict[str, Any] = {
+        "estado": "detenido",
+        "total": 0,
+        "procesados": 0,
+        "exitos": 0,
+        "errores": 0,
+        "ruc_actual": "",
+        "ultimo_error": "",
+    }
 
     @classmethod
     def _clientes_activos(cls) -> list[dict[str, str]]:
@@ -72,6 +81,15 @@ class SriCertificadoRucService:
             }
 
         cls._running = True
+        cls._status = {
+            "estado": "ejecutando",
+            "total": len(clientes),
+            "procesados": 0,
+            "exitos": 0,
+            "errores": 0,
+            "ruc_actual": "",
+            "ultimo_error": "",
+        }
         cls._thread = threading.Thread(
             target=cls._ejecutar_en_hilo,
             args=(clientes,),
@@ -90,6 +108,10 @@ class SriCertificadoRucService:
         }
 
     @classmethod
+    def estado(cls) -> dict[str, Any]:
+        return dict(cls._status)
+
+    @classmethod
     def _ejecutar_en_hilo(cls, clientes: list[dict[str, str]]) -> None:
         """Ejecuta el proceso fuera del event loop de la petición HTTP."""
         try:
@@ -106,16 +128,23 @@ class SriCertificadoRucService:
         try:
             for cliente in clientes:
                 ruc = cliente["ruc"]
+                cls._status["ruc_actual"] = ruc
+                logger.info("CERTIFICADO RUC | iniciando | ruc=%s | cliente=%s", ruc, cliente["nombre"])
                 try:
                     await cls.descargar_cliente(ruc)
                     exitos += 1
+                    cls._status["exitos"] = exitos
+                    cls._status["procesados"] = exitos + errores
                     logger.info(
                         "CERTIFICADO RUC OK | ruc=%s | cliente=%s",
                         ruc,
                         cliente["nombre"],
                     )
-                except Exception:
+                except Exception as exc:
                     errores += 1
+                    cls._status["errores"] = errores
+                    cls._status["procesados"] = exitos + errores
+                    cls._status["ultimo_error"] = f"{ruc}: {type(exc).__name__}: {exc}"
                     logger.exception(
                         "CERTIFICADO RUC ERROR | ruc=%s | cliente=%s",
                         ruc,
@@ -123,42 +152,54 @@ class SriCertificadoRucService:
                     )
             logger.info(
                 "CERTIFICADOS RUC FINALIZADOS | total=%s | exitos=%s | errores=%s",
-                len(clientes),
-                exitos,
-                errores,
+                len(clientes), exitos, errores,
             )
+            cls._status.update({
+                "estado": "finalizado",
+                "procesados": len(clientes),
+                "exitos": exitos,
+                "errores": errores,
+                "ruc_actual": "",
+            })
         finally:
             cls._running = False
             cls._thread = None
+            if cls._status.get("estado") == "ejecutando":
+                cls._status["estado"] = "finalizado"
 
     @classmethod
     async def descargar_cliente(cls, ruc: str) -> dict[str, Any]:
+        logger.info("CERTIFICADO RUC | credenciales | ruc=%s", ruc)
         cred = SriClienteSyncService._credenciales(ruc)
 
         p = browser = context = page = chrome_process = None
         temp_path: Path | None = None
 
         try:
-            p, browser, context, page, chrome_process = (
-                await SriClienteSyncService._login(ruc, cred["clave"])
-            )
+            logger.info("CERTIFICADO RUC | login SRI | ruc=%s", ruc)
+            p, browser, context, page, chrome_process = await SriClienteSyncService._login(ruc, cred["clave"])
+            logger.info("CERTIFICADO RUC | login OK | ruc=%s | url=%s", ruc, page.url)
 
+            logger.info("CERTIFICADO RUC | abriendo certificados | ruc=%s", ruc)
             await page.goto(
                 CERTIFICADO_URL,
                 wait_until="domcontentloaded",
                 timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
             )
 
+            logger.info("CERTIFICADO RUC | buscando botón RUC | ruc=%s", ruc)
             ruc_button = page.locator(RUC_SELECTOR).first
             await ruc_button.wait_for(
                 state="visible",
                 timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
             )
 
+            logger.info("CERTIFICADO RUC | haciendo clic RUC | ruc=%s", ruc)
             async with page.expect_download(timeout=60000) as download_info:
                 await ruc_button.click()
 
             download = await download_info.value
+            logger.info("CERTIFICADO RUC | descarga recibida | ruc=%s | archivo=%s", ruc, download.suggested_filename)
 
             with tempfile.NamedTemporaryFile(
                 prefix=f"ruc_{ruc}_",
@@ -175,12 +216,14 @@ class SriCertificadoRucService:
                     f"El SRI no devolvió un PDF válido para el RUC {ruc}."
                 )
 
+            logger.info("CERTIFICADO RUC | subiendo a TtCWeb | ruc=%s | bytes=%s", ruc, len(contenido))
             respuesta = cls._subir_a_ttcweb(
                 ruc=ruc,
                 nombre=cred["nombre"],
                 contenido=contenido,
             )
 
+            logger.info("CERTIFICADO RUC | guardado en TtCWeb | ruc=%s | respuesta=%s", ruc, respuesta)
             return {
                 "ruc": ruc,
                 "nombre": cred["nombre"],
