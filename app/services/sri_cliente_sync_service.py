@@ -2848,8 +2848,116 @@ class SriClienteSyncService:
         return result
 
     @classmethod
+    def _insertar_recap_venta(cls, db, retencion: dict[str, Any], documento: dict[str, Any]) -> bool:
+        """Guarda una retención RECAP como registro especial en ventas.
+
+        El SRI utiliza 999999999999992 como documento de sustento cuando la
+        retención no corresponde a una factura individual. En el sistema
+        legacy estas retenciones se representan como una fila con numfactur
+        = RECAP y conservan la retención para el ATS.
+        """
+        numero_retencion = (
+            f"{retencion['numest']}-{retencion['numptoemi']}-{retencion['numsec']}"
+        )
+        autorizacion = str(retencion.get("numero_autorizacion") or "").strip()
+        fecha = retencion["fecha"].strftime("%Y-%m-%d")
+
+        # En ventas, para un RECAP se registra como cliente/emisor al
+        # contribuyente que emitió la retención, no al sujeto retenido.
+        ruc_emisor = str(
+            retencion.get("ruc")
+            or retencion.get("identificacion_emisor")
+            or ""
+        ).strip()
+        nombre_emisor = str(
+            retencion.get("razon_social")
+            or retencion.get("razon_social_emisor")
+            or ""
+        ).strip()
+
+        existente = db.execute(text("""
+            SELECT 1
+            FROM ventas
+            WHERE TRIM(numfactur::text) = 'RECAP'
+              AND TRIM(numret::text) = TRIM(:numret)
+              AND TRIM(autret::text) = TRIM(:autret)
+            LIMIT 1
+        """), {
+            "numret": numero_retencion,
+            "autret": autorizacion,
+        }).first()
+
+        if existente:
+            logger.info(
+                "RETENCION RECAP | ya existente | retencion=%s | autorizacion=%s",
+                numero_retencion,
+                autorizacion,
+            )
+            return False
+
+        cero = Decimal("0")
+        values = {
+            "numfactur": "RECAP",
+            "autorizacion": autorizacion,
+            "fecfactur": fecha,
+            "ruccedcli": ruc_emisor,
+            "nomcli": nombre_emisor,
+            "tipid": "4",
+            "codcomp": "18",
+            "numemi": "0",
+            "basenoobj": cero,
+            "baseiva0": cero,
+            "baseiva5": cero,
+            "baseiva8": cero,
+            "baseiva12": cero,
+            "baseiva14": cero,
+            "baseiva15": cero,
+            "iva": cero,
+            "iva5": cero,
+            "iva8": cero,
+            "iva12": cero,
+            "iva14": cero,
+            "iva15": cero,
+            "ice": cero,
+            "numret": numero_retencion,
+            "autret": autorizacion,
+            "fecret": fecha,
+            "retiva": documento.get("retiva", cero),
+            "retrenta": documento.get("retrenta", cero),
+            "mes": f"{retencion['fecha'].month:02d}",
+            "año": str(retencion["fecha"].year),
+            "numasiento": cero,
+        }
+
+        cols = ", ".join(f'"{k}"' if k == "año" else k for k in values)
+        params = ", ".join(f":{k}" for k in values)
+
+        db.execute(
+            text(f"INSERT INTO ventas ({cols}) VALUES ({params})"),
+            values,
+        )
+
+        logger.info(
+            "RETENCION RECAP | insertada | retencion=%s | autorizacion=%s | "
+            "emisor=%s | ruc=%s | retiva=%s | retrenta=%s",
+            numero_retencion,
+            autorizacion,
+            nombre_emisor,
+            ruc_emisor,
+            documento.get("retiva", cero),
+            documento.get("retrenta", cero),
+        )
+        return True
+
+    @classmethod
     def _actualizar_retencion_ventas(cls, db, retencion: dict[str, Any]) -> int:
-        """Actualiza en ventas las facturas afectadas por una retención recibida."""
+        """Actualiza ventas para retenciones recibidas y procesa RECAP.
+
+        Las retenciones normales actualizan la factura indicada por
+        numDocSustento. Si numDocSustento es 999999999999992 (o su variante
+        999-999-999999992), no existe una factura que actualizar: es un RECAP
+        y debe guardarse como un registro independiente en ventas.
+        """
         documentos = retencion.get("documentos_sustento") or []
         if not documentos:
             raise ValueError("La retención no contiene documentos de sustento.")
@@ -2859,22 +2967,32 @@ class SriClienteSyncService:
         )
         autorizacion = str(retencion.get("numero_autorizacion") or "").strip()
         fecha = retencion["fecha"].strftime("%Y-%m-%d")
-        ruc_sujeto = str(retencion.get("identificacion_sujeto_retenido") or "").strip()
+        ruc_sujeto = str(
+            retencion.get("identificacion_sujeto_retenido") or ""
+        ).strip()
 
         actualizadas = 0
+        procesadas = 0
         no_encontradas: list[str] = []
+
         for documento in documentos:
             num_doc = str(documento.get("num_doc_sustento") or "").strip()
             if not num_doc:
                 continue
 
-            # numDocSustento puede venir como 001201000019912 o
-            # 001-201-000019912. Comparamos ambos formatos de forma normalizada.
+            # Normalizamos 999-999-999999992 y 999999999999992 al mismo valor.
             num_doc_digitos = (
                 num_doc.replace("-", "")
                 .replace(" ", "")
                 .replace(".", "")
             )
+
+            if num_doc_digitos == "999999999999992":
+                if cls._insertar_recap_venta(db, retencion, documento):
+                    actualizadas += 1
+                procesadas += 1
+                continue
+
             if len(num_doc_digitos) == 15 and num_doc_digitos.isdigit():
                 num_doc = (
                     f"{num_doc_digitos[:3]}-"
@@ -2896,8 +3014,7 @@ class SriClienteSyncService:
             # La referencia principal de la retención es numDocSustento.
             # Primero intentamos número + RUC; si el RUC del XML no coincide
             # exactamente con ruccedcli, hacemos un segundo intento solo por
-            # número de factura. Esto evita perder retenciones válidas por
-            # diferencias de formato o identificación.
+            # número de factura.
             sql_base = """
                 UPDATE ventas
                 SET numret = :numret,
@@ -2915,15 +3032,13 @@ class SriClienteSyncService:
                     AND TRIM(ruccedcli::text) = TRIM(:ruc_sujeto)
                 """), params)
 
-            # Fallback: numDocSustento es la clave de la factura retenida.
-            # No bloqueamos la actualización si el RUC del sujeto retenido
-            # viene con un formato distinto al almacenado en ventas.
             if not result or not result.rowcount:
                 result = db.execute(text(sql_base), params)
 
             filas = result.rowcount if result else 0
             if filas:
                 actualizadas += filas
+                procesadas += 1
                 logger.info(
                     "RETENCION RECIBIDA | factura actualizada | "
                     "retencion=%s | numDocSustento=%s | ruc=%s | "
@@ -2939,12 +3054,14 @@ class SriClienteSyncService:
                     numero_retencion, num_doc, ruc_sujeto,
                 )
 
-        if actualizadas == 0:
+        # Un RECAP puede ya existir; eso no debe convertirse en error.
+        if actualizadas == 0 and not procesadas:
             detalle_facturas = ", ".join(no_encontradas) or "sin número de factura"
             raise ValueError(
                 f"No se encontró en ventas ninguna factura de la retención "
                 f"{numero_retencion}. Facturas sustento: {detalle_facturas}."
             )
+
         if no_encontradas:
             logger.warning(
                 "RETENCION RECIBIDA | algunas facturas no fueron encontradas | "
