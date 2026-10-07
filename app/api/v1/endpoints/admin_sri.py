@@ -280,3 +280,16 @@ async def descargar_certificados_ruc(
             status_code=500,
             detail=f"Error iniciando descarga de Certificados de RUC: {exc}",
         )
+
+
+@router.get("/certificados-ruc/estado")
+async def estado_certificados_ruc(
+    usuario: dict = Depends(get_admin_user),
+):
+    """Consulta el estado de la descarga masiva de Certificados de RUC."""
+    from app.services.sri_certificado_ruc_service import SriCertificadoRucService
+    return {
+        "usuario": usuario["usrname"],
+        "tipo": "sri_certificados_ruc_estado",
+        **SriCertificadoRucService.estado(),
+    }
