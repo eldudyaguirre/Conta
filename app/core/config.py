@@ -40,7 +40,8 @@ class Settings(BaseSettings):
     # Token interno compartido con el administrador web de TotalCounts.
     # No se expone al navegador.
     TOTALCOUNTS_INTERNAL_TOKEN: str = ""
-    TOTALCOUNTS_URL: str = "http://127.0.0.1:8001"
+    TOTALCOUNTS_URL: str = "https://totalcounts.com.ec"
+    TOTALCOUNTS_INTERNAL_URL: str = "http://127.0.0.1:8001"
 
     model_config = SettingsConfigDict(
         env_file=".env",
