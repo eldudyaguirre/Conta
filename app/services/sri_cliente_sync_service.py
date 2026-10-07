@@ -1011,7 +1011,7 @@ class SriClienteSyncService:
                     continue
 
                 tasa = _canon_tasa(textos[pos_porcentaje]) or _canon_tasa(textos[pos_tarifa])
-                if tasa not in {"5", "8", "12", "14", "15"}:
+                if tasa not in {"0", "5", "8", "12", "14", "15"}:
                     continue
 
                 pares.append((f"Base imponible IVA {tasa}%", textos[pos_base]))
