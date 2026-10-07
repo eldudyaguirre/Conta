@@ -2490,74 +2490,36 @@ class SriClienteSyncService:
             pass
         await page.wait_for_timeout(3000)
 
-        # En el SRI la carga del JavaScript de reCAPTCHA puede ocurrir después
-        # de DOMContentLoaded. No dependemos de que el botón aparezca habilitado:
-        # primero dejamos que el propio rcBuscar inicialice el formulario.
-        for intento in range(1, 4):
-            boton = await preparar_formulario()
+        # El flujo oficial del SRI debe ser iniciado por el botón.
+        # No ejecutamos rcBuscar() manualmente: hacerlo antes del click puede
+        # generar un token reCAPTCHA que expire o quede consumido antes de que
+        # el SRI procese la consulta, provocando "Captcha incorrecta".
+        boton = await preparar_formulario()
 
-            if await page.evaluate("() => typeof rcBuscar === 'function'"):
-                await page.evaluate("""
-                    () => {
-                        console.log("CONTA: ejecutando rcBuscar() para inicializar SRI");
-                        rcBuscar();
-                    }
-                """)
-                await page.wait_for_timeout(3000)
-
-            if await esperar_boton_habilitado(boton, segundos=30):
-                print("SRI inicializó el formulario mediante rcBuscar(); Consultar habilitado.")
-                break
-
-            # Si el SRI todavía mantiene el botón bloqueado, recargamos esperando
-            # el evento load completo. Esto reproduce de forma controlada el F5
-            # que manualmente permitió continuar.
-            if intento < 3:
-                print(
-                    f"SRI mantuvo Consultar bloqueado en intento {intento}. "
-                    "Recargando y esperando la inicialización completa de reCAPTCHA."
+        if not await esperar_boton_habilitado(boton, segundos=30):
+            diagnostico = await cls._diagnostico_consulta(page)
+            try:
+                await page.screenshot(
+                    path=str(Path(tempfile.gettempdir()) / f"conta_sri_bloqueado_{anio}_{mes:02d}.png"),
+                    full_page=True,
                 )
-                try:
-                    await page.reload(wait_until="domcontentloaded", timeout=30000)
-                except PlaywrightTimeoutError:
-                    pass
-                try:
-                    await page.wait_for_load_state("load", timeout=20000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(5000)
-            else:
-                diagnostico = await cls._diagnostico_consulta(page)
-                try:
-                    await page.screenshot(
-                        path=str(Path(tempfile.gettempdir()) / f"conta_sri_bloqueado_{anio}_{mes:02d}.png"),
-                        full_page=True,
-                    )
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    "SRI mantuvo el botón Consultar deshabilitado después de "
-                    "inicializar rcBuscar() y esperar la carga completa de la página. "
-                    + diagnostico
-                )
+            except Exception:
+                pass
+            raise RuntimeError(
+                "SRI mantuvo el botón Consultar deshabilitado. "
+                + diagnostico
+            )
 
-        # Importante: el click genera primero un AJAX sin token. Después,
-        # executeRecaptcha() llama a onSubmit() y rcBuscar() genera el AJAX
-        # definitivo con g-recaptcha-response. No esperamos XML aquí.
+        # Ejecutamos el click real sobre el botón oficial. Esto permite que
+        # el JavaScript del SRI genere el token reCAPTCHA justo antes de la
+        # petición AJAX definitiva.
         try:
-            await page.evaluate("""
-                () => {
-                    const boton = document.getElementById('frmPrincipal:btnBuscar');
-                    if (!boton || typeof boton.onclick !== 'function') {
-                        throw new Error('No se encontró el onclick oficial de frmPrincipal:btnBuscar.');
-                    }
-                    boton.onclick();
-                }
-            """)
+            await boton.scroll_into_view_if_needed()
+            await boton.click(force=True)
         except Exception as exc:
             diagnostico = await cls._diagnostico_consulta(page)
             raise RuntimeError(
-                "No fue posible ejecutar el flujo oficial de Consultar del SRI. "
+                "No fue posible ejecutar el botón Consultar del SRI. "
                 + diagnostico
             ) from exc
 
