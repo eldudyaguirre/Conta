@@ -734,16 +734,19 @@ class SriClienteSyncService:
 
     @staticmethod
     def _puerto_libre(port: int) -> bool:
+        """Comprueba si un puerto TCP local está libre."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(0.5)
             return sock.connect_ex(("127.0.0.1", port)) != 0
 
     @staticmethod
     def _puerto_cdp_disponible(preferido: int) -> int:
-        """Devuelve el puerto preferido si está libre; si no, asigna uno efímero."""
-        if SriClienteSyncService._puerto_libre(preferido):
+        """Obtiene un puerto CDP libre, usando el configurado solo si está disponible."""
+        if preferido > 0 and SriClienteSyncService._puerto_libre(preferido):
             return preferido
 
+        # El sistema asigna un puerto efímero libre. Esto evita depender de 9222
+        # cuando ya existe otro Chrome de pruebas usando ese puerto.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
             return int(sock.getsockname()[1])
@@ -831,7 +834,7 @@ class SriClienteSyncService:
                 ruc,
             )
 
-chrome_path = cls._chrome_executable()
+        chrome_path = cls._chrome_executable()
         args = [
             chrome_path,
             f"--user-data-dir={profile_dir}",
