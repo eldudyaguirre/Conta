@@ -226,22 +226,42 @@ class SriCertificadoRucService:
             )
 
             logger.info("CERTIFICADO RUC | haciendo clic RUC | ruc=%s", ruc)
-            async with page.expect_download(timeout=60000) as download_info:
+
+            # El SRI responde al POST JSF directamente con el PDF.
+            # No siempre genera un evento Playwright "download", aunque el
+            # Content-Disposition sea attachment. Esperamos la respuesta PDF.
+            async with page.expect_response(
+                lambda response: (
+                    response.request.method == "POST"
+                    and "application/pdf" in response.headers.get("content-type", "").lower()
+                ),
+                timeout=60000,
+            ) as response_info:
                 await ruc_button.click()
 
-            download = await download_info.value
-            logger.info("CERTIFICADO RUC | descarga recibida | ruc=%s | archivo=%s", ruc, download.suggested_filename)
+            response = await response_info.value
+            logger.info(
+                "CERTIFICADO RUC | respuesta PDF recibida | ruc=%s | status=%s | url=%s",
+                ruc,
+                response.status,
+                response.url,
+            )
+
+            if not response.ok:
+                raise RuntimeError(
+                    f"El SRI respondió HTTP {response.status} al solicitar el Certificado de RUC."
+                )
+
+            contenido = await response.body()
 
             with tempfile.NamedTemporaryFile(
                 prefix=f"ruc_{ruc}_",
                 suffix=".pdf",
                 delete=False,
             ) as tmp:
+                tmp.write(contenido)
                 temp_path = Path(tmp.name)
 
-            await download.save_as(str(temp_path))
-
-            contenido = temp_path.read_bytes()
             if not contenido.startswith(b"%PDF"):
                 raise ValueError(
                     f"El SRI no devolvió un PDF válido para el RUC {ruc}."
