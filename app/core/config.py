@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     # Token interno compartido con el administrador web de TotalCounts.
     # No se expone al navegador.
     TOTALCOUNTS_INTERNAL_TOKEN: str = ""
+    TOTALCOUNTS_URL: str = "https://totalcounts.com.ec"
 
     model_config = SettingsConfigDict(
         env_file=".env",
