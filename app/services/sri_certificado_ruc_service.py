@@ -173,9 +173,9 @@ class SriCertificadoRucService:
                     pass
 
             try:
-                await SriClienteSyncService._cerrar_chrome(
-                    p, browser, chrome_process
-                )
+                SriClienteSyncService._cerrar_chrome(chrome_process)
+                if p is not None:
+                    await p.stop()
             except Exception:
                 logger.exception(
                     "No se pudo cerrar correctamente Chrome | ruc=%s",
