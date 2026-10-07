@@ -738,6 +738,16 @@ class SriClienteSyncService:
             sock.settimeout(0.5)
             return sock.connect_ex(("127.0.0.1", port)) != 0
 
+    @staticmethod
+    def _puerto_cdp_disponible(preferido: int) -> int:
+        """Devuelve el puerto preferido si está libre; si no, asigna uno efímero."""
+        if SriClienteSyncService._puerto_libre(preferido):
+            return preferido
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+
     @classmethod
     async def _esperar_cdp(cls, port: int, timeout: float = 20.0) -> None:
         url = f"http://127.0.0.1:{port}/json/version"
@@ -811,15 +821,17 @@ class SriClienteSyncService:
         profile_dir = Path(profile_root) / f"{ruc}_chrome"
         profile_dir.mkdir(parents=True, exist_ok=True)
 
-        port = int(settings.SRI_CDP_PORT or 9222)
-        if not cls._puerto_libre(port):
-            await p.stop()
-            raise RuntimeError(
-                f"El puerto CDP {port} ya está ocupado. Cierre el Chrome SRI de prueba "
-                "o configure otro SRI_CDP_PORT en .env."
+        puerto_preferido = int(settings.SRI_CDP_PORT or 9222)
+        port = cls._puerto_cdp_disponible(puerto_preferido)
+        if port != puerto_preferido:
+            logging.getLogger("conta.sri").warning(
+                "Puerto CDP %s ocupado; usando puerto disponible %s para RUC %s.",
+                puerto_preferido,
+                port,
+                ruc,
             )
 
-        chrome_path = cls._chrome_executable()
+chrome_path = cls._chrome_executable()
         args = [
             chrome_path,
             f"--user-data-dir={profile_dir}",
