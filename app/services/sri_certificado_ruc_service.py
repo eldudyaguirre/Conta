@@ -72,18 +72,13 @@ class SriCertificadoRucService:
                 "mensaje": "Ya existe una descarga masiva de Certificados de RUC en ejecución.",
             }
 
-        clientes = cls._clientes_activos()
-        if not clientes:
-            return {
-                "estado": "finalizado",
-                "total": 0,
-                "mensaje": "No existen clientes activos.",
-            }
-
+        # No consultar la base de datos dentro de la petición HTTP.
+        # La solicitud debe responder inmediatamente; toda la carga queda
+        # en el hilo de trabajo, incluyendo la consulta de clientes activos.
         cls._running = True
         cls._status = {
-            "estado": "ejecutando",
-            "total": len(clientes),
+            "estado": "iniciando",
+            "total": 0,
             "procesados": 0,
             "exitos": 0,
             "errores": 0,
@@ -91,25 +86,60 @@ class SriCertificadoRucService:
             "ultimo_error": "",
         }
         cls._thread = threading.Thread(
-            target=cls._ejecutar_en_hilo,
-            args=(clientes,),
+            target=cls._iniciar_en_hilo,
             name="Conta-Certificados-RUC",
             daemon=True,
         )
         cls._thread.start()
-        logger.info(
-            "CERTIFICADOS RUC | proceso iniciado | total=%s",
-            len(clientes),
-        )
+        logger.info("CERTIFICADOS RUC | solicitud aceptada | inicializando proceso")
         return {
             "estado": "iniciado",
-            "total": len(clientes),
+            "total": 0,
             "mensaje": "La descarga masiva de Certificados de RUC fue iniciada.",
         }
 
     @classmethod
     def estado(cls) -> dict[str, Any]:
         return dict(cls._status)
+
+    @classmethod
+    def _iniciar_en_hilo(cls) -> None:
+        """Carga los clientes y arranca el procesamiento fuera de la petición HTTP."""
+        try:
+            logger.info("CERTIFICADOS RUC | consultando clientes activos")
+            clientes = cls._clientes_activos()
+            if not clientes:
+                cls._status.update({
+                    "estado": "finalizado",
+                    "total": 0,
+                    "procesados": 0,
+                    "exitos": 0,
+                    "errores": 0,
+                    "ruc_actual": "",
+                    "ultimo_error": "",
+                })
+                logger.info("CERTIFICADOS RUC | no existen clientes activos")
+                return
+
+            cls._status.update({
+                "estado": "ejecutando",
+                "total": len(clientes),
+            })
+            logger.info(
+                "CERTIFICADOS RUC | clientes activos cargados | total=%s",
+                len(clientes),
+            )
+            asyncio.run(cls._procesar_todos(clientes))
+        except Exception as exc:
+            cls._status.update({
+                "estado": "error",
+                "ultimo_error": f"{type(exc).__name__}: {exc}",
+            })
+            logger.exception("CERTIFICADOS RUC | error fatal al iniciar proceso")
+        finally:
+            cls._running = False if cls._status.get("estado") != "ejecutando" else cls._running
+            if cls._status.get("estado") in {"iniciando", "error", "finalizado"}:
+                cls._thread = None
 
     @classmethod
     def _ejecutar_en_hilo(cls, clientes: list[dict[str, str]]) -> None:
