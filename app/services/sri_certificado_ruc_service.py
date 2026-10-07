@@ -212,34 +212,87 @@ class SriCertificadoRucService:
             logger.info("CERTIFICADO RUC | login OK | ruc=%s | url=%s", ruc, page.url)
 
             logger.info("CERTIFICADO RUC | abriendo certificados | ruc=%s", ruc)
-            await page.goto(
-                CERTIFICADO_URL,
-                wait_until="domcontentloaded",
-                timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
-            )
+
+            async def _abrir_certificados() -> None:
+                await page.goto(
+                    CERTIFICADO_URL,
+                    wait_until="domcontentloaded",
+                    timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
+                )
+                logger.info(
+                    "CERTIFICADO RUC | página certificados | ruc=%s | url=%s | title=%s",
+                    ruc,
+                    page.url,
+                    await page.title(),
+                )
+
+            await _abrir_certificados()
 
             logger.info("CERTIFICADO RUC | buscando botón RUC | ruc=%s", ruc)
             ruc_button = page.locator(RUC_SELECTOR).first
-            await ruc_button.wait_for(
-                state="visible",
-                timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
-            )
+            try:
+                await ruc_button.wait_for(
+                    state="visible",
+                    timeout=20000,
+                )
+            except Exception as first_exc:
+                # En algunas sesiones el SRI devuelve al portal antes de
+                # terminar de cargar la página de certificados. Reabrimos el
+                # portal autenticado y luego la URL de certificados una vez.
+                logger.warning(
+                    "CERTIFICADO RUC | RUC no visible en primer intento | ruc=%s | url=%s | error=%s",
+                    ruc,
+                    page.url,
+                    first_exc,
+                )
+                try:
+                    await page.goto(
+                        SriClienteSyncService.PORTAL_URL,
+                        wait_until="domcontentloaded",
+                        timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
+                    )
+                except Exception:
+                    logger.warning(
+                        "CERTIFICADO RUC | no se pudo reabrir portal antes del segundo intento | ruc=%s",
+                        ruc,
+                        exc_info=True,
+                    )
+                await _abrir_certificados()
+                ruc_button = page.locator(RUC_SELECTOR).first
+                await ruc_button.wait_for(
+                    state="visible",
+                    timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
+                )
 
             logger.info("CERTIFICADO RUC | haciendo clic RUC | ruc=%s", ruc)
 
-            # El SRI responde al POST JSF directamente con el PDF.
-            # No siempre genera un evento Playwright "download", aunque el
-            # Content-Disposition sea attachment. Esperamos la respuesta PDF.
-            async with page.expect_response(
-                lambda response: (
-                    response.request.method == "POST"
-                    and "application/pdf" in response.headers.get("content-type", "").lower()
+            # El SRI responde al POST JSF directamente con el PDF. Capturamos
+            # primero la petición POST JSF y después obtenemos su respuesta.
+            # Esto es más robusto que esperar únicamente un "download" o una
+            # respuesta cuyo Content-Type Playwright pueda no exponer a tiempo.
+            async with page.expect_request(
+                lambda request: (
+                    request.method == "POST"
+                    and "certificado" in request.url.lower()
                 ),
                 timeout=60000,
-            ) as response_info:
+            ) as request_info:
                 await ruc_button.click()
 
-            response = await response_info.value
+            certificado_request = await request_info.value
+            response = await certificado_request.response()
+            if response is None:
+                raise RuntimeError(
+                    "El SRI recibió la solicitud del Certificado de RUC pero no devolvió respuesta HTTP."
+                )
+
+            logger.info(
+                "CERTIFICADO RUC | respuesta HTTP recibida | ruc=%s | status=%s | url=%s | content-type=%s",
+                ruc,
+                response.status,
+                response.url,
+                response.headers.get("content-type", ""),
+            )
             logger.info(
                 "CERTIFICADO RUC | respuesta PDF recibida | ruc=%s | status=%s | url=%s",
                 ruc,
