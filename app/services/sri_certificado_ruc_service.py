@@ -292,7 +292,13 @@ class SriCertificadoRucService:
                 "TOTALCOUNTS_INTERNAL_TOKEN no está configurado en Conta."
             )
 
-        base_url = getattr(settings, "TOTALCOUNTS_URL", "").strip().rstrip("/")
+        # Para comunicación servidor-a-servidor usamos la URL interna.
+        # Evita Cloudflare, que protege la URL pública de totalcounts.com.ec.
+        base_url = getattr(
+            settings,
+            "TOTALCOUNTS_INTERNAL_URL",
+            "http://127.0.0.1:8001",
+        ).strip().rstrip("/")
         if not base_url:
             raise RuntimeError(
                 "TOTALCOUNTS_URL no está configurado en Conta."
