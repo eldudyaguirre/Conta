@@ -373,9 +373,56 @@ class SriClienteSyncService:
 
     @staticmethod
     def _dec(value: Any) -> Decimal:
+        """
+        Convierte números provenientes del SRI tolerando formatos locales.
+        Acepta, por ejemplo: 1312.00, 1,312.00, 1.312,00,
+        1 312,00 y valores con símbolo de moneda.
+        """
+        if value is None:
+            return Decimal("0")
+        if isinstance(value, Decimal):
+            return value
+
+        texto = str(value).strip()
+        if not texto:
+            return Decimal("0")
+
+        texto = (
+            texto.replace("\xa0", "")
+            .replace(" ", "")
+            .replace("$", "")
+            .replace("€", "")
+        )
+        texto = "".join(ch for ch in texto if ch.isdigit() or ch in ".,+-")
+        if not texto or texto in {"+", "-", ".", ",", "+.", "-.", "+,", "-,"}:
+            return Decimal("0")
+
         try:
-            return Decimal(str(value or "0").strip().replace(",", "."))
+            tiene_coma = "," in texto
+            tiene_punto = "." in texto
+
+            if tiene_coma and tiene_punto:
+                # El último separador normalmente es el decimal.
+                if texto.rfind(",") > texto.rfind("."):
+                    texto = texto.replace(".", "").replace(",", ".")
+                else:
+                    texto = texto.replace(",", "")
+            elif tiene_coma:
+                partes = texto.split(",")
+                if len(partes) > 2:
+                    texto = "".join(partes)
+                elif len(partes) == 2 and len(partes[1]) == 3 and partes[0].isdigit():
+                    texto = "".join(partes)
+                else:
+                    texto = texto.replace(",", ".")
+            elif tiene_punto:
+                partes = texto.split(".")
+                if len(partes) > 2:
+                    texto = "".join(partes)
+
+            return Decimal(texto)
         except (InvalidOperation, ValueError):
+            logger.warning("No se pudo convertir valor numérico SRI: %r", value)
             return Decimal("0")
 
     @staticmethod
