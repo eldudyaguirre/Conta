@@ -53,6 +53,7 @@ class SriCertificadoRucService:
                 SELECT ruccedcli, nomclient
                 FROM clientes
                 WHERE activo = TRUE
+                  AND LENGTH(TRIM(ruccedcli::text)) = 13
                 ORDER BY ruccedcli
             """)).mappings().all()
         return [
