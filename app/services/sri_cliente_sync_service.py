@@ -1455,7 +1455,7 @@ class SriClienteSyncService:
                 if not md:
                     continue
 
-                numdoc = re.sub(r"\\D", "", md.group(0))
+                numdoc = re.sub(r"\D", "", md.group(0))
                 if len(numdoc) != 15:
                     continue
 
@@ -1467,7 +1467,7 @@ class SriClienteSyncService:
 
                 codigo = ""
                 if idx["codigo"] is not None:
-                    codigo = re.sub(r"\\D", "", textos[idx["codigo"]])
+                    codigo = re.sub(r"\D", "", textos[idx["codigo"]])
 
                 registro = {
                     "impuesto": "IVA" if es_iva else "RENTA",
