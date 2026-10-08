@@ -963,10 +963,12 @@ class SriClienteSyncService:
                         login_ok = True
                         break
 
+                # Si Keycloak todavía muestra el campo de contraseña,
+                # simplemente seguimos esperando hasta que termine el redirect.
+                # No se ejecuta ningún bloque vacío aquí porque Python exige
+                # una instrucción dentro del if.
                 if tiene_password:
-                    # Seguimos esperando por si Keycloak todavía está
-                    # procesando el submit; si permanece aquí hasta el timeout,
-                    # lo reportaremos como credenciales/sesión no aceptadas.
+                    continue
 
                 try:
                     await page.wait_for_load_state("domcontentloaded", timeout=1000)
