@@ -1353,7 +1353,7 @@ class SriClienteSyncService:
         for tabla in soup.find_all("table"):
             filas = tabla.find_all("tr")
             for pos, fila in enumerate(filas):
-                headers = [norm(x) for x in fila.find_all(["td", "th"])]
+                headers = [norm(txt(x)) for x in fila.find_all(["td", "th"])]
                 joined = " | ".join(headers)
                 if "base imponible" not in joined or "valor retenido" not in joined:
                     continue
