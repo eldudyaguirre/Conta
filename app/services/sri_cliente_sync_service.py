@@ -2418,6 +2418,23 @@ class SriClienteSyncService:
                 },
             }
 
+            cls._iva_debug_log(
+                "RETENCION EMITIDA | GUARDAR IVA | numcompra=%s | numdoc=%s | "
+                "codret=%s | base=%s | porret=%s | valret=%s | "
+                "iva10=%s | iva20=%s | iva30=%s | iva70=%s | iva100=%s",
+                row.get("numcompra"),
+                bloque.get("num_doc_sustento"),
+                params["codret"],
+                params["baseimpret"],
+                params["porret"],
+                params["valret"],
+                params["retencioniva10"],
+                params["retencioniva20"],
+                params["retencioniva30"],
+                params["retencioniva70"],
+                params["retencioniva100"],
+            )
+
             db.execute(
                 text(
                     f"UPDATE comprasnue SET {', '.join(set_parts)} "
@@ -2425,6 +2442,34 @@ class SriClienteSyncService:
                 ),
                 params,
             )
+
+            verificacion = db.execute(
+                text("""
+                    SELECT numcompra, codret, baseimpret, porret, valret,
+                           retencioniva10, retencioniva20, retencioniva30,
+                           retencioniva70, retencioniva100
+                    FROM comprasnue
+                    WHERE numcompra = :numcompra
+                """),
+                {"numcompra": row["numcompra"]},
+            ).mappings().first()
+
+            if verificacion:
+                cls._iva_debug_log(
+                    "RETENCION EMITIDA | DESPUES UPDATE | numcompra=%s | "
+                    "codret=%s | base=%s | porret=%s | valret=%s | "
+                    "iva10=%s | iva20=%s | iva30=%s | iva70=%s | iva100=%s",
+                    verificacion["numcompra"],
+                    verificacion["codret"],
+                    verificacion["baseimpret"],
+                    verificacion["porret"],
+                    verificacion["valret"],
+                    verificacion["retencioniva10"],
+                    verificacion["retencioniva20"],
+                    verificacion["retencioniva30"],
+                    verificacion["retencioniva70"],
+                    verificacion["retencioniva100"],
+                )
 
         actualizadas = 0
         no_encontradas = []
