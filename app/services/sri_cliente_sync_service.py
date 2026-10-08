@@ -1382,7 +1382,7 @@ class SriClienteSyncService:
                     ),
                     "doc": next(
                         (i for i, x in enumerate(headers)
-                         if "numero" in x or "número" in x or "comprobante" in x
+                         if "numero" in x
                          or "documento sustento" in x or "numdoc" in x),
                         None,
                     ),
@@ -1490,6 +1490,92 @@ class SriClienteSyncService:
                 "retiva": sum(tasas.values(), Decimal("0")),
                 "retiva_porcentajes": tasas,
             })
+
+        # Fallback para variantes del HTML del SRI donde los encabezados
+        # y las filas vienen en tablas separadas o cambian ligeramente.
+        # Estructura habitual:
+        # Comprobante | Número | Fecha | Periodo | Base | Código | Impuesto | % | Valor
+        if not bloques:
+            for tabla in soup.find_all("table"):
+                for fila in tabla.find_all("tr"):
+                    textos = [txt(x) for x in fila.find_all(["td", "th"])]
+                    textos = [x for x in textos if x]
+                    if len(textos) < 5:
+                        continue
+
+                    md = re.search(
+                        r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
+                        " ".join(textos),
+                    )
+                    if not md:
+                        continue
+
+                    numdoc = re.sub(r"\D", "", md.group(0))
+                    if len(numdoc) != 15:
+                        continue
+
+                    impuesto_idx = next(
+                        (i for i, x in enumerate(textos)
+                         if norm(x) in ("renta", "iva")
+                         or norm(x).startswith("renta ")
+                         or norm(x).startswith("iva ")),
+                        None,
+                    )
+                    if impuesto_idx is None:
+                        continue
+
+                    impuesto = norm(textos[impuesto_idx])
+                    es_iva = "iva" in impuesto
+                    es_renta = "renta" in impuesto
+                    if not (es_iva or es_renta):
+                        continue
+
+                    base_idx = impuesto_idx - 2
+                    codigo_idx = impuesto_idx - 1
+                    porcentaje_idx = impuesto_idx + 1
+                    valor_idx = impuesto_idx + 2
+
+                    if (
+                        base_idx < 0
+                        or porcentaje_idx >= len(textos)
+                        or valor_idx >= len(textos)
+                    ):
+                        continue
+
+                    base = cls._dec(textos[base_idx])
+                    porcentaje = cls._dec(
+                        re.sub(r"[^0-9.,-]", "", textos[porcentaje_idx])
+                    )
+                    valor = cls._dec(textos[valor_idx])
+                    codigo = re.sub(r"\D", "", textos[codigo_idx])
+
+                    bloque = {
+                        "num_doc_sustento": numdoc,
+                        "codigo_retencion": codigo,
+                        "base": base,
+                        "porcentaje": porcentaje,
+                        "retrenta": valor if es_renta else Decimal("0"),
+                        "retiva": valor if es_iva else Decimal("0"),
+                        "retiva_porcentajes": (
+                            {str(porcentaje).rstrip("0").rstrip("."): valor}
+                            if es_iva else {}
+                        ),
+                    }
+
+                    if es_renta:
+                        bloques.append(bloque)
+                        ultimo_renta_por_doc[numdoc] = bloque
+                    else:
+                        bloque_renta = ultimo_renta_por_doc.get(numdoc)
+                        if bloque_renta is not None:
+                            tasa = str(porcentaje).rstrip("0").rstrip(".")
+                            bloque_renta["retiva_porcentajes"][tasa] = (
+                                bloque_renta["retiva_porcentajes"].get(tasa, Decimal("0"))
+                                + valor
+                            )
+                            bloque_renta["retiva"] += valor
+                        else:
+                            bloques.append(bloque)
 
         if not bloques:
             raise ValueError("No se encontraron líneas de retención en el detalle SRI.")
