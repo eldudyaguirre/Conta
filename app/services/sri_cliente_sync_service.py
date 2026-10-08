@@ -3521,19 +3521,32 @@ class SriClienteSyncService:
             factura["clave_acceso"],
             b["0"], b["5"], b["8"], b["12"], b["14"], b["15"], i["15"],
         )
+        # Equivalente al procesamiento legacy de VB6:
+        # TipoPago solo se guarda cuando el total es >= 500; si falta la forma,
+        # el procesamiento legacy utiliza "20".
+        total = cls._dec(factura.get("total"))
+        forma_pago = str(factura.get("tipopago") or "").strip()
+        tipopago_legacy = (forma_pago or "20") if total >= Decimal("500") else ""
+        totbases = sum(b.values(), Decimal("0"))
+
         values = {
             "codsus": "01", "tipid": "01", "ruccedprovee": factura["ruc"],
             "tipcom": cls._tipo(tipo_comprobante), "fecreg": factura["fecha"],
             "numest": factura["numest"], "numptoemi": factura["numptoemi"],
             "numsec": factura["numsec"], "fecemi": factura["fecha_emision"],
             "numaut": factura["clave_acceso"], "baseimpnoobj": b["no_objeto"],
-            "baseimpiva0": b["0"], "baseimpiva12": b["12"], "baseexenta": b["exenta"],
+            "baseimpiva0": b["0"], "baseexenta": b["exenta"],
+            "baseimpiva5": b["5"], "baseimpiva8": b["8"], "baseimpiva12": b["12"],
+            "baseimpiva14": b["14"], "baseimpiva15": b["15"],
             "montoice": factura["ice"], "montoiva": Decimal("0"),
-            "retencioniva10": 0, "retencioniva20": 0, "retencioniva30": 0,
-            "retencioniva70": 0, "retencioniva100": 0,
-            "totbases": sum(b.values(), Decimal("0")), "codret": "", "baseimpret": "",
+            "montoiva5": i["5"], "montoiva8": i["8"], "montoiva12": i["12"],
+            "montoiva14": i["14"], "montoiva15": i["15"],
+            "retencioniva10": Decimal("0"), "retencioniva20": Decimal("0"),
+            "retencioniva30": Decimal("0"), "retencioniva70": Decimal("0"),
+            "retencioniva100": Decimal("0"),
+            "totbases": totbases, "codret": "", "baseimpret": "",
             "porret": "", "valret": "", "numestret": "", "numptoemiret": "",
-            "numsecret": "", "numautret": "", "fecret": "", "tipopago": factura["tipopago"],
+            "numsecret": "", "numautret": "", "fecret": "", "tipopago": tipopago_legacy,
             "codtipodoc": "", "numestmod": "", "numptoemimod": "", "numsecmod": "",
             "numautmod": "", "mes": f"{factura['fecha'].month:02d}", "año": str(factura["fecha"].year),
             "nomprovee": factura["razon_social"], "baseimpiva5": b["5"], "baseimpiva8": b["8"],
