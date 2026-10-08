@@ -3521,13 +3521,15 @@ class SriClienteSyncService:
             factura["clave_acceso"],
             b["0"], b["5"], b["8"], b["12"], b["14"], b["15"], i["15"],
         )
-        # Equivalente al procesamiento legacy de VB6:
-        # TipoPago solo se guarda cuando el total es >= 500; si falta la forma,
-        # el procesamiento legacy utiliza "20".
-        total = cls._dec(factura.get("total"))
-        forma_pago = str(factura.get("tipopago") or "").strip()
-        tipopago_legacy = (forma_pago or "20") if total >= Decimal("500") else ""
+        # Estructura inicial del registro según el procesamiento legacy de VB6.
         totbases = sum(b.values(), Decimal("0"))
+
+        # TipoPago solo se modifica si el total cumple la condición >= 500.
+        # En ese caso, si no viene una forma de pago, VB6 coloca "20".
+        total = cls._dec(factura.get("total"))
+        tipopago_legacy = ""
+        if total >= Decimal("500"):
+            tipopago_legacy = str(factura.get("tipopago") or "").strip() or "20"
 
         values = {
             "codsus": "01", "tipid": "01", "ruccedprovee": factura["ruc"],
@@ -3544,9 +3546,11 @@ class SriClienteSyncService:
             "retencioniva10": Decimal("0"), "retencioniva20": Decimal("0"),
             "retencioniva30": Decimal("0"), "retencioniva70": Decimal("0"),
             "retencioniva100": Decimal("0"),
-            "totbases": totbases, "codret": "", "baseimpret": "",
-            "porret": "", "valret": "", "numestret": "", "numptoemiret": "",
-            "numsecret": "", "numautret": "", "fecret": "", "tipopago": tipopago_legacy,
+            # Valores iniciales de una compra nueva según VB6.
+            "totbases": totbases, "codret": "332", "baseimpret": totbases,
+            "porret": Decimal("0"), "valret": Decimal("0.00"),
+            "numestret": "", "numptoemiret": "", "numsecret": "",
+            "numautret": "", "fecret": "", "tipopago": tipopago_legacy,
             "codtipodoc": "", "numestmod": "", "numptoemimod": "", "numsecmod": "",
             "numautmod": "", "mes": f"{factura['fecha'].month:02d}", "año": str(factura["fecha"].year),
             "nomprovee": factura["razon_social"], "baseimpiva5": b["5"], "baseimpiva8": b["8"],
