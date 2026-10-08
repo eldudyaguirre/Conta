@@ -1500,7 +1500,10 @@ class SriClienteSyncService:
                             bloque["retiva"] += iva_valor
 
                     elif es_iva:
-                        tasa_txt = str(porcentaje).rstrip("0").rstrip(".")
+                        if porcentaje == porcentaje.to_integral_value():
+                            tasa_txt = str(int(porcentaje))
+                        else:
+                            tasa_txt = format(porcentaje, "f").rstrip("0").rstrip(".")
                         if not tasa_txt:
                             tasa_txt = "0"
 
@@ -1596,7 +1599,13 @@ class SriClienteSyncService:
                         "retrenta": valor if es_renta else Decimal("0"),
                         "retiva": valor if es_iva else Decimal("0"),
                         "retiva_porcentajes": (
-                            {str(porcentaje).rstrip("0").rstrip("."): valor}
+                            {
+                                (
+                                    str(int(porcentaje))
+                                    if porcentaje == porcentaje.to_integral_value()
+                                    else format(porcentaje, "f").rstrip("0").rstrip(".")
+                                ): valor
+                            }
                             if es_iva else {}
                         ),
                     }
@@ -1607,7 +1616,11 @@ class SriClienteSyncService:
                     else:
                         bloque_renta = ultimo_renta_por_doc.get(numdoc)
                         if bloque_renta is not None:
-                            tasa = str(porcentaje).rstrip("0").rstrip(".")
+                            tasa = (
+                                str(int(porcentaje))
+                                if porcentaje == porcentaje.to_integral_value()
+                                else format(porcentaje, "f").rstrip("0").rstrip(".")
+                            )
                             bloque_renta["retiva_porcentajes"][tasa] = (
                                 bloque_renta["retiva_porcentajes"].get(tasa, Decimal("0"))
                                 + valor
@@ -2330,13 +2343,21 @@ class SriClienteSyncService:
                 "100": Decimal("0"),
             }
             for tasa, valor in iva_porcentajes.items():
-                tasa_norm = str(tasa).replace(",", ".").rstrip("0").rstrip(".")
+                tasa_decimal = cls._dec(tasa)
+                if tasa_decimal == tasa_decimal.to_integral_value():
+                    tasa_norm = str(int(tasa_decimal))
+                else:
+                    tasa_norm = format(tasa_decimal, "f").rstrip("0").rstrip(".")
                 if tasa_norm in iva_values:
                     iva_values[tasa_norm] += cls._dec(valor)
 
             # Compatibilidad con bloques antiguos que solo traían retiva.
             if not iva_porcentajes and bloque.get("retiva"):
-                tasa = str(bloque.get("porcentaje") or "").replace(",", ".").rstrip("0").rstrip(".")
+                tasa_decimal = cls._dec(bloque.get("porcentaje"))
+                if tasa_decimal == tasa_decimal.to_integral_value():
+                    tasa = str(int(tasa_decimal))
+                else:
+                    tasa = format(tasa_decimal, "f").rstrip("0").rstrip(".")
                 if tasa in iva_values:
                     iva_values[tasa] = cls._dec(bloque.get("retiva"))
 
