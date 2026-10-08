@@ -2486,9 +2486,27 @@ class SriClienteSyncService:
                 no_encontradas.append(numdoc)
                 continue
 
-            if ya_registrada(filas, bloque):
-                actualizadas += 1
-                continue
+            # Si la retención ya existe, NO la saltamos automáticamente.
+            # La sincronización de SRI debe ser idempotente pero también debe
+            # corregir campos incompletos (especialmente retencionivaXX).
+            # Buscamos la misma retención por autorización + código + valor
+            # de renta y volvemos a escribir TODOS los campos desde SRI.
+            fila_existente = next(
+                (
+                    row for row in filas
+                    if str(row.get("numautret") or "").strip() == autret
+                    and (
+                        not str(bloque.get("codigo_retencion") or "").strip()
+                        or str(row.get("codret") or "").strip()
+                        == str(bloque.get("codigo_retencion") or "").strip()
+                    )
+                    and abs(
+                        cls._dec(row.get("valret"))
+                        - cls._dec(bloque.get("retrenta"))
+                    ) <= Decimal("0.0001")
+                ),
+                None,
+            )
 
             es_renta = bool(
                 str(bloque.get("codigo_retencion") or "").strip()
@@ -2529,7 +2547,11 @@ class SriClienteSyncService:
             )
 
             if es_renta:
-                if fila_incompleta is not None:
+                if fila_existente is not None:
+                    # Aunque codret/valret ya coincidan, actualizamos todos los
+                    # campos para corregir cualquier IVA que esté en cero.
+                    fila_objetivo = fila_existente
+                elif fila_incompleta is not None:
                     fila_objetivo = fila_incompleta
                 else:
                     fila_objetivo = template
