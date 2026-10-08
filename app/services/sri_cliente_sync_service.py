@@ -1444,12 +1444,12 @@ class SriClienteSyncService:
 
                 texto_doc = textos[idx["doc"]] if idx["doc"] is not None else " ".join(textos)
                 md = re.search(
-                    r"\\d{3}\\s*[- ]\\s*\\d{3}\\s*[- ]\\s*\\d{9}|\\b\\d{15}\\b",
+                    r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
                     texto_doc,
                 )
                 if not md:
                     md = re.search(
-                        r"\\d{3}\\s*[- ]\\s*\\d{3}\\s*[- ]\\s*\\d{9}|\\b\\d{15}\\b",
+                        r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
                         " ".join(textos),
                     )
                 if not md:
@@ -1563,13 +1563,17 @@ class SriClienteSyncService:
                     if not (es_iva or es_renta):
                         continue
 
-                    base_idx = impuesto_idx - 2
-                    codigo_idx = impuesto_idx - 1
-                    porcentaje_idx = impuesto_idx + 1
-                    valor_idx = impuesto_idx + 2
+                    # Variante simple del detalle SRI:
+                    # Nro | Impuesto | Base Imponible | % Retenido |
+                    # Valor Retenido | Número Doc. Sustento | Fecha.
+                    # En esta variante NO existe código de retención.
+                    base_idx = impuesto_idx + 1
+                    porcentaje_idx = impuesto_idx + 2
+                    valor_idx = impuesto_idx + 3
+                    doc_idx = impuesto_idx + 4
 
                     if (
-                        base_idx < 0
+                        base_idx >= len(textos)
                         or porcentaje_idx >= len(textos)
                         or valor_idx >= len(textos)
                     ):
@@ -1580,7 +1584,29 @@ class SriClienteSyncService:
                         re.sub(r"[^0-9.,-]", "", textos[porcentaje_idx])
                     )
                     valor = cls._dec(textos[valor_idx])
-                    codigo = re.sub(r"\D", "", textos[codigo_idx])
+
+                    # El documento de sustento debe ser el número de 15 dígitos.
+                    # Si no está en la posición esperada, lo buscamos en toda la fila.
+                    texto_doc_fallback = (
+                        textos[doc_idx] if doc_idx < len(textos) else " ".join(textos)
+                    )
+                    md_doc = re.search(
+                        r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
+                        texto_doc_fallback,
+                    )
+                    if not md_doc:
+                        md_doc = re.search(
+                            r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
+                            " ".join(textos),
+                        )
+                    if not md_doc:
+                        continue
+
+                    numdoc = re.sub(r"\D", "", md_doc.group(0))
+                    if len(numdoc) != 15:
+                        continue
+
+                    codigo = ""
 
                     bloque = {
                         "num_doc_sustento": numdoc,
@@ -1601,24 +1627,58 @@ class SriClienteSyncService:
                         ),
                     }
 
-                    if es_renta:
-                        bloques.append(bloque)
-                        ultimo_renta_por_doc[numdoc] = bloque
-                    else:
-                        bloque_renta = ultimo_renta_por_doc.get(numdoc)
-                        if bloque_renta is not None:
-                            tasa = (
-                                str(int(porcentaje))
-                                if porcentaje == porcentaje.to_integral_value()
-                                else format(porcentaje, "f").rstrip("0").rstrip(".")
+                    # No dependemos del orden IVA/RENTA. Guardamos ambas
+                    # líneas y las asociamos después por numdoc, igual que
+                    # en el parser principal.
+                    filas_por_doc.setdefault(numdoc, []).append({
+                        "impuesto": "IVA" if es_iva else "RENTA",
+                        "codigo_retencion": codigo,
+                        "base": base,
+                        "porcentaje": porcentaje,
+                        "valor": valor,
+                    })
+
+            # Reconstruimos los bloques si el fallback encontró líneas.
+            if not bloques and filas_por_doc:
+                for numdoc, lineas in filas_por_doc.items():
+                    lineas_renta = [x for x in lineas if x["impuesto"] == "RENTA"]
+                    lineas_iva = [x for x in lineas if x["impuesto"] == "IVA"]
+
+                    iva_porcentajes = {}
+                    for linea in lineas_iva:
+                        porcentaje = linea["porcentaje"]
+                        tasa = (
+                            str(int(porcentaje))
+                            if porcentaje == porcentaje.to_integral_value()
+                            else format(porcentaje, "f").rstrip("0").rstrip(".")
+                        )
+                        if tasa:
+                            iva_porcentajes[tasa] = (
+                                iva_porcentajes.get(tasa, Decimal("0"))
+                                + linea["valor"]
                             )
-                            bloque_renta["retiva_porcentajes"][tasa] = (
-                                bloque_renta["retiva_porcentajes"].get(tasa, Decimal("0"))
-                                + valor
-                            )
-                            bloque_renta["retiva"] += valor
-                        else:
-                            bloques.append(bloque)
+
+                    if lineas_renta:
+                        for renta in lineas_renta:
+                            bloques.append({
+                                "num_doc_sustento": numdoc,
+                                "codigo_retencion": renta["codigo_retencion"],
+                                "base": renta["base"],
+                                "porcentaje": renta["porcentaje"],
+                                "retrenta": renta["valor"],
+                                "retiva": sum(iva_porcentajes.values(), Decimal("0")),
+                                "retiva_porcentajes": dict(iva_porcentajes),
+                            })
+                    elif lineas_iva:
+                        bloques.append({
+                            "num_doc_sustento": numdoc,
+                            "codigo_retencion": "",
+                            "base": Decimal("0"),
+                            "porcentaje": Decimal("0"),
+                            "retrenta": Decimal("0"),
+                            "retiva": sum(iva_porcentajes.values(), Decimal("0")),
+                            "retiva_porcentajes": dict(iva_porcentajes),
+                        })
 
         # El HTML del detalle SRI normalmente NO muestra el campo
         # "Código Retención". En TotalCounts el código histórico se determina
