@@ -1526,6 +1526,9 @@ class SriClienteSyncService:
         # Estructura habitual:
         # Comprobante | Número | Fecha | Periodo | Base | Código | Impuesto | % | Valor
         if not bloques:
+            # Fallback legacy: conserva la asociación IVA/Renta cuando el
+            # HTML alternativo del SRI separa las filas.
+            ultimo_renta_por_doc = {}
             for tabla in soup.find_all("table"):
                 for fila in tabla.find_all("tr"):
                     textos = [txt(x) for x in fila.find_all(["td", "th"])]
