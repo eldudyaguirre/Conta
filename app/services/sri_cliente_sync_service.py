@@ -2191,7 +2191,7 @@ class SriClienteSyncService:
                   AND REPLACE(REPLACE(REPLACE(TRIM(numptoemi::text), '-', ''), ' ', ''), '.', '') = :numptoemi
                   AND REPLACE(REPLACE(REPLACE(TRIM(numsec::text), '-', ''), ' ', ''), '.', '') = :numsec
                   AND TRIM(ruccedprovee::text) = TRIM(:ruc)
-                  AND TRIM(tipcom::text) IN ('01', '02')
+                  AND TRIM(tipcom::text) IN ('01', '03')
                 ORDER BY numcompra ASC NULLS LAST
             """), {
                 "numest": ne,
@@ -2415,10 +2415,22 @@ class SriClienteSyncService:
                     )
 
                 if fila_objetivo is None:
-                    # No se crea ningún registro adicional. Si todos los
-                    # registros actuales ya tienen retenciones, se reutiliza
-                    # el primero para reemplazar sus datos de retención.
-                    fila_objetivo = filas_trabajo[0]
+                    # Nunca debemos aplicar una retención a otra compra.
+                    # Si el SRI indica un documento sustento/RUC para el que
+                    # no existe una fila elegible, se deja sin aplicar.
+                    logger.warning(
+                        "RETENCION EMITIDA | sin fila elegible | "
+                        "retencion=%s | doc_sustento=%s | ruc=%s | "
+                        "filas_encontradas=%s",
+                        numret,
+                        numdoc,
+                        ruc,
+                        len(filas_trabajo),
+                    )
+                    no_encontradas.append(
+                        f"{numdoc} (sin fila elegible para reemplazo)"
+                    )
+                    continue
 
                 actualizar_fila(fila_objetivo, bloque)
                 actualizadas += 1
