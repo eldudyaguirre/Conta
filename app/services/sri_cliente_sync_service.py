@@ -1521,18 +1521,6 @@ class SriClienteSyncService:
                     "retiva_porcentajes": dict(iva_porcentajes),
                 })
 
-        # Si una retención trae solamente IVA, no perdemos el documento.
-        for numdoc, tasas in iva_pendiente_por_doc.items():
-            bloques.append({
-                "num_doc_sustento": numdoc,
-                "codigo_retencion": "",
-                "base": Decimal("0"),
-                "porcentaje": Decimal("0"),
-                "retrenta": Decimal("0"),
-                "retiva": sum(tasas.values(), Decimal("0")),
-                "retiva_porcentajes": tasas,
-            })
-
         # Fallback para variantes del HTML del SRI donde los encabezados
         # y las filas vienen en tablas separadas o cambian ligeramente.
         # Estructura habitual:
