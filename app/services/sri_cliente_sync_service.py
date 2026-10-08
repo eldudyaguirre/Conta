@@ -2111,15 +2111,24 @@ class SriClienteSyncService:
 
     @classmethod
     def _actualizar_retencion_emitida_compras(cls, db, retencion: dict[str, Any]) -> int:
-        """Registra una retención emitida sobre comprasnue.
+        """Actualiza comprasnue con una retención emitida por el SRI.
 
-        Regla legacy de TotalCounts:
-        - una renta ocupa un registro de comprasnue;
-        - si una misma retención trae dos rentas para la misma factura,
-          se duplica la compra para poder guardar ambos codret/baseimpret/
-          porret/valret;
-        - el IVA correspondiente acompaña al registro de su renta;
-        - una retención con solo IVA se guarda en un único registro.
+        La factura se localiza por el Número Doc. Sustento del detalle SRI:
+            3 dígitos establecimiento + 3 punto emisión + 9 secuencial
+        y por el RUC del sujeto retenido (ruccedprovee).
+
+        Luego se guarda en esa compra:
+        - numestret / numptoemiret / numsecret: número de la RETENCIÓN.
+        - numautret: clave de acceso de la RETENCIÓN.
+        - fecret: fecha de emisión de la RETENCIÓN.
+        - IVA: valor de cada línea IVA en retencioniva10/20/30/70/100.
+        - RENTA: CodRet, BaseImpRet, PorRet y ValRet.
+
+        Si el mismo Número Doc. Sustento tiene varias líneas RENTA,
+        cada línea RENTA ocupa un registro de comprasnue. El segundo y
+        siguientes registros son clones completos de la factura original,
+        conservando los datos de la compra y cambiando solamente los campos
+        de retención.
         """
         import re
 
@@ -2150,6 +2159,7 @@ class SriClienteSyncService:
             "70": "retencioniva70",
             "100": "retencioniva100",
         }
+
         retencion_fields = (
             "numestret", "numptoemiret", "numsecret", "numautret", "fecret",
             "codret", "baseimpret", "porret", "valret",
@@ -2159,15 +2169,10 @@ class SriClienteSyncService:
 
         def normalizar_numdoc(valor: Any) -> str:
             digitos = re.sub(r"\D", "", str(valor or ""))
-            if len(digitos) != 15:
-                return ""
-            return digitos
+            return digitos if len(digitos) == 15 else ""
 
         def partes_factura(numdoc: str) -> tuple[str, str, str]:
             return numdoc[:3], numdoc[3:6], numdoc[6:]
-
-        def limpiar_valor(valor: Any) -> Any:
-            return valor
 
         def obtener_columnas_clon() -> list[str]:
             filas = db.execute(text("""
@@ -2193,6 +2198,9 @@ class SriClienteSyncService:
             """)).scalars().all()
             return {str(x) for x in filas}
 
+        columnas_clon = obtener_columnas_clon()
+        pk = obtener_pk()
+
         def nuevo_numcompra() -> str:
             db.execute(text(
                 "SELECT pg_advisory_xact_lock(hashtext('conta_comprasnue_numcompra'))"
@@ -2207,32 +2215,34 @@ class SriClienteSyncService:
             return str(valor).strip()
 
         def buscar_compras(numdoc: str) -> list[dict[str, Any]]:
+            """Busca la factura por Número Doc. Sustento + RUC proveedor."""
             ne, np, ns = partes_factura(numdoc)
-            sql = """
+
+            rows = db.execute(text("""
                 SELECT *
                 FROM comprasnue
                 WHERE REPLACE(REPLACE(REPLACE(TRIM(numest::text), '-', ''), ' ', ''), '.', '') = :numest
                   AND REPLACE(REPLACE(REPLACE(TRIM(numptoemi::text), '-', ''), ' ', ''), '.', '') = :numptoemi
                   AND REPLACE(REPLACE(REPLACE(TRIM(numsec::text), '-', ''), ' ', ''), '.', '') = :numsec
-                  AND (:ruc = '' OR TRIM(ruccedprovee::text) = TRIM(:ruc))
+                  AND TRIM(ruccedprovee::text) = TRIM(:ruc)
                   AND TRIM(tipcom::text) IN ('01', '02')
-                ORDER BY
-                    CASE
-                        WHEN COALESCE(TRIM(numautret::text), '') = '' THEN 0
-                        ELSE 1
-                    END,
-                    numcompra DESC NULLS LAST
-            """
-            rows = db.execute(text(sql), {
+                ORDER BY numcompra ASC NULLS LAST
+            """), {
                 "numest": ne,
                 "numptoemi": np,
                 "numsec": ns,
                 "ruc": ruc,
             }).mappings().all()
+
             return [dict(row) for row in rows]
 
+        def normalizar_tasa(valor: Any) -> str:
+            dec = cls._dec(valor)
+            if dec == dec.to_integral_value():
+                return str(int(dec))
+            return format(dec, "f").rstrip("0").rstrip(".")
+
         def valores_iva_esperados(bloque: dict[str, Any]) -> dict[str, Decimal]:
-            iva_porcentajes = bloque.get("retiva_porcentajes") or {}
             esperados = {
                 "10": Decimal("0"),
                 "20": Decimal("0"),
@@ -2240,80 +2250,65 @@ class SriClienteSyncService:
                 "70": Decimal("0"),
                 "100": Decimal("0"),
             }
-            for tasa, valor in iva_porcentajes.items():
-                tasa_decimal = cls._dec(tasa)
-                if tasa_decimal == tasa_decimal.to_integral_value():
-                    tasa_norm = str(int(tasa_decimal))
-                else:
-                    tasa_norm = format(tasa_decimal, "f").rstrip("0").rstrip(".")
+
+            for tasa, valor in (bloque.get("retiva_porcentajes") or {}).items():
+                tasa_norm = normalizar_tasa(tasa)
                 if tasa_norm in esperados:
                     esperados[tasa_norm] += cls._dec(valor)
 
-            if not iva_porcentajes and bloque.get("retiva"):
-                tasa_decimal = cls._dec(bloque.get("porcentaje"))
-                if tasa_decimal == tasa_decimal.to_integral_value():
-                    tasa_norm = str(int(tasa_decimal))
-                else:
-                    tasa_norm = format(tasa_decimal, "f").rstrip("0").rstrip(".")
-                if tasa_norm in esperados:
-                    esperados[tasa_norm] = cls._dec(bloque.get("retiva"))
-
             return esperados
 
-        def fila_tiene_iva_correcto(row: dict[str, Any], bloque: dict[str, Any]) -> bool:
-            esperados = valores_iva_esperados(bloque)
-            for tasa, esperado in esperados.items():
-                campo = iva_fields[tasa]
-                actual = cls._dec(row.get(campo))
-                if abs(actual - esperado) > Decimal("0.0001"):
-                    return False
+        def fila_ya_es_esta_linea(
+            row: dict[str, Any],
+            bloque: dict[str, Any],
+        ) -> bool:
+            if str(row.get("numautret") or "").strip() != autret:
+                return False
+
+            # La renta es el identificador más fuerte de cada línea.
+            if abs(
+                cls._dec(row.get("valret"))
+                - cls._dec(bloque.get("retrenta"))
+            ) > Decimal("0.0001"):
+                return False
+
+            # Si ya existe el código correcto, es una coincidencia clara.
+            codigo = str(bloque.get("codigo_retencion") or "").strip()
+            codigo_row = str(row.get("codret") or "").strip()
+            if codigo and codigo_row and codigo == codigo_row:
+                return True
+
+            # Si el código viejo está vacío o equivocado, también es la misma
+            # línea: precisamente queremos corregirla.
             return True
 
-        def ya_registrada(rows: list[dict[str, Any]], bloque: dict[str, Any]) -> bool:
-            codigo = str(bloque.get("codigo_retencion") or "").strip()
-            valor = cls._dec(bloque.get("retrenta"))
-            for row in rows:
-                if str(row.get("numautret") or "").strip() != autret:
-                    continue
-                if codigo and str(row.get("codret") or "").strip() != codigo:
-                    continue
-                if codigo and abs(cls._dec(row.get("valret")) - valor) > Decimal("0.0001"):
-                    continue
-                if not fila_tiene_iva_correcto(row, bloque):
-                    continue
-                return True
-            return False
-
         def clonar_compra(template: dict[str, Any]) -> dict[str, Any]:
-            columnas = obtener_columnas_clon()
-            if "numcompra" not in columnas:
-                raise RuntimeError("La tabla comprasnue no contiene numcompra.")
-
-            pk = obtener_pk()
             valores = {
                 k: v for k, v in template.items()
-                if k in columnas and (k not in pk or k == "numcompra")
+                if k in columnas_clon and (k not in pk or k == "numcompra")
             }
-
             valores["numcompra"] = nuevo_numcompra()
 
-            # El clon representa la misma compra, pero una nueva retención.
-            # Limpiamos todos los campos de retención antes de aplicar el
-            # bloque actual.
+            # El clon conserva absolutamente todos los datos de la factura.
+            # Solamente se limpian los campos que pertenecen a la retención.
             for campo in retencion_fields:
                 if campo in valores:
-                    valores[campo] = "" if campo not in (
+                    if campo in {
                         "baseimpret", "porret", "valret",
                         "retencioniva10", "retencioniva20",
-                        "retencioniva30", "retencioniva50",
-                        "retencioniva70", "retencioniva100",
-                    ) else Decimal("0")
+                        "retencioniva30", "retencioniva70",
+                        "retencioniva100",
+                    }:
+                        valores[campo] = Decimal("0")
+                    else:
+                        valores[campo] = ""
 
             nombres = ", ".join(
                 f'"{col}"' if col == "año" else col
                 for col in valores
             )
             parametros = ", ".join(f":{col}" for col in valores)
+
             db.execute(
                 text(
                     f"INSERT INTO comprasnue ({nombres}) "
@@ -2326,25 +2321,10 @@ class SriClienteSyncService:
             nuevo.update(valores)
             return nuevo
 
-        def actualizar_fila(row: dict[str, Any], bloque: dict[str, Any]) -> None:
-            set_parts = [
-                "numestret = :numestret",
-                "numptoemiret = :numptoemiret",
-                "numsecret = :numsecret",
-                "numautret = :numautret",
-                "fecret = :fecret",
-                "codret = :codret",
-                "baseimpret = :baseimpret",
-                "porret = :porret",
-                "valret = :valret",
-                "retencioniva10 = :retencioniva10",
-                "retencioniva20 = :retencioniva20",
-                "retencioniva30 = :retencioniva30",
-                "retencioniva70 = :retencioniva70",
-                "retencioniva100 = :retencioniva100",
-            ]
-
-            iva_porcentajes = bloque.get("retiva_porcentajes") or {}
+        def actualizar_fila(
+            row: dict[str, Any],
+            bloque: dict[str, Any],
+        ) -> None:
             iva_values = {
                 "10": Decimal("0"),
                 "20": Decimal("0"),
@@ -2352,48 +2332,72 @@ class SriClienteSyncService:
                 "70": Decimal("0"),
                 "100": Decimal("0"),
             }
-            for tasa, valor in iva_porcentajes.items():
-                tasa_decimal = cls._dec(tasa)
-                if tasa_decimal == tasa_decimal.to_integral_value():
-                    tasa_norm = str(int(tasa_decimal))
-                else:
-                    tasa_norm = format(tasa_decimal, "f").rstrip("0").rstrip(".")
+
+            # El porcentaje de IVA determina DIRECTAMENTE el campo destino.
+            # Ejemplo: IVA 30.0 -> retencioniva30 = valor retenido.
+            for tasa, valor in (bloque.get("retiva_porcentajes") or {}).items():
+                tasa_norm = normalizar_tasa(tasa)
                 if tasa_norm in iva_values:
                     iva_values[tasa_norm] += cls._dec(valor)
 
-            # Compatibilidad con bloques antiguos que solo traían retiva.
-            if not iva_porcentajes and bloque.get("retiva"):
-                tasa_decimal = cls._dec(bloque.get("porcentaje"))
-                if tasa_decimal == tasa_decimal.to_integral_value():
-                    tasa = str(int(tasa_decimal))
-                else:
-                    tasa = format(tasa_decimal, "f").rstrip("0").rstrip(".")
-                if tasa in iva_values:
-                    iva_values[tasa] = cls._dec(bloque.get("retiva"))
-
             params = {
                 "numcompra": row["numcompra"],
-                "numestret": retencion["numest"],
-                "numptoemiret": retencion["numptoemi"],
-                "numsecret": retencion["numsec"],
+
+                # Número del comprobante de RETENCIÓN.
+                "numestret": str(retencion["numest"]).strip(),
+                "numptoemiret": str(retencion["numptoemi"]).strip(),
+                "numsecret": str(retencion["numsec"]).strip(),
+
+                # Datos generales de la RETENCIÓN.
                 "numautret": autret,
                 "fecret": fecret,
-                "codret": str(bloque.get("codigo_retencion") or ""),
+
+                # Datos de RENTA.
+                "codret": str(bloque.get("codigo_retencion") or "").strip(),
                 "baseimpret": cls._dec(bloque.get("base")),
                 "porret": cls._dec(bloque.get("porcentaje")),
                 "valret": cls._dec(bloque.get("retrenta")),
-                **{
-                    f"retencioniva{tasa}": valor
-                    for tasa, valor in iva_values.items()
-                },
+
+                # Datos de IVA.
+                "retencioniva10": iva_values["10"],
+                "retencioniva20": iva_values["20"],
+                "retencioniva30": iva_values["30"],
+                "retencioniva70": iva_values["70"],
+                "retencioniva100": iva_values["100"],
             }
 
+            db.execute(text("""
+                UPDATE comprasnue
+                SET numestret = :numestret,
+                    numptoemiret = :numptoemiret,
+                    numsecret = :numsecret,
+                    numautret = :numautret,
+                    fecret = :fecret,
+                    codret = :codret,
+                    baseimpret = :baseimpret,
+                    porret = :porret,
+                    valret = :valret,
+                    retencioniva10 = :retencioniva10,
+                    retencioniva20 = :retencioniva20,
+                    retencioniva30 = :retencioniva30,
+                    retencioniva70 = :retencioniva70,
+                    retencioniva100 = :retencioniva100
+                WHERE numcompra = :numcompra
+            """), params)
+
             cls._iva_debug_log(
-                "RETENCION EMITIDA | GUARDAR IVA | numcompra=%s | numdoc=%s | "
+                "RETENCION EMITIDA | UPDATE | compra=%s | retencion=%s | "
+                "doc_sustento=%s | ruc=%s | "
+                "numestret=%s | numptoemiret=%s | numsecret=%s | "
                 "codret=%s | base=%s | porret=%s | valret=%s | "
                 "iva10=%s | iva20=%s | iva30=%s | iva70=%s | iva100=%s",
-                row.get("numcompra"),
+                row["numcompra"],
+                numret,
                 bloque.get("num_doc_sustento"),
+                ruc,
+                params["numestret"],
+                params["numptoemiret"],
+                params["numsecret"],
                 params["codret"],
                 params["baseimpret"],
                 params["porret"],
@@ -2405,102 +2409,28 @@ class SriClienteSyncService:
                 params["retencioniva100"],
             )
 
-            db.execute(
-                text(
-                    f"UPDATE comprasnue SET {', '.join(set_parts)} "
-                    "WHERE numcompra = :numcompra"
-                ),
-                params,
-            )
-
-            verificacion = db.execute(
-                text("""
-                    SELECT numcompra, codret, baseimpret, porret, valret,
-                           retencioniva10, retencioniva20, retencioniva30,
-                           retencioniva70, retencioniva100
-                    FROM comprasnue
-                    WHERE numcompra = :numcompra
-                """),
-                {"numcompra": row["numcompra"]},
-            ).mappings().first()
-
-            if verificacion:
-                cls._iva_debug_log(
-                    "RETENCION EMITIDA | DESPUES UPDATE | numcompra=%s | "
-                    "codret=%s | base=%s | porret=%s | valret=%s | "
-                    "iva10=%s | iva20=%s | iva30=%s | iva70=%s | iva100=%s",
-                    verificacion["numcompra"],
-                    verificacion["codret"],
-                    verificacion["baseimpret"],
-                    verificacion["porret"],
-                    verificacion["valret"],
-                    verificacion["retencioniva10"],
-                    verificacion["retencioniva20"],
-                    verificacion["retencioniva30"],
-                    verificacion["retencioniva70"],
-                    verificacion["retencioniva100"],
-                )
-
         actualizadas = 0
         no_encontradas = []
 
-        # Agrupamos por factura solamente para localizar la compra. Los
-        # bloques de renta permanecen separados y cada uno genera su registro.
+        # Agrupamos los bloques por documento sustento para que, si una misma
+        # factura tiene dos o más rentas, podamos crear los registros
+        # adicionales de forma ordenada.
+        bloques_por_doc: dict[str, list[dict[str, Any]]] = {}
         for bloque in bloques:
             numdoc = normalizar_numdoc(bloque.get("num_doc_sustento"))
             if not numdoc:
                 continue
+            bloques_por_doc.setdefault(numdoc, []).append(bloque)
 
+        for numdoc, bloques_doc in bloques_por_doc.items():
             filas = buscar_compras(numdoc)
+
             if not filas:
                 no_encontradas.append(numdoc)
                 continue
 
-            # Si la retención ya existe, NO la saltamos automáticamente.
-            # La sincronización de SRI debe ser idempotente pero también debe
-            # corregir campos incompletos (especialmente retencionivaXX).
-            # Buscamos la misma retención por autorización + código + valor
-            # de renta y volvemos a escribir TODOS los campos desde SRI.
-            # La autorización + valor de renta identifican la línea
-            # existente. NO exigimos que codret coincida: precisamente debemos
-            # poder corregir registros antiguos que quedaron con codret vacío
-            # o incorrecto.
-            fila_existente = next(
-                (
-                    row for row in filas
-                    if str(row.get("numautret") or "").strip() == autret
-                    and abs(
-                        cls._dec(row.get("valret"))
-                        - cls._dec(bloque.get("retrenta"))
-                    ) <= Decimal("0.0001")
-                ),
-                None,
-            )
-
-            es_renta = bool(
-                str(bloque.get("codigo_retencion") or "").strip()
-                or cls._dec(bloque.get("retrenta")) != 0
-            )
-
-            # Para la primera renta usamos una compra limpia. Para una segunda
-            # renta de la misma factura, duplicamos el registro como hacía el
-            # módulo VB6. Nunca sobrescribimos una renta distinta ya guardada.
-            # Si ya existe la misma retención pero quedó incompleta
-            # (por ejemplo CodRet y ValRet correctos, pero RetIVA70=0),
-            # actualizamos ESA misma fila. No debemos clonarla.
-            fila_incompleta = next(
-                (
-                    row for row in filas
-                    if str(row.get("numautret") or "").strip() == autret
-                    and (
-                        abs(cls._dec(row.get("valret")) - cls._dec(bloque.get("retrenta")))
-                        <= Decimal("0.0001")
-                    )
-                    and not fila_tiene_iva_correcto(row, bloque)
-                ),
-                None,
-            )
-
+            # Guardamos la factura original para que todos los clones partan
+            # exactamente de los mismos datos de compra.
             template = next(
                 (
                     row for row in filas
@@ -2510,53 +2440,69 @@ class SriClienteSyncService:
                 filas[0],
             )
 
-            if es_renta:
+            filas_trabajo = list(filas)
+            usadas = set()
+
+            for bloque in bloques_doc:
+                # 1. Intentar corregir/actualizar una línea que ya existe.
+                fila_existente = next(
+                    (
+                        row for row in filas_trabajo
+                        if row["numcompra"] not in usadas
+                        and fila_ya_es_esta_linea(row, bloque)
+                    ),
+                    None,
+                )
+
                 if fila_existente is not None:
-                    # Aunque codret/valret ya coincidan, actualizamos todos los
-                    # campos para corregir cualquier IVA que esté en cero.
                     fila_objetivo = fila_existente
-                elif fila_incompleta is not None:
-                    fila_objetivo = fila_incompleta
                 else:
-                    fila_objetivo = template
-                    if str(template.get("numautret") or "").strip():
+                    # 2. Primera línea: reutilizamos la compra original si
+                    # todavía está libre de retención.
+                    fila_libre = next(
+                        (
+                            row for row in filas_trabajo
+                            if row["numcompra"] not in usadas
+                            and not str(row.get("numautret") or "").strip()
+                            and not str(row.get("codret") or "").strip()
+                        ),
+                        None,
+                    )
+
+                    if fila_libre is not None:
+                        fila_objetivo = fila_libre
+                    else:
+                        # 3. Segunda, tercera, etc.: nuevo registro completo
+                        # de comprasnue con la misma factura.
                         fila_objetivo = clonar_compra(template)
-                    elif any(
-                        str(row.get("numautret") or "").strip() == autret
-                        and str(row.get("codret") or "").strip()
-                        for row in filas
-                    ):
-                        fila_objetivo = clonar_compra(template)
+                        filas_trabajo.append(fila_objetivo)
 
                 actualizar_fila(fila_objetivo, bloque)
-                actualizadas += 1
-            else:
-                # IVA sin renta: se registra en una sola compra y no se
-                # duplica por cada porcentaje IVA.
-                fila_objetivo = template
-                if str(template.get("numautret") or "").strip():
-                    fila_objetivo = clonar_compra(template)
-                actualizar_fila(fila_objetivo, bloque)
+                usadas.add(fila_objetivo["numcompra"])
                 actualizadas += 1
 
         if actualizadas == 0:
             detalle = ", ".join(no_encontradas) or "sin número de factura"
             raise ValueError(
-                f"No se encontró en comprasnue ninguna factura de la retención "
-                f"emitida {numret}. Facturas sustento: {detalle}."
+                f"No se encontró en comprasnue ninguna factura para la retención "
+                f"emitida {numret}. Documentos de sustento: {detalle}."
             )
 
         if no_encontradas:
             logger.warning(
                 "RETENCION EMITIDA | algunas facturas no fueron encontradas | "
                 "retencion=%s | facturas=%s",
-                numret, ", ".join(no_encontradas),
+                numret,
+                ", ".join(no_encontradas),
             )
 
         logger.info(
             "RETENCION EMITIDA | registrada | retencion=%s | bloques=%s | "
             "registros=%s | ruc=%s",
-            numret, len(bloques), actualizadas, ruc,
+            numret,
+            len(bloques),
+            actualizadas,
+            ruc,
         )
         return actualizadas
 
