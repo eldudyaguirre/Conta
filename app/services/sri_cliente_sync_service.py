@@ -1351,6 +1351,8 @@ class SriClienteSyncService:
         ruc = buscar([
             "Identificación Sujeto Retenido",
             "Identificacion Sujeto Retenido",
+            "Id de Sujeto Retenido",
+            "Id Sujeto Retenido",
             "RUC Sujeto Retenido",
         ])
         nombre = buscar([
