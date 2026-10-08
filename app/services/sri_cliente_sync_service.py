@@ -2170,7 +2170,7 @@ class SriClienteSyncService:
             or retencion.get("clave_acceso")
             or ""
         ).strip()
-        fecret = retencion["fecha"].strftime("%Y-%m-%d")
+        fecret = cls._fecha_varchar(retencion["fecha"])
         ruc = str(
             retencion.get("identificacion_sujeto_retenido") or ""
         ).strip()
@@ -2558,7 +2558,7 @@ class SriClienteSyncService:
         values = {
             "numfactur": f"{factura['establecimiento']}-{factura['punto_emision']}-{factura['secuencial']}",
             "autorizacion": factura["clave_acceso"],
-            "fecfactur": factura["fecha"].strftime("%Y-%m-%d"),
+            "fecfactur": cls._fecha_varchar(factura["fecha"]),
             "ruccedcli": factura["identificacion"],
             "nomcli": factura["razon_social"],
             "tipid": factura["tipid"],
@@ -3174,7 +3174,7 @@ class SriClienteSyncService:
         values = {
             "numfactur": "RECAP",
             "autorizacion": autorizacion,
-            "fecfactur": fecha,
+            "fecfactur": cls._fecha_varchar(fecha),
             "ruccedcli": ruc_emisor,
             "nomcli": nombre_emisor,
             "tipid": "4",
