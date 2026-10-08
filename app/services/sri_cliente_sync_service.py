@@ -973,7 +973,44 @@ class SriClienteSyncService:
 
     @staticmethod
     async def _seleccionar(page, selector: str, value: str) -> None:
-        await page.locator(selector).wait_for(state="visible", timeout=15000)
+        """
+        Selecciona un control PrimeFaces del SRI tolerando cargas AJAX lentas.
+
+        El SRI puede mostrar primero el documento base y construir los combos
+        después mediante JavaScript. No debemos convertir esa ventana de carga
+        en un error inmediato de sincronización.
+        """
+        locator = page.locator(selector).first
+
+        try:
+            await locator.wait_for(state="attached", timeout=30000)
+        except PlaywrightTimeoutError as exc:
+            diagnostico = await SriClienteSyncService._diagnostico_consulta(page)
+            raise RuntimeError(
+                f"No apareció el campo SRI {selector} después de 30 segundos. "
+                + diagnostico
+            ) from exc
+
+        try:
+            await locator.wait_for(state="visible", timeout=30000)
+        except PlaywrightTimeoutError:
+            # En algunas respuestas AJAX el <select> está en el DOM pero
+            # temporalmente oculto mientras PrimeFaces termina de renderizarlo.
+            # Si ya está adjunto, esperamos un poco más antes de fallar.
+            for _ in range(20):
+                try:
+                    if await locator.is_visible():
+                        break
+                except Exception:
+                    pass
+                await page.wait_for_timeout(500)
+            else:
+                diagnostico = await SriClienteSyncService._diagnostico_consulta(page)
+                raise RuntimeError(
+                    f"El campo SRI {selector} existe pero no llegó a estar visible. "
+                    + diagnostico
+                )
+
         await page.select_option(selector, value)
 
     @staticmethod
@@ -2744,16 +2781,51 @@ class SriClienteSyncService:
 
             return ultima
 
-        await page.goto(
-            cls.RECIBIDOS_URL,
-            wait_until="domcontentloaded",
-            timeout=30000,
-        )
-        try:
-            await page.wait_for_load_state("load", timeout=20000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(3000)
+        # El SRI puede tardar en construir frmPrincipal después de la
+        # navegación, e incluso puede responder primero con una página
+        # intermedia. Confirmamos el formulario antes de tocar año/mes/día.
+        selector_ano = "#frmPrincipal\\:ano"
+        ultimo_diagnostico = ""
+
+        for intento_navegacion in range(3):
+            try:
+                await page.goto(
+                    cls.RECIBIDOS_URL,
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+            except PlaywrightTimeoutError:
+                # Una navegación que excede el timeout puede haber terminado
+                # parcialmente; verificamos el DOM antes de descartarla.
+                pass
+
+            try:
+                await page.wait_for_load_state("load", timeout=20000)
+            except Exception:
+                pass
+
+            selector = page.locator(selector_ano).first
+            try:
+                await selector.wait_for(state="attached", timeout=15000)
+                await selector.wait_for(state="visible", timeout=15000)
+                break
+            except PlaywrightTimeoutError:
+                ultimo_diagnostico = await cls._diagnostico_consulta(page)
+                logger.warning(
+                    "SRI RECIBIDOS | formulario aún no disponible | intento=%s | %s",
+                    intento_navegacion + 1,
+                    ultimo_diagnostico,
+                )
+                if intento_navegacion < 2:
+                    await page.wait_for_timeout(2000 * (intento_navegacion + 1))
+                    continue
+                raise RuntimeError(
+                    "El SRI no mostró el formulario de comprobantes recibidos "
+                    "con el campo de año (#frmPrincipal:ano). "
+                    + ultimo_diagnostico
+                )
+
+        await page.wait_for_timeout(1000)
 
         # El flujo oficial del SRI debe ser iniciado por el botón.
         # No ejecutamos rcBuscar() manualmente: hacerlo antes del click puede
