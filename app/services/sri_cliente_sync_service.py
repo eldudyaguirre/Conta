@@ -1350,7 +1350,46 @@ class SriClienteSyncService:
         ultimo_renta_por_doc = {}
         iva_pendiente_por_doc = {}
 
-        for tabla in soup.find_all("table"):
+        # El detalle de retenciones está dentro de una tabla anidada.
+        # No recorremos indiscriminadamente todas las tablas porque el
+        # contenedor exterior también contiene las filas del detalle y puede
+        # provocar lecturas duplicadas o asociaciones incorrectas de IVA.
+        tablas_detalle = []
+        tabla_id = "form-detalle-comprobante-retencion:tabla-impuestos-comprobante-retencion"
+        tabla_objetivo = soup.find("table", id=tabla_id)
+        if tabla_objetivo is not None:
+            tablas_detalle = [tabla_objetivo]
+        else:
+            # Respaldo para variantes del HTML: buscamos la tabla que tenga
+            # directamente los encabezados reales del detalle.
+            for tabla in soup.find_all("table"):
+                filas_tabla = tabla.find_all("tr")
+                if any(
+                    "base imponible" in " | ".join(
+                        norm(txt(x)) for x in fila.find_all(["td", "th"])
+                    )
+                    and "valor retenido" in " | ".join(
+                        norm(txt(x)) for x in fila.find_all(["td", "th"])
+                    )
+                    for fila in filas_tabla
+                ):
+                    tablas_detalle.append(tabla)
+
+            # Evitamos repetir el mismo objeto cuando el HTML tiene tablas
+            # anidadas o la misma tabla aparece por más de una ruta.
+            unicas = []
+            vistos = set()
+            for tabla in tablas_detalle:
+                clave_tabla = id(tabla)
+                if clave_tabla not in vistos:
+                    vistos.add(clave_tabla)
+                    unicas.append(tabla)
+            tablas_detalle = unicas
+
+        if not tablas_detalle:
+            tablas_detalle = soup.find_all("table")
+
+        for tabla in tablas_detalle:
             filas = tabla.find_all("tr")
             for pos, fila in enumerate(filas):
                 headers = [norm(txt(x)) for x in fila.find_all(["td", "th"])]
@@ -1576,6 +1615,51 @@ class SriClienteSyncService:
                             bloque_renta["retiva"] += valor
                         else:
                             bloques.append(bloque)
+
+        # El HTML del detalle SRI normalmente NO muestra el campo
+        # "Código Retención". En TotalCounts el código histórico se determina
+        # con la misma regla utilizada por ExtractorPDFRetenciones:
+        #
+        #   0%  -> 332
+        #   1% + IVA -> 343
+        #   1% sin IVA -> 310
+        #   2%  -> 312
+        #   3%  -> 3440
+        #   10% -> 303
+        #
+        # Si una versión futura del SRI entrega explícitamente el código,
+        # lo conservamos y no lo reemplazamos.
+        codigos_renta = {
+            "0": "332",
+            "2": "312",
+            "3": "3440",
+            "10": "303",
+        }
+
+        for bloque in bloques:
+            codigo_actual = str(bloque.get("codigo_retencion") or "").strip()
+            if codigo_actual:
+                continue
+
+            porcentaje_renta = cls._dec(bloque.get("porcentaje"))
+            porcentaje_txt = format(porcentaje_renta, "f").rstrip("0").rstrip(".")
+            if not porcentaje_txt:
+                porcentaje_txt = "0"
+
+            if porcentaje_txt == "1":
+                codigo = "343" if cls._dec(bloque.get("retiva")) > 0 else "310"
+            else:
+                codigo = codigos_renta.get(porcentaje_txt, "000")
+
+            bloque["codigo_retencion"] = codigo
+
+            cls._iva_debug_log(
+                "RETENCION EMITIDA | codigo derivado | numdoc=%s | porcentaje_renta=%s | retiva=%s | codigo=%s",
+                bloque.get("num_doc_sustento"),
+                porcentaje_txt,
+                bloque.get("retiva"),
+                codigo,
+            )
 
         if not bloques:
             raise ValueError("No se encontraron líneas de retención en el detalle SRI.")
