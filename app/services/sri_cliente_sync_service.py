@@ -1854,7 +1854,19 @@ class SriClienteSyncService:
                     try:
                         columnas = await filas.nth(idx).locator("td").all_inner_texts()
                         tipo = " ".join(columnas[1].strip().split()).lower() if len(columnas) >= 2 else ""
-                        if tipo and not (tipo == "07" or tipo.startswith("retención") or tipo.startswith("retencion") or " retención " in f" {tipo} " or " retencion " in f" {tipo} "):
+                        # El SRI puede mostrar el tipo como "07", "Retención"
+                        # o "Comprobante de Retención 001-001-000000001".
+                        # En este último caso "retención" no está al inicio.
+                        tipo_sin_tilde = tipo.replace("retención", "retencion")
+                        es_retencion = (
+                            tipo == "07"
+                            or tipo.startswith("retención")
+                            or tipo.startswith("retencion")
+                            or " retención " in f" {tipo} "
+                            or " retencion " in f" {tipo_sin_tilde} "
+                            or "comprobante de retencion" in tipo_sin_tilde
+                        )
+                        if tipo and not es_retencion:
                             continue
 
                         html = await cls._obtener_detalle_emitido(page, idx)
