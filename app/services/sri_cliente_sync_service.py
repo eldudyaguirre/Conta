@@ -2491,15 +2491,14 @@ class SriClienteSyncService:
             # corregir campos incompletos (especialmente retencionivaXX).
             # Buscamos la misma retención por autorización + código + valor
             # de renta y volvemos a escribir TODOS los campos desde SRI.
+            # La autorización + valor de renta identifican la línea
+            # existente. NO exigimos que codret coincida: precisamente debemos
+            # poder corregir registros antiguos que quedaron con codret vacío
+            # o incorrecto.
             fila_existente = next(
                 (
                     row for row in filas
                     if str(row.get("numautret") or "").strip() == autret
-                    and (
-                        not str(bloque.get("codigo_retencion") or "").strip()
-                        or str(row.get("codret") or "").strip()
-                        == str(bloque.get("codigo_retencion") or "").strip()
-                    )
                     and abs(
                         cls._dec(row.get("valret"))
                         - cls._dec(bloque.get("retrenta"))
@@ -2523,11 +2522,6 @@ class SriClienteSyncService:
                 (
                     row for row in filas
                     if str(row.get("numautret") or "").strip() == autret
-                    and (
-                        not str(bloque.get("codigo_retencion") or "").strip()
-                        or str(row.get("codret") or "").strip()
-                        == str(bloque.get("codigo_retencion") or "").strip()
-                    )
                     and (
                         abs(cls._dec(row.get("valret")) - cls._dec(bloque.get("retrenta")))
                         <= Decimal("0.0001")
