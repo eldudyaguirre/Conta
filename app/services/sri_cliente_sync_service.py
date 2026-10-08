@@ -3608,13 +3608,28 @@ class SriClienteSyncService:
             "baseimpiva14": b["14"], "baseimpiva15": b["15"], "montoiva5": i["5"],
             "montoiva8": i["8"], "montoiva12": i["12"], "montoiva14": i["14"], "montoiva15": i["15"],
         }
-        next_num = db.execute(text("""
-            SELECT COALESCE(MAX(CASE
-                WHEN TRIM(numcompra::text) ~ '^[0-9]+$'
-                THEN TRIM(numcompra::text)::bigint ELSE 0 END), 0) + 1
-            FROM comprasnue
-        """)).scalar_one()
-        values["numcompra"] = str(next_num)
+        # numcompra es el consecutivo oficial de comprasnue y debe
+        # salir SIEMPRE de parametros mediante siguiente_parametro().
+        # No usar MAX(numcompra)+1: el consecutivo de parametros puede estar
+        # adelantado o atrasado respecto de los registros existentes y eso
+        # provoca que facturas y notas de crédito recibidas puedan terminar
+        # compartiendo el mismo numcompra.
+        next_num = db.execute(
+            text("SELECT siguiente_parametro('numcompra')")
+        ).scalar()
+
+        if next_num is None:
+            raise RuntimeError(
+                "No se pudo obtener el consecutivo numcompra desde parametros."
+            )
+
+        next_num = str(next_num).strip()
+        if not next_num:
+            raise RuntimeError(
+                "El consecutivo numcompra obtenido desde parametros está vacío."
+            )
+
+        values["numcompra"] = next_num
         cols = ", ".join(f'"{k}"' if k == "año" else k for k in values)
         params = ", ".join(f":{k}" for k in values)
         _iva_debug_log(
