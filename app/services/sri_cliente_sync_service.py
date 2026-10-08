@@ -1513,53 +1513,59 @@ class SriClienteSyncService:
         }
 
     @classmethod
-    async def _consultar_emitidos(cls, page, anio: int, mes: int) -> None:
+    async def _consultar_emitidos(
+        cls, page, anio: int, mes: int, tipo_emitido: str = "factura"
+    ) -> None:
         """Abre la consulta de comprobantes emitidos.
-        
-        La pantalla del SRI consulta por una fecha exacta, no por todo el mes.
-        La iteración diaria se realiza en _procesar_emitidos_ventas().
+
+        La consulta es la misma para facturas y retenciones. La única
+        diferencia es el tipo de comprobante seleccionado en el formulario.
         """
         await page.get_by_text("Comprobantes electrónicos emitidos", exact=True).click()
         await page.locator("#frmPrincipal\\:calendarFechaDesde_input").wait_for(
             state="visible", timeout=30000
         )
 
+        if tipo_emitido == "retencion":
+            # En emitidos usamos exactamente el mismo formulario de facturas.
+            # Para retenciones únicamente cambiamos el combo Tipo de comprobante.
+            selects = page.locator("select")
+            seleccionado = False
+
+            for idx in range(await selects.count()):
+                combo = selects.nth(idx)
+                try:
+                    opciones = await combo.locator("option").evaluate_all(
+                        "(els) => els.map(o => ({value:o.value, text:(o.textContent || '').trim()}))"
+                    )
+                except Exception:
+                    continue
+
+                for opcion in opciones:
+                    texto = " ".join(str(opcion["text"]).lower().split())
+                    if (
+                        "comprobante de retención" in texto
+                        or "comprobante de retencion" in texto
+                    ):
+                        await combo.select_option(value=str(opcion["value"]))
+                        seleccionado = True
+                        break
+
+                if seleccionado:
+                    break
+
+            if not seleccionado:
+                raise RuntimeError(
+                    "No se encontró la opción 'Comprobante de Retención' "
+                    "en el selector Tipo de comprobante de emitidos."
+                )
     @classmethod
     async def _consultar_emitidos_dia(cls, page, fecha) -> int:
         """Consulta un día concreto y devuelve el número de filas de resultados."""
         selector_fecha = "#frmPrincipal\\:calendarFechaDesde_input"
         selector_tabla = "#frmPrincipal\\:tablaCompEmitidos_data tr"
 
-        fecha_texto = fecha.strftime("%d/%m/%Y")
-        campo_fecha = page.locator(selector_fecha)
-
-        # O SRI usa un datepicker PrimeFaces. Un fill() simples nem sempre
-        # atualiza o estado JavaScript do componente, fazendo o SRI continuar
-        # consultando a data anterior. Escrevemos como usuário e disparamos
-        # os eventos de input/change antes de consultar.
-        await campo_fecha.click()
-        await campo_fecha.press("Control+A")
-        await campo_fecha.fill(fecha_texto)
-        await campo_fecha.press("Tab")
-        await page.wait_for_timeout(300)
-
-        # Confirma que o valor que o navegador exibe é realmente o dia que
-        # estamos processando. Se o datepicker não aceitar o primeiro método,
-        # tenta novamente simulando digitação real.
-        valor_fecha = await campo_fecha.input_value()
-        if valor_fecha != fecha_texto:
-            await campo_fecha.click()
-            await campo_fecha.press("Control+A")
-            await campo_fecha.press_sequentially(fecha_texto, delay=30)
-            await campo_fecha.press("Tab")
-            await page.wait_for_timeout(300)
-            valor_fecha = await campo_fecha.input_value()
-
-        if valor_fecha != fecha_texto:
-            raise RuntimeError(
-                f"El SRI no aceptó la fecha solicitada. "
-                f"Solicitada={fecha_texto}; mostrada={valor_fecha!r}"
-            )
+        await page.locator(selector_fecha).fill(fecha.strftime("%d/%m/%Y"))
 
         # Guardamos una referencia al primer resultado para poder esperar el AJAX.
         filas = page.locator(selector_tabla)
@@ -2687,7 +2693,12 @@ class SriClienteSyncService:
             p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"])
             cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI. Si aparece CAPTCHA, resuélvalo en Chromium.")
             if operacion in ("ventas", "notas_credito_emitidas", "retenciones_emitidas"):
-                await cls._consultar_emitidos(page, anio, mes)
+                await cls._consultar_emitidos(
+                    page,
+                    anio,
+                    mes,
+                    tipo_emitido="retencion" if operacion == "retenciones_emitidas" else "factura",
+                )
             else:
                 filas_recibidos = await cls._consultar_recibidos(
                     page, anio, mes, tipo_comprobante
