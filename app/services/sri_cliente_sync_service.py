@@ -1471,7 +1471,8 @@ class SriClienteSyncService:
                 if not textos:
                     continue
 
-                if max(idx.values()) >= len(textos):
+                indices_validos = [v for v in idx.values() if v is not None]
+                if not indices_validos or max(indices_validos) >= len(textos):
                     continue
 
                 impuesto_norm = norm(textos[idx["impuesto"]])
