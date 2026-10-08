@@ -2993,12 +2993,55 @@ class SriClienteSyncService:
                     for idx in range(total_links):
                         factura = None
                         try:
-                            # Mantener el mismo selector usado para detectar los
-                            # enlaces. El SRI puede cambiar el id exacto de lnkXml.
-                            enlace_xml = links.nth(idx)
-                            async with page.expect_download(timeout=30000) as info:
-                                await enlace_xml.click()
-                            download = await info.value
+                            # El SRI puede tardar en liberar el AJAX de la fila
+                            # anterior. Reconsultamos el locator en cada intento
+                            # y esperamos a que el enlace sea realmente visible
+                            # antes de hacer click.
+                            download = None
+                            ultimo_error = None
+
+                            for intento in range(3):
+                                try:
+                                    enlaces_actuales = page.locator(
+                                        'a[id*="lnkXml"], a[id$=":lnkXml"], input[id*="lnkXml"], '
+                                        'button[id*="lnkXml"], a[title*="XML"], a[href*="xml"]'
+                                    )
+                                    if await enlaces_actuales.count() <= idx:
+                                        raise RuntimeError(
+                                            f"No se encontró el enlace XML de la fila {idx + 1}."
+                                        )
+
+                                    enlace_xml = enlaces_actuales.nth(idx)
+                                    await enlace_xml.scroll_into_view_if_needed(timeout=10000)
+                                    await enlace_xml.wait_for(state="visible", timeout=10000)
+
+                                    async with page.expect_download(timeout=15000) as info:
+                                        try:
+                                            await enlace_xml.click(timeout=10000)
+                                        except Exception:
+                                            # En el último intento permitimos el
+                                            # click forzado si PrimeFaces dejó un
+                                            # overlay momentáneo sobre la fila.
+                                            if intento < 2:
+                                                raise
+                                            await enlace_xml.click(
+                                                force=True,
+                                                timeout=10000,
+                                            )
+
+                                    download = await info.value
+                                    break
+
+                                except Exception as exc:
+                                    ultimo_error = exc
+                                    await page.wait_for_timeout(1500 * (intento + 1))
+
+                            if download is None:
+                                raise RuntimeError(
+                                    f"No se pudo descargar el XML de la fila {idx + 1} "
+                                    f"después de 3 intentos: {ultimo_error}"
+                                )
+
                             with tempfile.TemporaryDirectory(prefix="conta_sri_") as tmp:
                                 path = Path(tmp) / download.suggested_filename
                                 await download.save_as(str(path))
