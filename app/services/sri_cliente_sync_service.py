@@ -2261,6 +2261,44 @@ class SriClienteSyncService:
             }).mappings().all()
             return [dict(row) for row in rows]
 
+        def valores_iva_esperados(bloque: dict[str, Any]) -> dict[str, Decimal]:
+            iva_porcentajes = bloque.get("retiva_porcentajes") or {}
+            esperados = {
+                "10": Decimal("0"),
+                "20": Decimal("0"),
+                "30": Decimal("0"),
+                "70": Decimal("0"),
+                "100": Decimal("0"),
+            }
+            for tasa, valor in iva_porcentajes.items():
+                tasa_decimal = cls._dec(tasa)
+                if tasa_decimal == tasa_decimal.to_integral_value():
+                    tasa_norm = str(int(tasa_decimal))
+                else:
+                    tasa_norm = format(tasa_decimal, "f").rstrip("0").rstrip(".")
+                if tasa_norm in esperados:
+                    esperados[tasa_norm] += cls._dec(valor)
+
+            if not iva_porcentajes and bloque.get("retiva"):
+                tasa_decimal = cls._dec(bloque.get("porcentaje"))
+                if tasa_decimal == tasa_decimal.to_integral_value():
+                    tasa_norm = str(int(tasa_decimal))
+                else:
+                    tasa_norm = format(tasa_decimal, "f").rstrip("0").rstrip(".")
+                if tasa_norm in esperados:
+                    esperados[tasa_norm] = cls._dec(bloque.get("retiva"))
+
+            return esperados
+
+        def fila_tiene_iva_correcto(row: dict[str, Any], bloque: dict[str, Any]) -> bool:
+            esperados = valores_iva_esperados(bloque)
+            for tasa, esperado in esperados.items():
+                campo = iva_fields[tasa]
+                actual = cls._dec(row.get(campo))
+                if abs(actual - esperado) > Decimal("0.0001"):
+                    return False
+            return True
+
         def ya_registrada(rows: list[dict[str, Any]], bloque: dict[str, Any]) -> bool:
             codigo = str(bloque.get("codigo_retencion") or "").strip()
             valor = cls._dec(bloque.get("retrenta"))
@@ -2270,6 +2308,8 @@ class SriClienteSyncService:
                 if codigo and str(row.get("codret") or "").strip() != codigo:
                     continue
                 if codigo and abs(cls._dec(row.get("valret")) - valor) > Decimal("0.0001"):
+                    continue
+                if not fila_tiene_iva_correcto(row, bloque):
                     continue
                 return True
             return False
@@ -2413,6 +2453,27 @@ class SriClienteSyncService:
             # Para la primera renta usamos una compra limpia. Para una segunda
             # renta de la misma factura, duplicamos el registro como hacía el
             # módulo VB6. Nunca sobrescribimos una renta distinta ya guardada.
+            # Si ya existe la misma retención pero quedó incompleta
+            # (por ejemplo CodRet y ValRet correctos, pero RetIVA70=0),
+            # actualizamos ESA misma fila. No debemos clonarla.
+            fila_incompleta = next(
+                (
+                    row for row in filas
+                    if str(row.get("numautret") or "").strip() == autret
+                    and (
+                        not str(bloque.get("codigo_retencion") or "").strip()
+                        or str(row.get("codret") or "").strip()
+                        == str(bloque.get("codigo_retencion") or "").strip()
+                    )
+                    and (
+                        abs(cls._dec(row.get("valret")) - cls._dec(bloque.get("retrenta")))
+                        <= Decimal("0.0001")
+                    )
+                    and not fila_tiene_iva_correcto(row, bloque)
+                ),
+                None,
+            )
+
             template = next(
                 (
                     row for row in filas
@@ -2423,15 +2484,18 @@ class SriClienteSyncService:
             )
 
             if es_renta:
-                fila_objetivo = template
-                if str(template.get("numautret") or "").strip():
-                    fila_objetivo = clonar_compra(template)
-                elif any(
-                    str(row.get("numautret") or "").strip() == autret
-                    and str(row.get("codret") or "").strip()
-                    for row in filas
-                ):
-                    fila_objetivo = clonar_compra(template)
+                if fila_incompleta is not None:
+                    fila_objetivo = fila_incompleta
+                else:
+                    fila_objetivo = template
+                    if str(template.get("numautret") or "").strip():
+                        fila_objetivo = clonar_compra(template)
+                    elif any(
+                        str(row.get("numautret") or "").strip() == autret
+                        and str(row.get("codret") or "").strip()
+                        for row in filas
+                    ):
+                        fila_objetivo = clonar_compra(template)
 
                 actualizar_fila(fila_objetivo, bloque)
                 actualizadas += 1
