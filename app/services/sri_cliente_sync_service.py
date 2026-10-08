@@ -1347,36 +1347,26 @@ class SriClienteSyncService:
         # bloque nuevo y las filas de IVA siguientes se asocian al último
         # bloque de renta de esa misma factura.
         bloques = []
-        ultimo_renta_por_doc = {}
-        iva_pendiente_por_doc = {}
+        # Parseamos el detalle por NUMERO DE DOCUMENTO DE SUSTENTO.
+        # No dependemos del orden IVA -> RENTA: el SRI puede devolver las filas
+        # en cualquier orden y una retención puede tener varias líneas IVA.
+        filas_por_doc = {}
 
-        # El detalle de retenciones está dentro de una tabla anidada.
-        # No recorremos indiscriminadamente todas las tablas porque el
-        # contenedor exterior también contiene las filas del detalle y puede
-        # provocar lecturas duplicadas o asociaciones incorrectas de IVA.
         tablas_detalle = []
         tabla_id = "form-detalle-comprobante-retencion:tabla-impuestos-comprobante-retencion"
         tabla_objetivo = soup.find("table", id=tabla_id)
         if tabla_objetivo is not None:
             tablas_detalle = [tabla_objetivo]
         else:
-            # Respaldo para variantes del HTML: buscamos la tabla que tenga
-            # directamente los encabezados reales del detalle.
             for tabla in soup.find_all("table"):
                 filas_tabla = tabla.find_all("tr")
                 if any(
-                    "base imponible" in " | ".join(
-                        norm(txt(x)) for x in fila.find_all(["td", "th"])
-                    )
-                    and "valor retenido" in " | ".join(
-                        norm(txt(x)) for x in fila.find_all(["td", "th"])
-                    )
+                    "base imponible" in " | ".join(norm(txt(x)) for x in fila.find_all(["td", "th"]))
+                    and "valor retenido" in " | ".join(norm(txt(x)) for x in fila.find_all(["td", "th"]))
                     for fila in filas_tabla
                 ):
                     tablas_detalle.append(tabla)
 
-            # Evitamos repetir el mismo objeto cuando el HTML tiene tablas
-            # anidadas o la misma tabla aparece por más de una ruta.
             unicas = []
             vistos = set()
             for tabla in tablas_detalle:
@@ -1386,11 +1376,11 @@ class SriClienteSyncService:
                     unicas.append(tabla)
             tablas_detalle = unicas
 
-        if not tablas_detalle:
-            tablas_detalle = soup.find_all("table")
-
         for tabla in tablas_detalle:
             filas = tabla.find_all("tr")
+            encabezado_idx = None
+            idx = None
+
             for pos, fila in enumerate(filas):
                 headers = [norm(txt(x)) for x in fila.find_all(["td", "th"])]
                 joined = " | ".join(headers)
@@ -1422,104 +1412,114 @@ class SriClienteSyncService:
                     "doc": next(
                         (i for i, x in enumerate(headers)
                          if "numero" in x
-                         or "documento sustento" in x or "numdoc" in x),
+                         or "documento sustento" in x
+                         or "numdoc" in x),
                         None,
                     ),
                 }
-                if idx["base"] is None or idx["valor"] is None:
+                if idx["impuesto"] is None or idx["base"] is None or idx["por"] is None or idx["valor"] is None:
                     continue
 
-                for fila_dato in filas[pos + 1:]:
-                    textos = [txt(x) for x in fila_dato.find_all(["td", "th"])]
-                    if not textos:
-                        continue
+                encabezado_idx = pos
+                break
 
-                    indices = [i for i in idx.values() if i is not None]
-                    if not indices or max(indices) >= len(textos):
-                        continue
+            if encabezado_idx is None or idx is None:
+                continue
 
-                    impuesto = (
-                        textos[idx["impuesto"]]
-                        if idx["impuesto"] is not None else ""
-                    )
-                    codigo = (
-                        textos[idx["codigo"]]
-                        if idx["codigo"] is not None else ""
-                    )
-                    base = cls._dec(textos[idx["base"]])
-                    porcentaje = (
-                        cls._dec(re.sub(r"[^0-9.,-]", "", textos[idx["por"]]))
-                        if idx["por"] is not None else Decimal("0")
-                    )
-                    valor = cls._dec(textos[idx["valor"]])
+            for fila_dato in filas[encabezado_idx + 1:]:
+                textos = [txt(x) for x in fila_dato.find_all(["td", "th"])]
+                if not textos:
+                    continue
 
-                    texto_doc = (
-                        textos[idx["doc"]]
-                        if idx["doc"] is not None
-                        else " ".join(textos)
-                    )
+                indices = [i for i in idx.values() if i is not None]
+                if not indices or max(indices) >= len(textos):
+                    continue
+
+                impuesto = textos[idx["impuesto"]].strip()
+                impuesto_norm = norm(impuesto)
+                es_iva = "iva" in impuesto_norm
+                es_renta = "renta" in impuesto_norm
+                if not (es_iva or es_renta):
+                    continue
+
+                texto_doc = textos[idx["doc"]] if idx["doc"] is not None else " ".join(textos)
+                md = re.search(
+                    r"\\d{3}\\s*[- ]\\s*\\d{3}\\s*[- ]\\s*\\d{9}|\\b\\d{15}\\b",
+                    texto_doc,
+                )
+                if not md:
                     md = re.search(
-                        r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
-                        texto_doc,
+                        r"\\d{3}\\s*[- ]\\s*\\d{3}\\s*[- ]\\s*\\d{9}|\\b\\d{15}\\b",
+                        " ".join(textos),
                     )
-                    if not md:
-                        md = re.search(
-                            r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
-                            " ".join(textos),
-                        )
-                    if not md:
-                        continue
+                if not md:
+                    continue
 
-                    numdoc = re.sub(r"\D", "", md.group(0))
-                    if len(numdoc) != 15:
-                        continue
+                numdoc = re.sub(r"\\D", "", md.group(0))
+                if len(numdoc) != 15:
+                    continue
 
-                    es_iva = "iva" in norm(impuesto)
-                    es_renta = "renta" in norm(impuesto)
+                base = cls._dec(textos[idx["base"]])
+                porcentaje = cls._dec(
+                    re.sub(r"[^0-9.,-]", "", textos[idx["por"]])
+                )
+                valor = cls._dec(textos[idx["valor"]])
 
-                    if es_renta:
-                        bloque = {
-                            "num_doc_sustento": numdoc,
-                            "codigo_retencion": re.sub(r"\D", "", codigo),
-                            "base": base,
-                            "porcentaje": porcentaje,
-                            "retrenta": valor,
-                            "retiva": Decimal("0"),
-                            "retiva_porcentajes": {},
-                        }
-                        bloques.append(bloque)
-                        ultimo_renta_por_doc[numdoc] = bloque
+                codigo = ""
+                if idx["codigo"] is not None:
+                    codigo = re.sub(r"\\D", "", textos[idx["codigo"]])
 
-                        # Si por alguna variante del HTML apareció un IVA antes
-                        # de la renta, lo asociamos ahora al bloque recién creado.
-                        for tasa, iva_valor in iva_pendiente_por_doc.pop(numdoc, {}).items():
-                            bloque["retiva_porcentajes"][tasa] = (
-                                bloque["retiva_porcentajes"].get(tasa, Decimal("0"))
-                                + iva_valor
-                            )
-                            bloque["retiva"] += iva_valor
+                registro = {
+                    "impuesto": "IVA" if es_iva else "RENTA",
+                    "codigo_retencion": codigo,
+                    "base": base,
+                    "porcentaje": porcentaje,
+                    "valor": valor,
+                }
+                filas_por_doc.setdefault(numdoc, []).append(registro)
 
-                    elif es_iva:
-                        if porcentaje == porcentaje.to_integral_value():
-                            tasa_txt = str(int(porcentaje))
-                        else:
-                            tasa_txt = format(porcentaje, "f").rstrip("0").rstrip(".")
-                        if not tasa_txt:
-                            tasa_txt = "0"
+        # Convertimos las líneas del SRI en bloques de RENTA. Cada bloque
+        # recibe TODAS las líneas IVA del mismo documento de sustento.
+        bloques = []
+        for numdoc, lineas in filas_por_doc.items():
+            lineas_renta = [x for x in lineas if x["impuesto"] == "RENTA"]
+            lineas_iva = [x for x in lineas if x["impuesto"] == "IVA"]
 
-                        bloque = ultimo_renta_por_doc.get(numdoc)
-                        if bloque is None:
-                            pendiente = iva_pendiente_por_doc.setdefault(numdoc, {})
-                            pendiente[tasa_txt] = pendiente.get(
-                                tasa_txt, Decimal("0")
-                            ) + valor
-                        else:
-                            bloque["retiva_porcentajes"][tasa_txt] = (
-                                bloque["retiva_porcentajes"].get(
-                                    tasa_txt, Decimal("0")
-                                ) + valor
-                            )
-                            bloque["retiva"] += valor
+            iva_porcentajes = {}
+            for linea in lineas_iva:
+                porcentaje = linea["porcentaje"]
+                tasa = (
+                    str(int(porcentaje))
+                    if porcentaje == porcentaje.to_integral_value()
+                    else format(porcentaje, "f").rstrip("0").rstrip(".")
+                )
+                if tasa:
+                    iva_porcentajes[tasa] = (
+                        iva_porcentajes.get(tasa, Decimal("0"))
+                        + linea["valor"]
+                    )
+
+            if lineas_renta:
+                for renta in lineas_renta:
+                    bloques.append({
+                        "num_doc_sustento": numdoc,
+                        "codigo_retencion": renta["codigo_retencion"],
+                        "base": renta["base"],
+                        "porcentaje": renta["porcentaje"],
+                        "retrenta": renta["valor"],
+                        "retiva": sum(iva_porcentajes.values(), Decimal("0")),
+                        "retiva_porcentajes": dict(iva_porcentajes),
+                    })
+            elif lineas_iva:
+                bloques.append({
+                    "num_doc_sustento": numdoc,
+                    "codigo_retencion": "",
+                    "base": Decimal("0"),
+                    "porcentaje": Decimal("0"),
+                    "retrenta": Decimal("0"),
+                    "retiva": sum(iva_porcentajes.values(), Decimal("0")),
+                    "retiva_porcentajes": dict(iva_porcentajes),
+                })
 
         # Si una retención trae solamente IVA, no perdemos el documento.
         for numdoc, tasas in iva_pendiente_por_doc.items():
