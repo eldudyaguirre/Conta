@@ -940,21 +940,82 @@ class SriClienteSyncService:
             await login_button.wait_for(state="visible", timeout=30000)
             await login_button.click(force=True)
 
-            await page.wait_for_timeout(1500)
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=5000)
-            except Exception:
-                pass
+            # Keycloak/SRI puede tardar varios segundos en completar el
+            # redirect. No basta con esperar 1.5 s: si navegamos al portal
+            # demasiado pronto, el portal vuelve a enviarnos al login y luego
+            # el formulario de comprobantes nunca llega a construirse.
+            login_ok = False
+            limite_login = time.monotonic() + 45
 
-            if "perfil" in page.url and await page.locator("#password").count():
-                raise ValueError("El SRI no aceptó las credenciales del cliente.")
+            while time.monotonic() < limite_login:
+                await page.wait_for_timeout(500)
 
+                url_actual = page.url.lower()
+                try:
+                    tiene_password = await page.locator("#password:visible").count() > 0
+                except Exception:
+                    tiene_password = False
+
+                # El login correcto termina en el perfil/portal del SRI,
+                # no en /auth/realms/.../login.
+                if "auth/realms/" not in url_actual and "kc-login" not in url_actual:
+                    if "perfil" in url_actual or "tuportal-internet" in url_actual:
+                        login_ok = True
+                        break
+
+                if tiene_password:
+                    # Seguimos esperando por si Keycloak todavía está
+                    # procesando el submit; si permanece aquí hasta el timeout,
+                    # lo reportaremos como credenciales/sesión no aceptadas.
+
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=1000)
+                except Exception:
+                    pass
+
+            if not login_ok:
+                url_actual = page.url
+                texto_login = ""
+                try:
+                    texto_login = " ".join(
+                        (await page.locator("body").inner_text(timeout=3000)).split()
+                    )[:1000]
+                except Exception:
+                    pass
+
+                raise ValueError(
+                    "El SRI no completó el inicio de sesión después de 45 segundos. "
+                    f"URL={url_actual}; texto={texto_login!r}"
+                )
+
+            # Ahora que la sesión está establecida, entramos al portal de
+            # comprobantes. Si el SSO vuelve a redirigir al login, no seguimos
+            # como si la sesión fuese válida.
             await page.goto(
                 cls.PORTAL_URL,
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
-            return p, browser, context, page, chrome_process
+
+            limite_portal = time.monotonic() + 30
+            while time.monotonic() < limite_portal:
+                await page.wait_for_timeout(500)
+                url_actual = page.url.lower()
+
+                if "auth/realms/" in url_actual and "login" in url_actual:
+                    continue
+
+                if (
+                    "tuportal-internet" in url_actual
+                    or "comprobantes-electronicos-internet" in url_actual
+                    or "perfil" in url_actual
+                ):
+                    return p, browser, context, page, chrome_process
+
+            raise RuntimeError(
+                "El SRI autenticó la sesión pero no permitió acceder al portal "
+                f"de comprobantes. URL final={page.url}"
+            )
 
         except Exception:
             if browser is not None:
