@@ -1261,12 +1261,16 @@ class SriClienteSyncService:
 
     @classmethod
     def _parsear_retencion_emitida_html(cls, html: str) -> dict[str, Any]:
-        """Parsea una retención emitida del SRI conservando cada bloque de renta.
+        """Parsea el detalle real de una retención emitida del SRI.
 
-        Una misma retención puede contener varias retenciones de renta para la
-        misma factura. El sistema legacy representa cada renta en un registro
-        independiente de comprasnue y asocia al mismo registro el IVA que
-        corresponde a ese bloque de renta.
+        El detalle del SRI tiene las columnas:
+            Nro | Impuesto | Base Imponible | Porcentaje Retenido |
+            Valor Retenido | Número Doc. Sustento | Fecha Doc. Sustento
+
+        Las líneas se agrupan por Número Doc. Sustento. Dentro de cada
+        documento se relaciona la primera línea IVA con la primera RENTA,
+        la segunda IVA con la segunda RENTA, etc. Esto permite guardar
+        correctamente retenciones múltiples sobre una misma factura.
         """
         from bs4 import BeautifulSoup
         import re
@@ -1282,10 +1286,14 @@ class SriClienteSyncService:
                 .lower()
                 .replace(":", " ")
                 .replace("á", "a").replace("é", "e")
-                .replace("í", "i").replace("ó", "o").replace("ú", "u")
+                .replace("í", "i").replace("ó", "o")
+                .replace("ú", "u")
                 .split()
             )
 
+        # ---------------------------------------------------------------
+        # Datos generales del comprobante de retención
+        # ---------------------------------------------------------------
         pares = []
         for tabla in soup.find_all("table"):
             for fila in tabla.find_all("tr"):
@@ -1308,10 +1316,15 @@ class SriClienteSyncService:
         mf = re.search(r"\d{2}/\d{2}/\d{4}", fecha_txt)
         if mf:
             fecha_txt = mf.group(0)
+        if not fecha_txt:
+            raise ValueError("La retención no contiene Fecha de Emisión.")
         fecha = datetime.strptime(fecha_txt, "%d/%m/%Y")
 
         def comp(valor):
-            m = re.search(r"(\d{3})\s*[- ]\s*(\d{3})\s*[- ]\s*(\d{9})", str(valor or ""))
+            m = re.search(
+                r"(\d{3})\s*[- ]\s*(\d{3})\s*[- ]\s*(\d{9})",
+                str(valor or ""),
+            )
             if not m:
                 m = re.search(r"\b(\d{3})(\d{3})(\d{9})\b", str(valor or ""))
             return m.groups() if m else ("", "", "")
@@ -1319,14 +1332,21 @@ class SriClienteSyncService:
         numest = buscar(["Establecimiento"])
         numptoemi = buscar(["Punto de Emisión", "Punto Emisión"])
         numsec = buscar(["Secuencial"])
+
         ne, np, ns = comp(
-            buscar(["Número de Comprobante", "Numero de Comprobante", "Comprobante"])
+            buscar([
+                "Número de Comprobante",
+                "Numero de Comprobante",
+                "Comprobante",
+            ])
         )
         numest, numptoemi, numsec = numest or ne, numptoemi or np, numsec or ns
 
         clave = buscar(["Clave de Acceso", "Clave acceso"])
         autorizacion = buscar([
-            "Número de Autorización", "Numero de Autorización", "Autorización"
+            "Número de Autorización",
+            "Numero de Autorización",
+            "Autorización",
         ])
         ruc = buscar([
             "Identificación Sujeto Retenido",
@@ -1340,41 +1360,44 @@ class SriClienteSyncService:
             "Proveedor",
         ])
 
-        # Cada fila del detalle SRI es una retención individual. El patrón
-        # real puede ser, por ejemplo:
-        #   Renta 3% -> IVA 70% -> Renta 2% -> IVA 30%
-        # Por eso NO agrupamos todo por factura. Cada fila de renta abre un
-        # bloque nuevo y las filas de IVA siguientes se asocian al último
-        # bloque de renta de esa misma factura.
-        bloques = []
-        # Parseamos el detalle por NUMERO DE DOCUMENTO DE SUSTENTO.
-        # No dependemos del orden IVA -> RENTA: el SRI puede devolver las filas
-        # en cualquier orden y una retención puede tener varias líneas IVA.
-        filas_por_doc = {}
+        # ---------------------------------------------------------------
+        # Localizar la tabla REAL del detalle de retención.
+        # ---------------------------------------------------------------
+        tabla_objetivo = soup.find(
+            "table",
+            id="form-detalle-comprobante-retencion:tabla-impuestos-comprobante-retencion",
+        )
 
-        tablas_detalle = []
-        tabla_id = "form-detalle-comprobante-retencion:tabla-impuestos-comprobante-retencion"
-        tabla_objetivo = soup.find("table", id=tabla_id)
-        if tabla_objetivo is not None:
-            tablas_detalle = [tabla_objetivo]
-        else:
+        tablas_detalle = [tabla_objetivo] if tabla_objetivo is not None else []
+
+        if not tablas_detalle:
             for tabla in soup.find_all("table"):
                 filas_tabla = tabla.find_all("tr")
-                if any(
-                    "base imponible" in " | ".join(norm(txt(x)) for x in fila.find_all(["td", "th"]))
-                    and "valor retenido" in " | ".join(norm(txt(x)) for x in fila.find_all(["td", "th"]))
-                    for fila in filas_tabla
-                ):
-                    tablas_detalle.append(tabla)
+                for fila in filas_tabla:
+                    headers = [norm(txt(x)) for x in fila.find_all(["td", "th"])]
+                    joined = " | ".join(headers)
+                    if (
+                        "impuesto" in joined
+                        and "base imponible" in joined
+                        and "porcentaje retenido" in joined
+                        and "valor retenido" in joined
+                        and (
+                            "numero doc" in joined
+                            or "documento sustento" in joined
+                        )
+                    ):
+                        tablas_detalle.append(tabla)
+                        break
 
-            unicas = []
-            vistos = set()
-            for tabla in tablas_detalle:
-                clave_tabla = id(tabla)
-                if clave_tabla not in vistos:
-                    vistos.add(clave_tabla)
-                    unicas.append(tabla)
-            tablas_detalle = unicas
+        if not tablas_detalle:
+            raise ValueError(
+                "No se encontró la tabla de impuestos del comprobante de retención."
+            )
+
+        # ---------------------------------------------------------------
+        # Leer las columnas por NOMBRE, nunca por posición fija.
+        # ---------------------------------------------------------------
+        filas_por_doc: dict[str, list[dict[str, Any]]] = {}
 
         for tabla in tablas_detalle:
             filas = tabla.find_all("tr")
@@ -1383,45 +1406,62 @@ class SriClienteSyncService:
 
             for pos, fila in enumerate(filas):
                 headers = [norm(txt(x)) for x in fila.find_all(["td", "th"])]
-                joined = " | ".join(headers)
-                if "base imponible" not in joined or "valor retenido" not in joined:
+                if not headers:
                     continue
 
-                idx = {
+                idx_local = {
                     "impuesto": next(
-                        (i for i, x in enumerate(headers) if "impuesto" in x), None
-                    ),
-                    "codigo": next(
-                        (i for i, x in enumerate(headers)
-                         if "codigo retencion" in x or x == "codigo" or "codigo" in x),
+                        (i for i, x in enumerate(headers) if x == "impuesto"),
                         None,
                     ),
                     "base": next(
-                        (i for i, x in enumerate(headers) if "base imponible" in x), None
+                        (i for i, x in enumerate(headers) if "base imponible" in x),
+                        None,
                     ),
                     "por": next(
-                        (i for i, x in enumerate(headers)
-                         if "porcentaje" in x or "tarifa" in x),
+                        (
+                            i for i, x in enumerate(headers)
+                            if "porcentaje retenido" in x
+                            or x == "porcentaje"
+                            or "tarifa" in x
+                        ),
                         None,
                     ),
                     "valor": next(
-                        (i for i, x in enumerate(headers)
-                         if "valor retenido" in x or x == "valor"),
+                        (
+                            i for i, x in enumerate(headers)
+                            if "valor retenido" in x
+                            or x == "valor"
+                        ),
                         None,
                     ),
                     "doc": next(
-                        (i for i, x in enumerate(headers)
-                         if "numero" in x
-                         or "documento sustento" in x
-                         or "numdoc" in x),
+                        (
+                            i for i, x in enumerate(headers)
+                            if "numero doc" in x
+                            or "numero de doc" in x
+                            or "documento sustento" in x
+                            or "numdoc" in x
+                        ),
+                        None,
+                    ),
+                    "fecha_doc": next(
+                        (
+                            i for i, x in enumerate(headers)
+                            if "fecha doc" in x
+                            or "fecha documento" in x
+                        ),
                         None,
                     ),
                 }
-                if idx["impuesto"] is None or idx["base"] is None or idx["por"] is None or idx["valor"] is None:
-                    continue
 
-                encabezado_idx = pos
-                break
+                if all(
+                    idx_local[k] is not None
+                    for k in ("impuesto", "base", "por", "valor", "doc")
+                ):
+                    encabezado_idx = pos
+                    idx = idx_local
+                    break
 
             if encabezado_idx is None or idx is None:
                 continue
@@ -1431,18 +1471,16 @@ class SriClienteSyncService:
                 if not textos:
                     continue
 
-                indices = [i for i in idx.values() if i is not None]
-                if not indices or max(indices) >= len(textos):
+                if max(idx.values()) >= len(textos):
                     continue
 
-                impuesto = textos[idx["impuesto"]].strip()
-                impuesto_norm = norm(impuesto)
-                es_iva = "iva" in impuesto_norm
-                es_renta = "renta" in impuesto_norm
+                impuesto_norm = norm(textos[idx["impuesto"]])
+                es_iva = impuesto_norm == "iva"
+                es_renta = impuesto_norm == "renta"
                 if not (es_iva or es_renta):
                     continue
 
-                texto_doc = textos[idx["doc"]] if idx["doc"] is not None else " ".join(textos)
+                texto_doc = textos[idx["doc"]]
                 md = re.search(
                     r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
                     texto_doc,
@@ -1459,240 +1497,33 @@ class SriClienteSyncService:
                 if len(numdoc) != 15:
                     continue
 
-                base = cls._dec(textos[idx["base"]])
                 porcentaje = cls._dec(
                     re.sub(r"[^0-9.,-]", "", textos[idx["por"]])
                 )
                 valor = cls._dec(textos[idx["valor"]])
+                base = cls._dec(textos[idx["base"]])
 
-                codigo = ""
-                if idx["codigo"] is not None:
-                    codigo = re.sub(r"\D", "", textos[idx["codigo"]])
+                fecha_doc = ""
+                if idx["fecha_doc"] is not None:
+                    fecha_doc = textos[idx["fecha_doc"]]
 
-                registro = {
+                filas_por_doc.setdefault(numdoc, []).append({
                     "impuesto": "IVA" if es_iva else "RENTA",
-                    "codigo_retencion": codigo,
                     "base": base,
                     "porcentaje": porcentaje,
                     "valor": valor,
-                }
-                filas_por_doc.setdefault(numdoc, []).append(registro)
-
-        # Convertimos las líneas del SRI en bloques de RENTA. Cada bloque
-        # recibe TODAS las líneas IVA del mismo documento de sustento.
-        bloques = []
-        for numdoc, lineas in filas_por_doc.items():
-            lineas_renta = [x for x in lineas if x["impuesto"] == "RENTA"]
-            lineas_iva = [x for x in lineas if x["impuesto"] == "IVA"]
-
-            iva_porcentajes = {}
-            for linea in lineas_iva:
-                porcentaje = linea["porcentaje"]
-                tasa = (
-                    str(int(porcentaje))
-                    if porcentaje == porcentaje.to_integral_value()
-                    else format(porcentaje, "f").rstrip("0").rstrip(".")
-                )
-                if tasa:
-                    iva_porcentajes[tasa] = (
-                        iva_porcentajes.get(tasa, Decimal("0"))
-                        + linea["valor"]
-                    )
-
-            if lineas_renta:
-                for renta in lineas_renta:
-                    bloques.append({
-                        "num_doc_sustento": numdoc,
-                        "codigo_retencion": renta["codigo_retencion"],
-                        "base": renta["base"],
-                        "porcentaje": renta["porcentaje"],
-                        "retrenta": renta["valor"],
-                        "retiva": sum(iva_porcentajes.values(), Decimal("0")),
-                        "retiva_porcentajes": dict(iva_porcentajes),
-                    })
-            elif lineas_iva:
-                bloques.append({
-                    "num_doc_sustento": numdoc,
-                    "codigo_retencion": "",
-                    "base": Decimal("0"),
-                    "porcentaje": Decimal("0"),
-                    "retrenta": Decimal("0"),
-                    "retiva": sum(iva_porcentajes.values(), Decimal("0")),
-                    "retiva_porcentajes": dict(iva_porcentajes),
+                    "fecha_doc_sustento": fecha_doc,
                 })
 
-        # Fallback para variantes del HTML del SRI donde los encabezados
-        # y las filas vienen en tablas separadas o cambian ligeramente.
-        # Estructura habitual:
-        # Comprobante | Número | Fecha | Periodo | Base | Código | Impuesto | % | Valor
-        if not bloques:
-            # Fallback legacy: conserva la asociación IVA/Renta cuando el
-            # HTML alternativo del SRI separa las filas.
-            ultimo_renta_por_doc = {}
-            for tabla in soup.find_all("table"):
-                for fila in tabla.find_all("tr"):
-                    textos = [txt(x) for x in fila.find_all(["td", "th"])]
-                    textos = [x for x in textos if x]
-                    if len(textos) < 5:
-                        continue
+        if not filas_por_doc:
+            raise ValueError(
+                "No se encontraron líneas IVA/RENTA en el detalle SRI."
+            )
 
-                    md = re.search(
-                        r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
-                        " ".join(textos),
-                    )
-                    if not md:
-                        continue
-
-                    numdoc = re.sub(r"\D", "", md.group(0))
-                    if len(numdoc) != 15:
-                        continue
-
-                    impuesto_idx = next(
-                        (i for i, x in enumerate(textos)
-                         if norm(x) in ("renta", "iva")
-                         or norm(x).startswith("renta ")
-                         or norm(x).startswith("iva ")),
-                        None,
-                    )
-                    if impuesto_idx is None:
-                        continue
-
-                    impuesto = norm(textos[impuesto_idx])
-                    es_iva = "iva" in impuesto
-                    es_renta = "renta" in impuesto
-                    if not (es_iva or es_renta):
-                        continue
-
-                    # Variante simple del detalle SRI:
-                    # Nro | Impuesto | Base Imponible | % Retenido |
-                    # Valor Retenido | Número Doc. Sustento | Fecha.
-                    # En esta variante NO existe código de retención.
-                    base_idx = impuesto_idx + 1
-                    porcentaje_idx = impuesto_idx + 2
-                    valor_idx = impuesto_idx + 3
-                    doc_idx = impuesto_idx + 4
-
-                    if (
-                        base_idx >= len(textos)
-                        or porcentaje_idx >= len(textos)
-                        or valor_idx >= len(textos)
-                    ):
-                        continue
-
-                    base = cls._dec(textos[base_idx])
-                    porcentaje = cls._dec(
-                        re.sub(r"[^0-9.,-]", "", textos[porcentaje_idx])
-                    )
-                    valor = cls._dec(textos[valor_idx])
-
-                    # El documento de sustento debe ser el número de 15 dígitos.
-                    # Si no está en la posición esperada, lo buscamos en toda la fila.
-                    texto_doc_fallback = (
-                        textos[doc_idx] if doc_idx < len(textos) else " ".join(textos)
-                    )
-                    md_doc = re.search(
-                        r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
-                        texto_doc_fallback,
-                    )
-                    if not md_doc:
-                        md_doc = re.search(
-                            r"\d{3}\s*[- ]\s*\d{3}\s*[- ]\s*\d{9}|\b\d{15}\b",
-                            " ".join(textos),
-                        )
-                    if not md_doc:
-                        continue
-
-                    numdoc = re.sub(r"\D", "", md_doc.group(0))
-                    if len(numdoc) != 15:
-                        continue
-
-                    codigo = ""
-
-                    bloque = {
-                        "num_doc_sustento": numdoc,
-                        "codigo_retencion": codigo,
-                        "base": base,
-                        "porcentaje": porcentaje,
-                        "retrenta": valor if es_renta else Decimal("0"),
-                        "retiva": valor if es_iva else Decimal("0"),
-                        "retiva_porcentajes": (
-                            {
-                                (
-                                    str(int(porcentaje))
-                                    if porcentaje == porcentaje.to_integral_value()
-                                    else format(porcentaje, "f").rstrip("0").rstrip(".")
-                                ): valor
-                            }
-                            if es_iva else {}
-                        ),
-                    }
-
-                    # No dependemos del orden IVA/RENTA. Guardamos ambas
-                    # líneas y las asociamos después por numdoc, igual que
-                    # en el parser principal.
-                    filas_por_doc.setdefault(numdoc, []).append({
-                        "impuesto": "IVA" if es_iva else "RENTA",
-                        "codigo_retencion": codigo,
-                        "base": base,
-                        "porcentaje": porcentaje,
-                        "valor": valor,
-                    })
-
-            # Reconstruimos los bloques si el fallback encontró líneas.
-            if not bloques and filas_por_doc:
-                for numdoc, lineas in filas_por_doc.items():
-                    lineas_renta = [x for x in lineas if x["impuesto"] == "RENTA"]
-                    lineas_iva = [x for x in lineas if x["impuesto"] == "IVA"]
-
-                    iva_porcentajes = {}
-                    for linea in lineas_iva:
-                        porcentaje = linea["porcentaje"]
-                        tasa = (
-                            str(int(porcentaje))
-                            if porcentaje == porcentaje.to_integral_value()
-                            else format(porcentaje, "f").rstrip("0").rstrip(".")
-                        )
-                        if tasa:
-                            iva_porcentajes[tasa] = (
-                                iva_porcentajes.get(tasa, Decimal("0"))
-                                + linea["valor"]
-                            )
-
-                    if lineas_renta:
-                        for renta in lineas_renta:
-                            bloques.append({
-                                "num_doc_sustento": numdoc,
-                                "codigo_retencion": renta["codigo_retencion"],
-                                "base": renta["base"],
-                                "porcentaje": renta["porcentaje"],
-                                "retrenta": renta["valor"],
-                                "retiva": sum(iva_porcentajes.values(), Decimal("0")),
-                                "retiva_porcentajes": dict(iva_porcentajes),
-                            })
-                    elif lineas_iva:
-                        bloques.append({
-                            "num_doc_sustento": numdoc,
-                            "codigo_retencion": "",
-                            "base": Decimal("0"),
-                            "porcentaje": Decimal("0"),
-                            "retrenta": Decimal("0"),
-                            "retiva": sum(iva_porcentajes.values(), Decimal("0")),
-                            "retiva_porcentajes": dict(iva_porcentajes),
-                        })
-
-        # El HTML del detalle SRI normalmente NO muestra el campo
-        # "Código Retención". En TotalCounts el código histórico se determina
-        # con la misma regla utilizada por ExtractorPDFRetenciones:
-        #
-        #   0%  -> 332
-        #   1% + IVA -> 343
-        #   1% sin IVA -> 310
-        #   2%  -> 312
-        #   3%  -> 3440
-        #   10% -> 303
-        #
-        # Si una versión futura del SRI entrega explícitamente el código,
-        # lo conservamos y no lo reemplazamos.
+        # ---------------------------------------------------------------
+        # Código histórico de TotalCounts.
+        # El HTML del SRI no entrega CodRet; se deriva del % de RENTA.
+        # ---------------------------------------------------------------
         codigos_renta = {
             "0": "332",
             "2": "312",
@@ -1700,48 +1531,136 @@ class SriClienteSyncService:
             "10": "303",
         }
 
-        for bloque in bloques:
-            codigo_actual = str(bloque.get("codigo_retencion") or "").strip()
-            if codigo_actual:
-                continue
+        def tasa_texto(valor: Any) -> str:
+            dec = cls._dec(valor)
+            if dec == dec.to_integral_value():
+                return str(int(dec))
+            return format(dec, "f").rstrip("0").rstrip(".")
 
-            porcentaje_renta = cls._dec(bloque.get("porcentaje"))
-            porcentaje_txt = format(porcentaje_renta, "f").rstrip("0").rstrip(".")
-            if not porcentaje_txt:
-                porcentaje_txt = "0"
+        def codigo_renta(porcentaje: Decimal, tiene_iva: bool) -> str:
+            tasa = tasa_texto(porcentaje)
+            if tasa == "1":
+                return "343" if tiene_iva else "310"
+            return codigos_renta.get(tasa, "000")
 
-            if porcentaje_txt == "1":
-                codigo = "343" if cls._dec(bloque.get("retiva")) > 0 else "310"
-            else:
-                codigo = codigos_renta.get(porcentaje_txt, "000")
+        # ---------------------------------------------------------------
+        # Relación IVA <-> RENTA:
+        # mismo Número Doc. Sustento + mismo orden de aparición.
+        #
+        # Ejemplo:
+        #   IVA 30% 47.52
+        #   RENTA 2% 21.12
+        #
+        # produce un solo bloque.
+        #
+        # Si existen:
+        #   IVA 30% 47.52
+        #   RENTA 2% 21.12
+        #   IVA 70% 10.00
+        #   RENTA 1%  5.00
+        #
+        # produce dos bloques, ambos sobre el mismo documento de sustento.
+        # ---------------------------------------------------------------
+        bloques = []
 
-            bloque["codigo_retencion"] = codigo
+        for numdoc, lineas in filas_por_doc.items():
+            lineas_iva = [x for x in lineas if x["impuesto"] == "IVA"]
+            lineas_renta = [x for x in lineas if x["impuesto"] == "RENTA"]
 
-            cls._iva_debug_log(
-                "RETENCION EMITIDA | codigo derivado | numdoc=%s | porcentaje_renta=%s | retiva=%s | codigo=%s",
-                bloque.get("num_doc_sustento"),
-                porcentaje_txt,
-                bloque.get("retiva"),
-                codigo,
-            )
+            cantidad_pares = min(len(lineas_iva), len(lineas_renta))
+
+            for i in range(cantidad_pares):
+                iva = lineas_iva[i]
+                renta = lineas_renta[i]
+
+                tasa_iva = tasa_texto(iva["porcentaje"])
+
+                bloque = {
+                    "num_doc_sustento": numdoc,
+                    "codigo_retencion": codigo_renta(
+                        renta["porcentaje"],
+                        cls._dec(iva["valor"]) > 0,
+                    ),
+                    "base": renta["base"],
+                    "porcentaje": renta["porcentaje"],
+                    "retrenta": renta["valor"],
+                    "retiva": iva["valor"],
+                    "retiva_porcentajes": {
+                        tasa_iva: iva["valor"]
+                    },
+                    "fecha_doc_sustento": renta.get("fecha_doc_sustento") or iva.get(
+                        "fecha_doc_sustento"
+                    ),
+                }
+                bloques.append(bloque)
+
+            # Si quedan líneas RENTA sin IVA.
+            for renta in lineas_renta[cantidad_pares:]:
+                bloques.append({
+                    "num_doc_sustento": numdoc,
+                    "codigo_retencion": codigo_renta(
+                        renta["porcentaje"], False
+                    ),
+                    "base": renta["base"],
+                    "porcentaje": renta["porcentaje"],
+                    "retrenta": renta["valor"],
+                    "retiva": Decimal("0"),
+                    "retiva_porcentajes": {},
+                    "fecha_doc_sustento": renta.get("fecha_doc_sustento"),
+                })
+
+            # Si quedan líneas IVA sin RENTA.
+            for iva in lineas_iva[cantidad_pares:]:
+                tasa_iva = tasa_texto(iva["porcentaje"])
+                bloques.append({
+                    "num_doc_sustento": numdoc,
+                    "codigo_retencion": "",
+                    "base": Decimal("0"),
+                    "porcentaje": Decimal("0"),
+                    "retrenta": Decimal("0"),
+                    "retiva": iva["valor"],
+                    "retiva_porcentajes": {
+                        tasa_iva: iva["valor"]
+                    },
+                    "fecha_doc_sustento": iva.get("fecha_doc_sustento"),
+                })
 
         if not bloques:
-            raise ValueError("No se encontraron líneas de retención en el detalle SRI.")
+            raise ValueError(
+                "No se pudieron relacionar las líneas IVA/Renta del detalle SRI."
+            )
+
+        cls._iva_debug_log(
+            "RETENCION EMITIDA | PARSE DETALLE | retencion=%s-%s-%s | ruc=%s | bloques=%s",
+            numest,
+            numptoemi,
+            numsec,
+            ruc,
+            len(bloques),
+        )
+        for bloque in bloques:
+            cls._iva_debug_log(
+                "RETENCION EMITIDA | BLOQUE | doc=%s | iva=%s | iva_tasas=%s | "
+                "codret=%s | base=%s | porret=%s | valret=%s",
+                bloque["num_doc_sustento"],
+                bloque["retiva"],
+                bloque["retiva_porcentajes"],
+                bloque["codigo_retencion"],
+                bloque["base"],
+                bloque["porcentaje"],
+                bloque["retrenta"],
+            )
 
         return {
             "numest": numest.strip(),
             "numptoemi": numptoemi.strip(),
             "numsec": numsec.strip(),
             "clave_acceso": clave.strip(),
-            "numero_autorizacion": (
-                autorizacion.strip() or clave.strip()
-            ),
+            "numero_autorizacion": autorizacion.strip() or clave.strip(),
             "fecha_emision": fecha_txt,
             "fecha": fecha,
             "identificacion_sujeto_retenido": ruc.strip(),
             "razon_social_sujeto_retenido": nombre.strip(),
-            # Conservamos ambos nombres para compatibilidad con el resto
-            # del servicio.
             "documentos_sustento": bloques,
             "retenciones_sustento": bloques,
         }
