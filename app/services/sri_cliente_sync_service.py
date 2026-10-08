@@ -1530,7 +1530,36 @@ class SriClienteSyncService:
         selector_fecha = "#frmPrincipal\\:calendarFechaDesde_input"
         selector_tabla = "#frmPrincipal\\:tablaCompEmitidos_data tr"
 
-        await page.locator(selector_fecha).fill(fecha.strftime("%d/%m/%Y"))
+        fecha_texto = fecha.strftime("%d/%m/%Y")
+        campo_fecha = page.locator(selector_fecha)
+
+        # O SRI usa un datepicker PrimeFaces. Un fill() simples nem sempre
+        # atualiza o estado JavaScript do componente, fazendo o SRI continuar
+        # consultando a data anterior. Escrevemos como usuário e disparamos
+        # os eventos de input/change antes de consultar.
+        await campo_fecha.click()
+        await campo_fecha.press("Control+A")
+        await campo_fecha.fill(fecha_texto)
+        await campo_fecha.press("Tab")
+        await page.wait_for_timeout(300)
+
+        # Confirma que o valor que o navegador exibe é realmente o dia que
+        # estamos processando. Se o datepicker não aceitar o primeiro método,
+        # tenta novamente simulando digitação real.
+        valor_fecha = await campo_fecha.input_value()
+        if valor_fecha != fecha_texto:
+            await campo_fecha.click()
+            await campo_fecha.press("Control+A")
+            await campo_fecha.press_sequentially(fecha_texto, delay=30)
+            await campo_fecha.press("Tab")
+            await page.wait_for_timeout(300)
+            valor_fecha = await campo_fecha.input_value()
+
+        if valor_fecha != fecha_texto:
+            raise RuntimeError(
+                f"El SRI no aceptó la fecha solicitada. "
+                f"Solicitada={fecha_texto}; mostrada={valor_fecha!r}"
+            )
 
         # Guardamos una referencia al primer resultado para poder esperar el AJAX.
         filas = page.locator(selector_tabla)
