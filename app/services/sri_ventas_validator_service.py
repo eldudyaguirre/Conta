@@ -101,7 +101,7 @@ class SriVentasValidatorService:
                       AND TRIM(año::text) = :anio
                       AND TRIM(codcomp::text) = '18'
                 """), {
-                    "fecha": fecha_txt,
+                    "fecha": fecha_ui,
                     "mes": f"{mes:02d}",
                     "anio": str(anio),
                 }).scalar_one()
@@ -410,7 +410,7 @@ class SriVentasValidatorService:
               AND TRIM(codcomp::text) = '18'
               AND COALESCE(TRIM(autorizacion::text), '') <> ''
         """), {
-            "fecha": fecha.strftime("%Y-%m-%d"),
+            "fecha": fecha.strftime("%d/%m/%Y"),
             "mes": f"{fecha.month:02d}",
             "anio": str(fecha.year),
         }).scalars().all()
