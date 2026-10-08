@@ -430,6 +430,23 @@ class SriClienteSyncService:
         return ((node.findtext(tag) if node is not None else None) or default).strip()
 
     @staticmethod
+    def _fecha_varchar(value: Any) -> str:
+        """Normaliza fechas para los campos VARCHAR de comprasnue."""
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.strftime("%d/%m/%Y")
+        texto = str(value).strip()
+        if not texto:
+            return ""
+        for formato in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(texto[:10], formato).strftime("%d/%m/%Y")
+            except ValueError:
+                continue
+        return texto
+
+    @staticmethod
     def _tipo(tipo: int) -> str:
         return {1: "01", 2: "02", 3: "03", 4: "04", 5: "05", 6: "06", 7: "07"}.get(tipo, f"{tipo:02d}")
 
@@ -2309,7 +2326,7 @@ class SriClienteSyncService:
 
                 # Datos generales de la RETENCIÓN.
                 "numautret": autret,
-                "fecret": fecret,
+                "fecret": cls._fecha_varchar(fecret),
 
                 # Datos de RENTA.
                 "codret": str(bloque.get("codigo_retencion") or "").strip(),
@@ -3179,7 +3196,7 @@ class SriClienteSyncService:
             "ice": cero,
             "numret": numero_retencion,
             "autret": autorizacion,
-            "fecret": fecha,
+            "fecret": cls._fecha_varchar(fecha),
             "retiva": documento.get("retiva", cero),
             "retrenta": documento.get("retrenta", cero),
             "mes": f"{retencion['fecha'].month:02d}",
@@ -3264,7 +3281,7 @@ class SriClienteSyncService:
                 "ruc_sujeto": ruc_sujeto,
                 "numret": numero_retencion,
                 "autret": autorizacion,
-                "fecret": fecha,
+                "fecret": cls._fecha_varchar(fecha),
                 "retiva": documento["retiva"],
                 "retrenta": documento["retrenta"],
             }
@@ -3375,11 +3392,11 @@ class SriClienteSyncService:
             "tipid": "01",
             "ruccedprovee": ruc,
             "tipcom": "04",
-            "fecreg": factura["fecha"],
+            "fecreg": cls._fecha_varchar(factura["fecha"]),
             "numest": factura["numest"],
             "numptoemi": factura["numptoemi"],
             "numsec": factura["numsec"],
-            "fecemi": factura["fecha_emision"],
+            "fecemi": cls._fecha_varchar(factura["fecha_emision"]),
             "numaut": factura["clave_acceso"],
             "baseimpnoobj": b["no_objeto"],
             "baseimpiva0": b["0"],
@@ -3432,9 +3449,9 @@ class SriClienteSyncService:
 
         values = {
             "codsus": "01", "tipid": "01", "ruccedprovee": factura["ruc"],
-            "tipcom": cls._tipo(tipo_comprobante), "fecreg": factura["fecha"],
+            "tipcom": cls._tipo(tipo_comprobante), "fecreg": cls._fecha_varchar(factura["fecha"]),
             "numest": factura["numest"], "numptoemi": factura["numptoemi"],
-            "numsec": factura["numsec"], "fecemi": factura["fecha_emision"],
+            "numsec": factura["numsec"], "fecemi": cls._fecha_varchar(factura["fecha_emision"]),
             "numaut": factura["clave_acceso"], "baseimpnoobj": b["no_objeto"],
             "baseimpiva0": b["0"], "baseexenta": b["exenta"],
             "baseimpiva5": b["5"], "baseimpiva8": b["8"], "baseimpiva12": b["12"],
