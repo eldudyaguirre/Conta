@@ -2127,11 +2127,8 @@ class SriClienteSyncService:
         - IVA: valor de cada línea IVA en retencioniva10/20/30/70/100.
         - RENTA: CodRet, BaseImpRet, PorRet y ValRet.
 
-        Si el mismo Número Doc. Sustento tiene varias líneas RENTA,
-        cada línea RENTA ocupa un registro de comprasnue. El segundo y
-        siguientes registros son clones completos de la factura original,
-        conservando los datos de la compra y cambiando solamente los campos
-        de retención.
+        La retención actualiza los registros de comprasnue que ya existen.
+        No se crean registros nuevos para aplicar una retención.
         """
         import re
 
@@ -2176,98 +2173,6 @@ class SriClienteSyncService:
 
         def partes_factura(numdoc: str) -> tuple[str, str, str]:
             return numdoc[:3], numdoc[3:6], numdoc[6:]
-
-        def obtener_columnas_clon() -> list[str]:
-            filas = db.execute(text("""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                  AND table_name = 'comprasnue'
-                  AND is_generated = 'NEVER'
-                  AND is_identity = 'NO'
-                ORDER BY ordinal_position
-            """)).scalars().all()
-            return [str(x) for x in filas]
-
-        def obtener_pk() -> set[str]:
-            filas = db.execute(text("""
-                SELECT a.attname
-                FROM pg_index i
-                JOIN pg_attribute a
-                  ON a.attrelid = i.indrelid
-                 AND a.attnum = ANY(i.indkey)
-                WHERE i.indrelid = 'public.comprasnue'::regclass
-                  AND i.indisprimary
-            """)).scalars().all()
-            return {str(x) for x in filas}
-
-        columnas_clon = obtener_columnas_clon()
-        pk = obtener_pk()
-
-        def nuevo_numcompra() -> str:
-            """Obtiene un numcompra nuevo y garantiza que no exista en comprasnue.
-
-            numcompra es la PK de comprasnue. Cuando una factura debe clonarse
-            por tener varias líneas de retención, cada clon DEBE recibir un
-            consecutivo distinto al registro original y a cualquier otro clon.
-            """
-            db.execute(text(
-                "SELECT pg_advisory_xact_lock(hashtext('conta_comprasnue_numcompra'))"
-            ))
-
-            valor = db.execute(
-                text("SELECT siguiente_parametro('numcompra')")
-            ).scalar()
-
-            if valor is None or not str(valor).strip():
-                raise RuntimeError(
-                    "No se pudo obtener el consecutivo numcompra desde parametros."
-                )
-
-            candidato = str(valor).strip()
-
-            # La función de parámetros normalmente entrega el siguiente
-            # consecutivo. Aun así, verificamos la PK antes del INSERT para
-            # evitar que un consecutivo desfasado provoque duplicate key.
-            existe = db.execute(
-                text("""
-                    SELECT 1
-                    FROM comprasnue
-                    WHERE numcompra = :numcompra
-                    LIMIT 1
-                """),
-                {"numcompra": candidato},
-            ).scalar()
-
-            if existe is None:
-                return candidato
-
-            # Si el parámetro quedó atrasado respecto de comprasnue, avanzamos
-            # desde el candidato hasta encontrar una PK libre.
-            try:
-                numero = int(candidato)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(
-                    f"El consecutivo numcompra '{candidato}' ya existe y no es "
-                    "numérico; no se puede generar automáticamente otro."
-                ) from exc
-
-            while True:
-                numero += 1
-                candidato = str(numero)
-
-                existe = db.execute(
-                    text("""
-                        SELECT 1
-                        FROM comprasnue
-                        WHERE numcompra = :numcompra
-                        LIMIT 1
-                    """),
-                    {"numcompra": candidato},
-                ).scalar()
-
-                if existe is None:
-                    return candidato
 
         def buscar_compras(numdoc: str) -> list[dict[str, Any]]:
             """Busca la factura por Número Doc. Sustento + RUC proveedor."""
@@ -2320,21 +2225,14 @@ class SriClienteSyncService:
             if str(row.get("numautret") or "").strip() != autret:
                 return False
 
-            # La renta es el identificador más fuerte de cada línea.
+            # La renta es el identificador más fuerte de cada línea
+            # cuando la retención ya fue registrada.
             if abs(
                 cls._dec(row.get("valret"))
                 - cls._dec(bloque.get("retrenta"))
             ) > Decimal("0.0001"):
                 return False
 
-            # Si ya existe el código correcto, es una coincidencia clara.
-            codigo = str(bloque.get("codigo_retencion") or "").strip()
-            codigo_row = str(row.get("codret") or "").strip()
-            if codigo and codigo_row and codigo == codigo_row:
-                return True
-
-            # Si el código viejo está vacío o equivocado, también es la misma
-            # línea: precisamente queremos corregirla.
             return True
 
         def clonar_compra(template: dict[str, Any]) -> dict[str, Any]:
@@ -2484,56 +2382,39 @@ class SriClienteSyncService:
                 no_encontradas.append(numdoc)
                 continue
 
-            # Guardamos la factura original para que todos los clones partan
-            # exactamente de los mismos datos de compra.
-            template = next(
-                (
-                    row for row in filas
-                    if not str(row.get("numautret") or "").strip()
-                    and not str(row.get("codret") or "").strip()
-                ),
-                filas[0],
-            )
-
             filas_trabajo = list(filas)
-            usadas = set()
 
             for bloque in bloques_doc:
-                # 1. Intentar corregir/actualizar una línea que ya existe.
-                fila_existente = next(
+                # Primero buscamos un registro que ya tenga esta misma retención.
+                # Esto permite corregir/reemplazar un código anterior sin crear
+                # una segunda fila.
+                fila_objetivo = next(
                     (
                         row for row in filas_trabajo
-                        if row["numcompra"] not in usadas
-                        and fila_ya_es_esta_linea(row, bloque)
+                        if fila_ya_es_esta_linea(row, bloque)
                     ),
                     None,
                 )
 
-                if fila_existente is not None:
-                    fila_objetivo = fila_existente
-                else:
-                    # 2. Primera línea: reutilizamos la compra original si
-                    # todavía está libre de retención.
-                    fila_libre = next(
+                if fila_objetivo is None:
+                    # Las compras nuevas quedan inicialmente con codret=332.
+                    # Ese 332 es solo un código provisional. La retención SRI
+                    # debe reemplazarlo EN LA MISMA FILA.
+                    fila_objetivo = next(
                         (
                             row for row in filas_trabajo
-                            if row["numcompra"] not in usadas
-                            and not str(row.get("numautret") or "").strip()
-                            and not str(row.get("codret") or "").strip()
+                            if str(row.get("codret") or "").strip() in {"", "332"}
                         ),
                         None,
                     )
 
-                    if fila_libre is not None:
-                        fila_objetivo = fila_libre
-                    else:
-                        # 3. Segunda, tercera, etc.: nuevo registro completo
-                        # de comprasnue con la misma factura.
-                        fila_objetivo = clonar_compra(template)
-                        filas_trabajo.append(fila_objetivo)
+                if fila_objetivo is None:
+                    # No se crea ningún registro adicional. Si todos los
+                    # registros actuales ya tienen retenciones, se reutiliza
+                    # el primero para reemplazar sus datos de retención.
+                    fila_objetivo = filas_trabajo[0]
 
                 actualizar_fila(fila_objetivo, bloque)
-                usadas.add(fila_objetivo["numcompra"])
                 actualizadas += 1
 
         if actualizadas == 0:
