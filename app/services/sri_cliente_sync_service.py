@@ -2205,17 +2205,69 @@ class SriClienteSyncService:
         pk = obtener_pk()
 
         def nuevo_numcompra() -> str:
+            """Obtiene un numcompra nuevo y garantiza que no exista en comprasnue.
+
+            numcompra es la PK de comprasnue. Cuando una factura debe clonarse
+            por tener varias líneas de retención, cada clon DEBE recibir un
+            consecutivo distinto al registro original y a cualquier otro clon.
+            """
             db.execute(text(
                 "SELECT pg_advisory_xact_lock(hashtext('conta_comprasnue_numcompra'))"
             ))
+
             valor = db.execute(
                 text("SELECT siguiente_parametro('numcompra')")
             ).scalar()
+
             if valor is None or not str(valor).strip():
                 raise RuntimeError(
                     "No se pudo obtener el consecutivo numcompra desde parametros."
                 )
-            return str(valor).strip()
+
+            candidato = str(valor).strip()
+
+            # La función de parámetros normalmente entrega el siguiente
+            # consecutivo. Aun así, verificamos la PK antes del INSERT para
+            # evitar que un consecutivo desfasado provoque duplicate key.
+            existe = db.execute(
+                text("""
+                    SELECT 1
+                    FROM comprasnue
+                    WHERE numcompra = :numcompra
+                    LIMIT 1
+                """),
+                {"numcompra": candidato},
+            ).scalar()
+
+            if existe is None:
+                return candidato
+
+            # Si el parámetro quedó atrasado respecto de comprasnue, avanzamos
+            # desde el candidato hasta encontrar una PK libre.
+            try:
+                numero = int(candidato)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"El consecutivo numcompra '{candidato}' ya existe y no es "
+                    "numérico; no se puede generar automáticamente otro."
+                ) from exc
+
+            while True:
+                numero += 1
+                candidato = str(numero)
+
+                existe = db.execute(
+                    text("""
+                        SELECT 1
+                        FROM comprasnue
+                        WHERE numcompra = :numcompra
+                        LIMIT 1
+                    """),
+                    {"numcompra": candidato},
+                ).scalar()
+
+                if existe is None:
+                    return candidato
 
         def buscar_compras(numdoc: str) -> list[dict[str, Any]]:
             """Busca la factura por Número Doc. Sustento + RUC proveedor."""
