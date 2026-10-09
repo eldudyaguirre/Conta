@@ -3359,12 +3359,11 @@ class SriClienteSyncService:
 
     @classmethod
     def _actualizar_retencion_ventas(cls, db, retencion: dict[str, Any]) -> int:
-        """Actualiza ventas para retenciones recibidas y procesa RECAP.
+        """Actualiza retenciones recibidas en ventas y registra los casos RECAP.
 
-        Las retenciones normales actualizan la factura indicada por
-        numDocSustento. Si numDocSustento es 999999999999992 (o su variante
-        999-999-999999992), no existe una factura que actualizar: es un RECAP
-        y debe guardarse como un registro independiente en ventas.
+        Si el documento de sustento es 999999999999992, o si la factura
+        indicada no existe en ventas, la retención se guarda como RECAP
+        independiente para no perderla del ATS.
         """
         documentos = retencion.get("documentos_sustento") or []
         if not documentos:
@@ -3457,22 +3456,28 @@ class SriClienteSyncService:
             else:
                 no_encontradas.append(num_doc)
                 logger.warning(
-                    "RETENCION RECIBIDA | factura no encontrada en ventas | "
+                    "RETENCION RECIBIDA | factura no encontrada; se guardará como RECAP | "
                     "retencion=%s | numDocSustento=%s | ruc=%s",
                     numero_retencion, num_doc, ruc_sujeto,
                 )
+                # Acuerdo funcional: si no existe la factura de sustento en
+                # ventas, conservar la retención como RECAP en lugar de fallar.
+                if cls._insertar_recap_venta(db, retencion, documento):
+                    actualizadas += 1
+                # Si ya existía el RECAP, también consideramos procesado el caso.
+                procesadas += 1
 
-        # Un RECAP puede ya existir; eso no debe convertirse en error.
+        # Los RECAP existentes no deben convertirse en error ni duplicarse.
         if actualizadas == 0 and not procesadas:
-            detalle_facturas = ", ".join(no_encontradas) or "sin número de factura"
-            raise ValueError(
-                f"No se encontró en ventas ninguna factura de la retención "
-                f"{numero_retencion}. Facturas sustento: {detalle_facturas}."
+            logger.info(
+                "RETENCION RECIBIDA | sin cambios; no había documentos procesables | "
+                "retencion=%s",
+                numero_retencion,
             )
 
         if no_encontradas:
-            logger.warning(
-                "RETENCION RECIBIDA | algunas facturas no fueron encontradas | "
+            logger.info(
+                "RETENCION RECIBIDA | facturas no encontradas convertidas a RECAP | "
                 "retencion=%s | facturas=%s",
                 numero_retencion, ", ".join(no_encontradas),
             )
