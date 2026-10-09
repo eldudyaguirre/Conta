@@ -220,12 +220,10 @@ class SriClienteSyncService:
                 resultado.get("mensaje")
                 or "Sincronización finalizada."
             )
-            cls._job_update(
-                job_id,
-                **resultado,
-                estado="finalizado",
-                mensaje=mensaje_final,
-            )
+            resultado_final = dict(resultado)
+            resultado_final["estado"] = "finalizado"
+            resultado_final["mensaje"] = mensaje_final
+            cls._job_update(job_id, **resultado_final)
         except SriJobCancelado as exc:
             cls._job_update(
                 job_id,
