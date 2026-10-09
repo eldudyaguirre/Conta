@@ -3359,11 +3359,12 @@ class SriClienteSyncService:
 
     @classmethod
     def _actualizar_retencion_ventas(cls, db, retencion: dict[str, Any]) -> int:
-        """Actualiza retenciones recibidas en ventas y registra los casos RECAP.
+        """Actualiza retenciones recibidas o las registra como RECAP.
 
-        Si el documento de sustento es 999999999999992, o si la factura
-        indicada no existe en ventas, la retención se guarda como RECAP
-        independiente para no perderla del ATS.
+        Regla funcional: solo se actualiza una factura si el documento de
+        sustento se encuentra en ventas. Si no se encuentra, sin importar
+        cuál sea su número, la retención se guarda como RECAP independiente.
+        El número especial 999999999999992 también se procesa como RECAP.
         """
         documentos = retencion.get("documentos_sustento") or []
         if not documentos:
@@ -3384,10 +3385,20 @@ class SriClienteSyncService:
 
         for documento in documentos:
             num_doc = str(documento.get("num_doc_sustento") or "").strip()
+
+            # Si el XML no trae número de sustento, tampoco hay factura que
+            # actualizar: conservar la retención como RECAP.
             if not num_doc:
+                logger.warning(
+                    "RETENCION RECIBIDA | sustento vacío; se guardará como RECAP | retencion=%s",
+                    numero_retencion,
+                )
+                if cls._insertar_recap_venta(db, retencion, documento):
+                    actualizadas += 1
+                procesadas += 1
                 continue
 
-            # Normalizamos 999-999-999999992 y 999999999999992 al mismo valor.
+            # Normalizamos números con o sin guiones para buscar la factura.
             num_doc_digitos = (
                 num_doc.replace("-", "")
                 .replace(" ", "")
