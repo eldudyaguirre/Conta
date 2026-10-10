@@ -1951,6 +1951,85 @@ class SriClienteSyncService:
         return None
 
     @classmethod
+    async def _consultar_validez_por_clave(cls, page, clave_acceso: str) -> dict[str, str]:
+        """Consulta la validez de un comprobante por su clave en el portal público del SRI.
+
+        Es una vía diagnóstica alternativa: confirma el estado del comprobante,
+        pero no reemplaza la extracción del detalle tributario necesario para
+        registrar una factura completa en la base del cliente.
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        resultado = {"estado": "NO_VERIFICADO", "detalle": ""}
+        consulta = None
+        try:
+            consulta = await page.context.new_page()
+            await consulta.goto(
+                "https://srienlinea.sri.gob.ec/comprobantes-electronicos-internet/publico/validezComprobantes.jsf?a=&pathMPT=Facturación+Electrónica",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await consulta.wait_for_timeout(1200)
+
+            # Selecciona la opción por su etiqueta visible, evitando depender
+            # de un ID JSF que puede cambiar.
+            etiquetas = consulta.get_by_text("Clave de acceso / Nro. autorización", exact=False)
+            if await etiquetas.count():
+                try:
+                    await etiquetas.first.click()
+                except Exception:
+                    pass
+
+            entradas = consulta.locator("input:not([type=hidden]):not([type=radio]):not([type=submit])")
+            entrada_objetivo = None
+            for i in range(await entradas.count()):
+                el = entradas.nth(i)
+                try:
+                    if await el.is_visible() and (await el.get_attribute("type") or "text").lower() in ("text", "search"):
+                        entrada_objetivo = el
+                        break
+                except Exception:
+                    continue
+            if entrada_objetivo is None:
+                resultado["detalle"] = "No se encontró el campo de clave de acceso en la consulta pública."
+                return resultado
+
+            await entrada_objetivo.fill(clave_acceso)
+            boton = consulta.get_by_role("button", name="Consultar")
+            if await boton.count() == 0:
+                boton = consulta.get_by_text("Consultar", exact=True)
+            await boton.first.click()
+            await consulta.wait_for_timeout(1800)
+            texto = " ".join((await consulta.locator("body").inner_text()).split())
+            if clave_acceso not in texto:
+                resultado["estado"] = "SIN_RESULTADO"
+                resultado["detalle"] = "La consulta pública no devolvió la clave buscada."
+            elif "AUTORIZADO" in texto.upper():
+                resultado["estado"] = "AUTORIZADO"
+                resultado["detalle"] = texto[:1800]
+            elif "NO AUTORIZADO" in texto.upper():
+                resultado["estado"] = "NO_AUTORIZADO"
+                resultado["detalle"] = texto[:1800]
+            elif "POR PROCESAR" in texto.upper():
+                resultado["estado"] = "POR_PROCESAR"
+                resultado["detalle"] = texto[:1800]
+            else:
+                resultado["estado"] = "RESULTADO_ENCONTRADO"
+                resultado["detalle"] = texto[:1800]
+            return resultado
+        except Exception as exc:
+            logger.warning("Consulta pública SRI por clave falló para %s: %s", clave_acceso, exc)
+            resultado["detalle"] = f"No se pudo completar la consulta pública: {exc}"
+            return resultado
+        finally:
+            if consulta is not None:
+                try:
+                    await consulta.close()
+                except Exception:
+                    pass
+
+    @classmethod
     async def _volver_pagina_1_emitidos(cls, page) -> None:
         """Regresa explícitamente a la página 1 antes de consultar otro día.
 
