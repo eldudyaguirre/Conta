@@ -25,6 +25,10 @@ class SincronizarVentasRequest(BaseModel):
     mes: int = Field(ge=1, le=12)
 
 
+class RepararVentasRequest(SincronizarVentasRequest):
+    dias_objetivo: list[str] = Field(min_length=1, max_length=31)
+
+
 @router.post("/ventas/sincronizar")
 async def sincronizar_ventas(
     request: SincronizarVentasRequest,
@@ -78,6 +82,39 @@ async def validar_ventas(
             status_code=500,
             detail=f"Error iniciando validador de ventas SRI: {exc}",
         )
+
+
+@router.post("/ventas/reparar-diferencias")
+async def reparar_diferencias_ventas(
+    request: RepararVentasRequest,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Reprocesa únicamente las fechas que el validador marcó con diferencias."""
+    from datetime import date
+
+    try:
+        fechas = sorted(set(request.dias_objetivo))
+        for fecha in fechas:
+            parsed = date.fromisoformat(fecha)
+            if parsed.year != request.anio or parsed.month != request.mes:
+                raise ValueError(f"La fecha {fecha} no pertenece al período seleccionado.")
+        resultado = SriClienteSyncService.iniciar_sincronizacion(
+            ruc=request.ruc,
+            anio=request.anio,
+            mes=request.mes,
+            tipo_comprobante=1,
+            operacion="ventas_reparar",
+            dias_objetivo=fechas,
+        )
+        return {
+            "usuario": usuario["usrname"],
+            "tipo": "sri_reparar_ventas_diferencias",
+            **resultado,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error iniciando reparación SRI: {exc}")
 
 
 @router.post("/ventas/notas-credito/sincronizar")
