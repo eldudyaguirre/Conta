@@ -205,17 +205,29 @@ class SriClienteSyncService:
             mensaje="Worker SRI activo. Iniciando navegador y conexión con el SRI.",
         )
         try:
-            if operacion in ("ventas_validar", "ventas_reparar"):
-                # Import local para evitar dependencia circular: el validador
-                # reutiliza los selectores y parsers del sincronizador SRI.
+            if operacion == "ventas_validar":
                 from app.services.sri_ventas_validator_service import SriVentasValidatorService
-
                 resultado = await SriVentasValidatorService.sincronizar_mes(
                     ruc, anio, mes, tipo_comprobante, job_id=job_id
                 )
             else:
+                dias_objetivo = None
+                if operacion == "ventas_reparar":
+                    with engine.connect() as job_db:
+                        detalle_job = job_db.execute(
+                            text(f"SELECT detalle FROM {cls.JOB_TABLE} WHERE job_id = :job_id"),
+                            {"job_id": job_id},
+                        ).scalar()
+                    try:
+                        dias_objetivo = json.loads(detalle_job or "{}").get("dias_objetivo") or []
+                    except (TypeError, ValueError):
+                        dias_objetivo = []
+                    if not dias_objetivo:
+                        raise ValueError("La reparación de ventas requiere al menos una fecha objetivo.")
+
                 resultado = await cls.sincronizar_mes(
-                    ruc, anio, mes, tipo_comprobante, job_id=job_id, operacion=operacion
+                    ruc, anio, mes, tipo_comprobante, job_id=job_id,
+                    operacion=operacion, dias_objetivo=dias_objetivo,
                 )
             mensaje_final = str(
                 resultado.get("mensaje")
@@ -2133,7 +2145,7 @@ class SriClienteSyncService:
     async def _procesar_emitidos_ventas(
         cls, page, db, result, job_id, procesadas, anio: int, mes: int,
         texto_tipo: str = "factura", codcomp: str = "18",
-        destino: str = "ventas",
+        destino: str = "ventas", dias_objetivo: list[str] | None = None,
     ) -> None:
         """Consulta y procesa comprobantes emitidos de un tipo durante todo el mes."""
         import calendar
@@ -2141,14 +2153,21 @@ class SriClienteSyncService:
 
         ultimo_dia = calendar.monthrange(anio, mes)[1]
 
-        # La sincronización mensual SIEMPRE comienza por el día 1.
-        # No usamos MAX(fecfactur) para decidir el día inicial porque tener
-        # registros del día 30 no significa que los días 1..29 hayan sido
-        # procesados correctamente. Cada factura ya existente se detecta por
-        # clave de acceso, por lo que volver a recorrer el mes es seguro.
-        dia_inicial = 1
+        # La sincronización normal recorre todo el mes. La reparación selectiva
+        # reutiliza exactamente este mismo procesador, limitado a los días indicados.
+        if dias_objetivo:
+            dias = sorted({
+                date.fromisoformat(str(fecha)).day
+                for fecha in dias_objetivo
+                if date.fromisoformat(str(fecha)).year == anio
+                and date.fromisoformat(str(fecha)).month == mes
+            })
+            if not dias:
+                raise ValueError("No hay fechas válidas para reparar en el período.")
+        else:
+            dias = list(range(1, ultimo_dia + 1))
 
-        for dia in range(dia_inicial, ultimo_dia + 1):
+        for dia in dias:
             cls._verificar_cancelacion(job_id)
             fecha_consulta = date(anio, mes, dia)
             cls._job_update(
@@ -3188,7 +3207,11 @@ class SriClienteSyncService:
         return False
 
     @classmethod
-    async def sincronizar_mes(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, job_id: str | None = None, operacion: str = "compras") -> dict[str, Any]:
+    async def sincronizar_mes(
+        cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1,
+        job_id: str | None = None, operacion: str = "compras",
+        dias_objetivo: list[str] | None = None,
+    ) -> dict[str, Any]:
         _iva_debug_log(
             "SINCRONIZAR MES | ruc=%s | anio=%s | mes=%s | tipo=%s | operacion=%s | servicio=%s",
             ruc, anio, mes, tipo_comprobante, operacion, str(Path(__file__).resolve()),
@@ -3205,7 +3228,7 @@ class SriClienteSyncService:
             cls._job_update(job_id, mensaje="Abriendo sesión del SRI.")
             p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"])
             cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI. Si aparece CAPTCHA, resuélvalo en Chromium.")
-            if operacion in ("ventas", "notas_credito_emitidas", "retenciones_emitidas"):
+            if operacion in ("ventas", "ventas_reparar", "notas_credito_emitidas", "retenciones_emitidas"):
                 await cls._consultar_emitidos(
                     page,
                     anio,
@@ -3237,11 +3260,19 @@ class SriClienteSyncService:
             db = obtener_session_cliente(ruc)
             procesadas: set[str] = set()
             try:
-                if operacion == "ventas":
+                if operacion in ("ventas", "ventas_reparar"):
                     await cls._procesar_emitidos_ventas(
                         page, db, result, job_id, procesadas, anio, mes,
                         texto_tipo="factura", codcomp="18",
+                        dias_objetivo=dias_objetivo if operacion == "ventas_reparar" else None,
                     )
+                    if operacion == "ventas_reparar":
+                        result["mensaje"] = (
+                            f"Reparación selectiva terminada: {len(dias_objetivo or [])} día(s), "
+                            f"{result['guardadas']} factura(s) nueva(s) guardada(s), "
+                            f"{len(result['errores'])} error(es)."
+                        )
+                        cls._job_update(job_id, mensaje=result["mensaje"])
                     return result
                 if operacion == "notas_credito_emitidas":
                     await cls._procesar_emitidos_ventas(
