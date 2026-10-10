@@ -356,10 +356,36 @@ class SriVentasValidatorService:
 
             for idx in range(cantidad):
                 SriClienteSyncService._verificar_cancelacion(job_id)
+                texto_fila = ""
+                fecha_factura = fecha.strftime("%d/%m/%Y")
+                numero_factura = "No identificado"
                 try:
+                    try:
+                        texto_fila = " ".join((await filas.nth(idx).inner_text()).split())
+                    except Exception:
+                        texto_fila = ""
+
+                    # La fila del listado de emitidos suele mostrar fecha y
+                    # número de comprobante aun cuando el detalle no abre.
+                    import re
+                    fechas_fila = re.findall(r"\b(?:\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2})\b", texto_fila)
+                    if fechas_fila:
+                        fecha_factura = fechas_fila[0]
+                    numeros_fila = re.findall(r"\b\d{3}-\d{3}-\d{9}\b", texto_fila)
+                    if numeros_fila:
+                        numero_factura = numeros_fila[0]
+                    else:
+                        secuenciales = re.findall(r"\b\d{15}\b", texto_fila)
+                        if secuenciales:
+                            numero_factura = f"{secuenciales[0][:3]}-{secuenciales[0][3:6]}-{secuenciales[0][6:]}"
+
                     html = await SriClienteSyncService._obtener_detalle_emitido(page, idx)
                     if not html:
-                        raise ValueError("No se pudo abrir el detalle de la factura.")
+                        raise ValueError(
+                            "No se pudo abrir el detalle de la factura. "
+                            f"Fecha: {fecha_factura}; número de factura: {numero_factura}. "
+                            f"Fila SRI: {texto_fila or 'sin texto disponible'}"
+                        )
 
                     factura = SriClienteSyncService._parsear_factura_emitida_html(html)
                     if factura["fecha"].date() != fecha:
@@ -407,6 +433,8 @@ class SriVentasValidatorService:
                         "fecha": fecha.isoformat(),
                         "pagina": pagina,
                         "fila": idx + 1,
+                        "numero_factura": numero_factura,
+                        "fecha_factura": fecha_factura,
                         "detalle": str(exc),
                     })
                     SriClienteSyncService._job_update(
