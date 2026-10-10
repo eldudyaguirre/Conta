@@ -1989,16 +1989,40 @@ class SriClienteSyncService:
             )
             await consulta.wait_for_timeout(1200)
 
-            # Selecciona la opción por su etiqueta visible, evitando depender
-            # de un ID JSF que puede cambiar.
-            etiquetas = consulta.get_by_text("Clave de acceso / Nro. autorización", exact=False)
-            if await etiquetas.count():
-                try:
-                    await etiquetas.first.click()
-                except Exception:
-                    pass
+            # El formulario inicia en modo RUC/Cédula. Activar explícitamente
+            # el radio de clave antes de localizar o rellenar el campo de consulta.
+            radio_clave = consulta.get_by_role(
+                "radio",
+                name="Clave de acceso / Nro. autorización",
+            )
+            if await radio_clave.count():
+                await radio_clave.first.check(force=True, timeout=5000)
+            else:
+                # Respaldo para páginas JSF cuyo radio no expone bien su nombre accesible.
+                radios = consulta.locator("input[type='radio']")
+                seleccionado = False
+                for indice in range(await radios.count()):
+                    radio = radios.nth(indice)
+                    radio_id = await radio.get_attribute("id")
+                    etiqueta = ""
+                    if radio_id:
+                        try:
+                            etiqueta = (await consulta.locator(f"label[for='{radio_id}']").inner_text()).strip()
+                        except Exception:
+                            pass
+                    if "Clave de acceso" in etiqueta or "Nro. autorización" in etiqueta:
+                        await radio.check(force=True, timeout=5000)
+                        seleccionado = True
+                        break
+                if not seleccionado:
+                    resultado["detalle"] = "No se pudo activar la opción Clave de acceso / Nro. autorización."
+                    return resultado
 
-            entradas = consulta.locator("input:not([type=hidden]):not([type=radio]):not([type=submit])")
+            await consulta.wait_for_timeout(400)
+
+            # Solo elegir un campo de texto visible y habilitado después de cambiar
+            # el modo de consulta; los campos del modo anterior pueden estar bloqueados.
+            entradas = consulta.locator("input:not([type=hidden]):not([type=radio]):not([type=submit]):enabled")
             entrada_objetivo = None
             for i in range(await entradas.count()):
                 el = entradas.nth(i)
