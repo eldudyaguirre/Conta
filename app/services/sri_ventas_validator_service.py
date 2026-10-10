@@ -81,8 +81,6 @@ class SriVentasValidatorService:
 
             dias_a_revisar = list(range(1, ultimo_dia + 1))
             if job_id:
-                with SriClienteSyncService.__dict__.get("unused", lambda: None)() if False else __import__("contextlib").nullcontext():
-                    pass
                 with __import__("app.database.connection", fromlist=["engine"]).engine.connect() as job_db:
                     detalle_job = job_db.execute(
                         text("SELECT detalle FROM conta_sri_jobs WHERE job_id = :job_id"),
