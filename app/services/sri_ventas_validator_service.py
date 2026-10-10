@@ -195,7 +195,7 @@ class SriVentasValidatorService:
                             dia_info["base_datos"] = int(cantidad_bd_final)
                             dia_info["estado"] = (
                                 "OK" if int(cantidad_sri) == int(cantidad_bd_final)
-                                and not sobrantes and not result["errores"]
+                                and not sobrantes
                                 else "DIFERENCIA"
                             )
                             if dia_info["estado"] == "OK":
