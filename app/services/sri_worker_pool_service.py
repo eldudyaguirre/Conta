@@ -33,7 +33,7 @@ class SriWorkerPoolService:
         normalizados = [str(ruc).strip() for ruc in rucs]
         if not 1 <= len(normalizados) <= 5:
             raise ValueError("Selecciona entre 1 y 5 RUC para la prueba.")
-        if any(not re.fullmatch(r"\\d{13}", ruc) for ruc in normalizados):
+        if any(not re.fullmatch(r"\d{13}", ruc) for ruc in normalizados):
             raise ValueError("Todos los RUC deben tener exactamente 13 dígitos.")
         if len(set(normalizados)) != len(normalizados):
             raise ValueError("La lista contiene RUC repetidos.")
