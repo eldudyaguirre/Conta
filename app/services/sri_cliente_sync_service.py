@@ -288,7 +288,8 @@ class SriClienteSyncService:
             row = db.execute(text(f"""
                 SELECT job_id, estado, ruc, cliente, anio, mes, tipo_comprobante,
                        sri, ya_existentes, descargadas, guardadas, errores,
-                       paginas, mensaje, detalle, creado, actualizado, operacion
+                       paginas, dias_revisados, dias_ok, dias_diferentes,
+                       faltantes, sobrantes, mensaje, detalle, creado, actualizado, operacion
                 FROM {cls.JOB_TABLE}
                 WHERE job_id = :job_id
             """), {"job_id": job_id}).mappings().first()
