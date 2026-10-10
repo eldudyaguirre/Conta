@@ -230,13 +230,18 @@ class SriVentasValidatorService:
                 ensure_ascii=False,
                 default=str,
             )
+            # Publicar el listado de errores solo al finalizar todos los días.
+            # Durante el recorrido se acumulan en memoria, sin disparar consultas
+            # diagnósticas adicionales por cada factura que no abra.
             SriClienteSyncService._job_update(
                 job_id,
                 detalle=detalle,
+                errores=result["errores"],
                 mensaje=(
                     f"Validador terminado: {result['dias_revisados']} días revisados, "
                     f"{result['dias_diferentes']} con diferencia, "
-                    f"{result['faltantes']} faltantes recuperados."
+                    f"{result['faltantes']} faltantes recuperados y "
+                    f"{len(result['errores'])} errores."
                 ),
             )
             result["ok"] = not result["errores"]
@@ -381,23 +386,14 @@ class SriVentasValidatorService:
 
                     html = await SriClienteSyncService._obtener_detalle_emitido(page, idx)
                     if not html:
-                        claves_fila = re.findall(r"\b\d{49}\b", texto_fila)
-                        diagnostico_clave = ""
-                        if claves_fila:
-                            consulta_clave = await SriClienteSyncService._consultar_validez_por_clave(
-                                page, claves_fila[0]
-                            )
-                            diagnostico_clave = (
-                                f" Consulta individual por clave: {consulta_clave.get('estado', 'NO_VERIFICADO')}. "
-                                f"{consulta_clave.get('detalle', '')[:500]}"
-                            )
-                        else:
-                            diagnostico_clave = " No se pudo extraer una clave de acceso de 49 dígitos de la fila."
+                        # Registrar el fallo y continuar con la siguiente fila.
+                        # No abrir una consulta pública secundaria por cada error:
+                        # puede interrumpir el recorrido de páginas/días y ralentizar
+                        # la validación. El detalle completo de errores se publica al final.
                         raise ValueError(
                             "No se pudo abrir el detalle de la factura. "
                             f"Fecha: {fecha_factura}; número de factura: {numero_factura}. "
                             f"Fila SRI: {texto_fila or 'sin texto disponible'}."
-                            f"{diagnostico_clave}"
                         )
 
                     factura = SriClienteSyncService._parsear_factura_emitida_html(html)
@@ -450,12 +446,14 @@ class SriVentasValidatorService:
                         "fecha_factura": fecha_factura,
                         "detalle": str(exc),
                     })
+                    # No publicar/reprocesar la lista de errores durante el recorrido.
+                    # Se conserva el error en result y se continúa con la siguiente fila.
                     SriClienteSyncService._job_update(
                         job_id,
-                        errores=result["errores"],
                         mensaje=(
-                            f"Error validando {fecha.strftime('%d/%m/%Y')} "
-                            f"fila {idx + 1}: {exc}"
+                            f"Validador: incidencia registrada en "
+                            f"{fecha.strftime('%d/%m/%Y')}, fila {idx + 1}; "
+                            "continúa la revisión."
                         ),
                     )
 
