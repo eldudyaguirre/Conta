@@ -1875,8 +1875,14 @@ class SriClienteSyncService:
         return await filas.count()
 
     @classmethod
+    @classmethod
     async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
-        """Abre el detalle de una fila del listado SRI con reintentos y diagnóstico."""
+        """Abre y recupera el panel AJAX de detalle de factura del portal SRI.
+
+        El SRI no devuelve necesariamente un diálogo PrimeFaces: el clic sobre
+        el enlace de la fila actualiza form-detalle-factura:panel-detalle-factura.
+        Por eso esperamos el panel actualizado y devolvemos su HTML al parser.
+        """
         import logging
 
         logger = logging.getLogger(__name__)
@@ -1886,67 +1892,81 @@ class SriClienteSyncService:
             logger.warning("SRI detalle emitido: no existe fila índice=%s", fila_idx)
             return None
 
-        enlaces = fila.locator("a")
-        total_enlaces = await enlaces.count()
-        if total_enlaces == 0:
-            logger.warning("SRI detalle emitido: fila índice=%s sin enlaces", fila_idx)
+        # En la pantalla real el enlace que abre el detalle es j_idt53.
+        # No usar el primer enlace de la fila: puede ser el enlace del PDF.
+        enlace_detalle = fila.locator("a[id$=':j_idt53']")
+        if await enlace_detalle.count() == 0:
+            # Respaldo para cambios menores en los identificadores JSF.
+            enlaces = fila.locator("a")
+            for i in range(await enlaces.count()):
+                enlace = enlaces.nth(i)
+                try:
+                    etiqueta = " ".join((await enlace.inner_text()).split()).lower()
+                    onclick = (await enlace.get_attribute("onclick") or "").lower()
+                    href = (await enlace.get_attribute("href") or "").lower()
+                    if (
+                        "detalle" in etiqueta
+                        or "j_idt53" in onclick
+                        or "j_idt53" in href
+                    ):
+                        enlace_detalle = enlace
+                        break
+                except Exception:
+                    continue
+
+        if await enlace_detalle.count() == 0:
+            logger.warning(
+                "SRI detalle emitido: no se encontró enlace de detalle en fila=%s",
+                fila_idx + 1,
+            )
             return None
 
-        # El listado PrimeFaces puede tardar en procesar el clic AJAX. Reintentamos
-        # el enlace de clave de acceso y comprobamos el contenido del diálogo.
+        panel = page.locator("#form-detalle-factura\\:panel-detalle-factura")
+        html_previo = ""
+        try:
+            if await panel.count():
+                html_previo = await panel.first.inner_html()
+        except Exception:
+            pass
+
         for intento in range(1, 4):
             try:
-                dialogs = page.locator(".ui-dialog:visible")
-                for i in range(await dialogs.count()):
-                    dialogo = dialogs.nth(i)
-                    html_previo = await dialogo.inner_html()
-                    if "Clave de acceso" in html_previo and "Espere por favor" not in html_previo:
-                        boton = dialogo.locator(".ui-dialog-titlebar-close")
-                        if await boton.count():
-                            await boton.click()
-                            await page.wait_for_timeout(250)
-                        break
+                await enlace_detalle.first.scroll_into_view_if_needed(timeout=4000)
+                await enlace_detalle.first.click(timeout=8000)
 
-                enlace = enlaces.first
-                try:
-                    await enlace.scroll_into_view_if_needed(timeout=3000)
-                except Exception:
-                    pass
-
-                # Primero clic normal para dejar que PrimeFaces ejecute su manejador;
-                # si falla, el siguiente intento usa el clic DOM.
-                if intento < 3:
-                    await enlace.click(timeout=4000)
-                else:
-                    await enlace.evaluate("(el) => el.click()")
-
-                for _ in range(20):
+                # PrimeFaces responde con partial-response XML y actualiza el
+                # panel de detalle sin cambiar de página ni abrir un diálogo.
+                for _ in range(40):
                     await page.wait_for_timeout(250)
-                    dialogs = page.locator(".ui-dialog:visible")
-                    for i in range(await dialogs.count()):
-                        dialogo = dialogs.nth(i)
-                        html = await dialogo.inner_html()
-                        texto = " ".join((await dialogo.inner_text()).split())
-                        if (
-                            "Espere por favor" not in texto
-                            and ("Clave de acceso" in texto or "Número de autorización" in texto)
-                            and len(texto) > 80
-                        ):
-                            boton = dialogo.locator(".ui-dialog-titlebar-close")
-                            if await boton.count():
-                                await boton.click()
-                                await page.wait_for_timeout(200)
+                    if await panel.count():
+                        html = await panel.first.inner_html()
+                        texto = " ".join((await panel.first.inner_text()).split())
+                        es_detalle = (
+                            "tabla-impuestos-detalle-factura" in html
+                            or (
+                                "Detalle factura" in texto
+                                and ("Identificación Comprador" in texto or "Fecha Emisión" in texto)
+                            )
+                        )
+                        if es_detalle and (html != html_previo or intento > 1):
+                            logger.info(
+                                "SRI detalle emitido recuperado: fila=%s intento=%s caracteres=%s",
+                                fila_idx + 1, intento, len(html),
+                            )
                             return html
+
                 logger.warning(
-                    "SRI detalle emitido: intento=%s sin diálogo válido, fila=%s, enlaces=%s",
-                    intento, fila_idx + 1, total_enlaces,
+                    "SRI detalle emitido: respuesta AJAX sin detalle, fila=%s intento=%s",
+                    fila_idx + 1, intento,
                 )
+                # Evita devolver un panel viejo como si correspondiera a esta fila.
+                html_previo = html if "html" in locals() else html_previo
             except Exception as exc:
                 logger.warning(
                     "SRI detalle emitido: fallo intento=%s fila=%s: %s",
                     intento, fila_idx + 1, exc,
                 )
-                await page.wait_for_timeout(400)
+                await page.wait_for_timeout(500)
 
         return None
 
