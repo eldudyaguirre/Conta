@@ -1876,23 +1876,78 @@ class SriClienteSyncService:
 
     @classmethod
     async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
-        fila = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr").nth(fila_idx)
-        enlace = fila.locator("a").first
-        if await enlace.count() == 0:
+        """Abre el detalle de una fila del listado SRI con reintentos y diagnóstico."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        selector_filas = "#frmPrincipal\\:tablaCompEmitidos_data tr"
+        fila = page.locator(selector_filas).nth(fila_idx)
+        if await fila.count() == 0:
+            logger.warning("SRI detalle emitido: no existe fila índice=%s", fila_idx)
             return None
-        await enlace.scroll_into_view_if_needed()
-        await enlace.click(force=True)
-        for _ in range(60):
-            await page.wait_for_timeout(500)
-            dialogs = page.locator(".ui-dialog:visible")
-            for i in range(await dialogs.count()):
-                dialogo = dialogs.nth(i)
-                html = await dialogo.inner_html()
-                if "Espere por favor" not in html and "Clave de acceso" in html:
-                    boton = dialogo.locator(".ui-dialog-titlebar-close")
-                    if await boton.count():
-                        await boton.click()
-                    return html
+
+        enlaces = fila.locator("a")
+        total_enlaces = await enlaces.count()
+        if total_enlaces == 0:
+            logger.warning("SRI detalle emitido: fila índice=%s sin enlaces", fila_idx)
+            return None
+
+        # El listado PrimeFaces puede tardar en procesar el clic AJAX. Reintentamos
+        # el enlace de clave de acceso y comprobamos el contenido del diálogo.
+        for intento in range(1, 4):
+            try:
+                dialogs = page.locator(".ui-dialog:visible")
+                for i in range(await dialogs.count()):
+                    dialogo = dialogs.nth(i)
+                    html_previo = await dialogo.inner_html()
+                    if "Clave de acceso" in html_previo and "Espere por favor" not in html_previo:
+                        boton = dialogo.locator(".ui-dialog-titlebar-close")
+                        if await boton.count():
+                            await boton.click()
+                            await page.wait_for_timeout(250)
+                        break
+
+                enlace = enlaces.first
+                try:
+                    await enlace.scroll_into_view_if_needed(timeout=3000)
+                except Exception:
+                    pass
+
+                # Primero clic normal para dejar que PrimeFaces ejecute su manejador;
+                # si falla, el siguiente intento usa el clic DOM.
+                if intento < 3:
+                    await enlace.click(timeout=4000)
+                else:
+                    await enlace.evaluate("(el) => el.click()")
+
+                for _ in range(20):
+                    await page.wait_for_timeout(250)
+                    dialogs = page.locator(".ui-dialog:visible")
+                    for i in range(await dialogs.count()):
+                        dialogo = dialogs.nth(i)
+                        html = await dialogo.inner_html()
+                        texto = " ".join((await dialogo.inner_text()).split())
+                        if (
+                            "Espere por favor" not in texto
+                            and ("Clave de acceso" in texto or "Número de autorización" in texto)
+                            and len(texto) > 80
+                        ):
+                            boton = dialogo.locator(".ui-dialog-titlebar-close")
+                            if await boton.count():
+                                await boton.click()
+                                await page.wait_for_timeout(200)
+                            return html
+                logger.warning(
+                    "SRI detalle emitido: intento=%s sin diálogo válido, fila=%s, enlaces=%s",
+                    intento, fila_idx + 1, total_enlaces,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "SRI detalle emitido: fallo intento=%s fila=%s: %s",
+                    intento, fila_idx + 1, exc,
+                )
+                await page.wait_for_timeout(400)
+
         return None
 
     @classmethod
