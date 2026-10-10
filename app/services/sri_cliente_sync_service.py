@@ -324,14 +324,21 @@ class SriClienteSyncService:
             """), {"worker_id": worker_id, "usuario": usuario, "equipo": equipo})
 
     @classmethod
-    def obtener_trabajo_pendiente(cls, worker_id: str | None = None) -> dict[str, Any] | None:
-        """Reclama atómicamente un trabajo y lo identifica con el worker."""
+    def obtener_trabajo_pendiente(
+        cls,
+        worker_id: str | None = None,
+        *,
+        solo_pool: bool = False,
+    ) -> dict[str, Any] | None:
+        """Reclama un trabajo; en modo de prueba solo toma trabajos agrupados."""
         cls._ensure_jobs_table()
+        filtro_pool = "AND grupo_id IS NOT NULL" if solo_pool else ""
         with engine.begin() as db:
             row = db.execute(text(f"""
                 SELECT job_id, ruc, anio, mes, tipo_comprobante, operacion
                 FROM {cls.JOB_TABLE}
                 WHERE estado = 'pendiente'
+                  {filtro_pool}
                 ORDER BY creado
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
