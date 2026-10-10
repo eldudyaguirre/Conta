@@ -1963,6 +1963,29 @@ class SriClienteSyncService:
                         "SRI detalle emitido recuperado desde AJAX: fila=%s intento=%s caracteres=%s",
                         fila_idx + 1, intento, len(html),
                     )
+                    # El AJAX actualiza el panel y abre un diálogo PrimeFaces.
+                    # Cerrarlo antes de devolver el HTML evita que el overlay
+                    # bloquee la siguiente fila o el paginador en la sincronización normal.
+                    try:
+                        dialogo = page.locator(".ui-dialog:visible").last
+                        if await dialogo.count():
+                            cerrar = dialogo.locator(
+                                ".ui-dialog-titlebar-close, "
+                                "button[aria-label='Close'], "
+                                "button[aria-label='Cerrar']"
+                            ).first
+                            if await cerrar.count() and await cerrar.is_visible():
+                                await cerrar.click(timeout=3000)
+                            else:
+                                await page.keyboard.press("Escape")
+                            await page.locator(".ui-widget-overlay").wait_for(
+                                state="hidden", timeout=3000
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "SRI detalle emitido: no se pudo cerrar diálogo tras recuperar fila=%s: %s",
+                            fila_idx + 1, exc,
+                        )
                     return html
 
                 logger.warning(
