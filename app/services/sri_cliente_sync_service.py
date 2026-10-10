@@ -153,7 +153,7 @@ class SriClienteSyncService:
             ), params)
 
     @classmethod
-    def iniciar_sincronizacion(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, operacion: str = "compras") -> dict[str, Any]:
+    def iniciar_sincronizacion(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, operacion: str = "compras", dias_objetivo: list[str] | None = None) -> dict[str, Any]:
         # El trabajo se guarda en PostgreSQL para que la API y el worker
         # interactivo compartan la misma cola, incluso en procesos separados.
         cred = cls._credenciales(ruc)
@@ -182,9 +182,9 @@ class SriClienteSyncService:
             job_id = uuid.uuid4().hex
             db.execute(text(f"""
                 INSERT INTO {cls.JOB_TABLE}
-                (job_id, estado, ruc, cliente, anio, mes, tipo_comprobante, operacion, mensaje)
+                (job_id, estado, ruc, cliente, anio, mes, tipo_comprobante, operacion, mensaje, detalle)
                 VALUES
-                (:job_id, 'pendiente', :ruc, :cliente, :anio, :mes, :tipo, :operacion, :mensaje)
+                (:job_id, 'pendiente', :ruc, :cliente, :anio, :mes, :tipo, :operacion, :mensaje, :detalle)
             """), {
                 "job_id": job_id,
                 "ruc": ruc,
@@ -193,6 +193,7 @@ class SriClienteSyncService:
                 "mes": mes,
                 "tipo": cls._tipo(tipo_comprobante), "operacion": operacion,
                 "mensaje": "Sincronización en cola. Esperando al worker SRI interactivo.",
+                "detalle": json.dumps({"dias_objetivo": dias_objetivo or []}, ensure_ascii=False) if operacion == "ventas_reparar" else None,
             })
         return {"job_id": job_id, "estado": "pendiente", "duplicado": False}
 
@@ -204,7 +205,7 @@ class SriClienteSyncService:
             mensaje="Worker SRI activo. Iniciando navegador y conexión con el SRI.",
         )
         try:
-            if operacion == "ventas_validar":
+            if operacion in ("ventas_validar", "ventas_reparar"):
                 # Import local para evitar dependencia circular: el validador
                 # reutiliza los selectores y parsers del sincronizador SRI.
                 from app.services.sri_ventas_validator_service import SriVentasValidatorService
