@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -10,7 +11,9 @@ from app.services.sri_cliente_sync_service import SriClienteSyncService
 
 
 class SriWorkerPoolService:
-    """Operaciones controladas para probar el pool de workers SRI."""
+    """Operaciones controladas para probar el pool SRI con RUC explícitos."""
+
+    ESTADOS_ACTIVOS = ("pendiente", "ejecutando", "captcha")
 
     @classmethod
     def _ensure_pool_schema(cls) -> None:
@@ -25,59 +28,156 @@ class SriWorkerPoolService:
                 ON conta_sri_jobs(grupo_id, creado)
             """))
 
+    @staticmethod
+    def _validar_rucs(rucs: list[str]) -> list[str]:
+        normalizados = [str(ruc).strip() for ruc in rucs]
+        if not 1 <= len(normalizados) <= 5:
+            raise ValueError("Selecciona entre 1 y 5 RUC para la prueba.")
+        if any(not re.fullmatch(r"\\d{13}", ruc) for ruc in normalizados):
+            raise ValueError("Todos los RUC deben tener exactamente 13 dígitos.")
+        if len(set(normalizados)) != len(normalizados):
+            raise ValueError("La lista contiene RUC repetidos.")
+        return normalizados
+
+    @classmethod
+    def _consultar_clientes(
+        cls,
+        db,
+        rucs: list[str],
+        *,
+        anio: int,
+        mes: int,
+        tipo: str,
+        operacion: str,
+    ) -> list[dict[str, Any]]:
+        placeholders = ", ".join(f":ruc_{i}" for i in range(len(rucs)))
+        params = {
+            f"ruc_{i}": ruc for i, ruc in enumerate(rucs)
+        }
+        params.update({
+            "anio": anio,
+            "mes": mes,
+            "tipo": tipo,
+            "operacion": operacion,
+        })
+        rows = db.execute(text(f"""
+            SELECT
+                c.ruccedcli::text AS ruc,
+                COALESCE(c.nomclient, '') AS cliente,
+                COALESCE(c.activo, FALSE) AS activo,
+                (NULLIF(TRIM(COALESCE(c.clavesri, '')), '') IS NOT NULL) AS tiene_clave,
+                EXISTS (
+                    SELECT 1
+                    FROM conta_sri_jobs j
+                    WHERE TRIM(j.ruc) = TRIM(c.ruccedcli::text)
+                      AND j.anio = :anio
+                      AND j.mes = :mes
+                      AND j.tipo_comprobante = :tipo
+                      AND j.operacion = :operacion
+                      AND j.estado IN ('pendiente', 'ejecutando', 'captcha')
+                ) AS trabajo_en_curso
+            FROM clientes c
+            WHERE TRIM(c.ruccedcli::text) IN ({placeholders})
+            ORDER BY c.ruccedcli
+        """), params).mappings().all()
+
+        por_ruc = {str(row["ruc"]).strip(): dict(row) for row in rows}
+        resultado = []
+        for ruc in rucs:
+            row = por_ruc.get(ruc)
+            if row is None:
+                resultado.append({
+                    "ruc": ruc,
+                    "cliente": "",
+                    "disponible": False,
+                    "motivo": "RUC no encontrado en la tabla clientes.",
+                })
+                continue
+
+            if not row["activo"]:
+                motivo = "Cliente inactivo."
+            elif not row["tiene_clave"]:
+                motivo = "El cliente no tiene clave SRI configurada."
+            elif row["trabajo_en_curso"]:
+                motivo = "Ya existe una sincronización equivalente en curso."
+            else:
+                motivo = "Disponible para la prueba."
+
+            resultado.append({
+                "ruc": ruc,
+                "cliente": str(row["cliente"] or "").strip(),
+                "disponible": motivo == "Disponible para la prueba.",
+                "motivo": motivo,
+            })
+        return resultado
+
+    @classmethod
+    def previsualizar(
+        cls,
+        *,
+        rucs: list[str],
+        anio: int,
+        mes: int,
+        tipo_comprobante: int = 1,
+        operacion: str = "compras",
+    ) -> dict[str, Any]:
+        """Valida una selección explícita sin encolar ni ejecutar trabajos."""
+        cls._ensure_pool_schema()
+        rucs = cls._validar_rucs(rucs)
+        tipo = SriClienteSyncService._tipo(tipo_comprobante)
+        with engine.connect() as db:
+            clientes = cls._consultar_clientes(
+                db, rucs, anio=anio, mes=mes, tipo=tipo, operacion=operacion
+            )
+        disponibles = sum(1 for c in clientes if c["disponible"])
+        return {
+            "modo": "previsualizacion",
+            "sin_trabajos_creados": True,
+            "cantidad_solicitada": len(rucs),
+            "cantidad_disponible": disponibles,
+            "anio": anio,
+            "mes": mes,
+            "tipo_comprobante": tipo,
+            "operacion": operacion,
+            "clientes": clientes,
+        }
+
     @classmethod
     def iniciar_prueba(
         cls,
         *,
+        rucs: list[str],
         anio: int,
         mes: int,
-        cantidad: int = 5,
         tipo_comprobante: int = 1,
         operacion: str = "compras",
     ) -> dict[str, Any]:
-        """Crea un grupo de trabajos para clientes activos con credenciales.
-
-        No toma clientes que ya tengan un trabajo equivalente pendiente,
-        ejecutándose o en CAPTCHA. No modifica la configuración de concurrencia:
-        el número de workers se controla por SRI_WORKER_CONCURRENCY.
-        """
+        """Encola trabajos reales solo para los RUC explícitamente seleccionados."""
         cls._ensure_pool_schema()
+        rucs = cls._validar_rucs(rucs)
         grupo_id = uuid.uuid4().hex
         tipo = SriClienteSyncService._tipo(tipo_comprobante)
 
         with engine.begin() as db:
-            clientes = db.execute(text("""
-                SELECT
-                    c.ruccedcli::text AS ruc,
-                    COALESCE(c.nomclient, '') AS cliente
-                FROM clientes c
-                WHERE COALESCE(c.activo, FALSE) = TRUE
-                  AND NULLIF(TRIM(COALESCE(c.clavesri, '')), '') IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM conta_sri_jobs j
-                      WHERE TRIM(j.ruc) = TRIM(c.ruccedcli::text)
-                        AND j.anio = :anio
-                        AND j.mes = :mes
-                        AND j.tipo_comprobante = :tipo
-                        AND j.operacion = :operacion
-                        AND j.estado IN ('pendiente', 'ejecutando', 'captcha')
-                  )
-                ORDER BY c.ruccedcli
-                LIMIT :cantidad
-                FOR UPDATE OF c SKIP LOCKED
-            """), {
-                "anio": anio,
-                "mes": mes,
-                "tipo": tipo,
-                "operacion": operacion,
-                "cantidad": cantidad,
-            }).mappings().all()
+            # Serializa solicitudes concurrentes para los mismos RUC durante
+            # la validación y creación de los trabajos.
+            for ruc in sorted(rucs):
+                db.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:clave))"),
+                    {"clave": f"conta_sri_pool:{ruc}:{anio}:{mes}:{tipo}:{operacion}"},
+                )
 
-            if not clientes:
+            clientes = cls._consultar_clientes(
+                db, rucs, anio=anio, mes=mes, tipo=tipo, operacion=operacion
+            )
+            no_disponibles = [c for c in clientes if not c["disponible"]]
+            if no_disponibles:
+                detalle = "; ".join(
+                    f"{c['ruc']}: {c['motivo']}" for c in no_disponibles
+                )
                 raise ValueError(
-                    "No hay clientes activos con clave SRI disponibles para la prueba. "
-                    "Puede que ya tengan sincronizaciones equivalentes en curso."
+                    "No se encoló ningún trabajo porque hay RUC no disponibles: "
+                    + detalle
                 )
 
             trabajos: list[dict[str, Any]] = []
@@ -96,8 +196,8 @@ class SriWorkerPoolService:
                 """), {
                     "job_id": job_id,
                     "grupo_id": grupo_id,
-                    "ruc": str(cliente["ruc"]).strip(),
-                    "cliente": str(cliente["cliente"] or "").strip(),
+                    "ruc": cliente["ruc"],
+                    "cliente": cliente["cliente"],
                     "anio": anio,
                     "mes": mes,
                     "tipo": tipo,
@@ -105,8 +205,8 @@ class SriWorkerPoolService:
                 })
                 trabajos.append({
                     "job_id": job_id,
-                    "ruc": str(cliente["ruc"]).strip(),
-                    "cliente": str(cliente["cliente"] or "").strip(),
+                    "ruc": cliente["ruc"],
+                    "cliente": cliente["cliente"],
                     "estado": "pendiente",
                 })
 
