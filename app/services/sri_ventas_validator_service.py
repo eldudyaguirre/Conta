@@ -381,10 +381,23 @@ class SriVentasValidatorService:
 
                     html = await SriClienteSyncService._obtener_detalle_emitido(page, idx)
                     if not html:
+                        claves_fila = re.findall(r"\b\d{49}\b", texto_fila)
+                        diagnostico_clave = ""
+                        if claves_fila:
+                            consulta_clave = await SriClienteSyncService._consultar_validez_por_clave(
+                                page, claves_fila[0]
+                            )
+                            diagnostico_clave = (
+                                f" Consulta individual por clave: {consulta_clave.get('estado', 'NO_VERIFICADO')}. "
+                                f"{consulta_clave.get('detalle', '')[:500]}"
+                            )
+                        else:
+                            diagnostico_clave = " No se pudo extraer una clave de acceso de 49 dígitos de la fila."
                         raise ValueError(
                             "No se pudo abrir el detalle de la factura. "
                             f"Fecha: {fecha_factura}; número de factura: {numero_factura}. "
-                            f"Fila SRI: {texto_fila or 'sin texto disponible'}"
+                            f"Fila SRI: {texto_fila or 'sin texto disponible'}."
+                            f"{diagnostico_clave}"
                         )
 
                     factura = SriClienteSyncService._parsear_factura_emitida_html(html)
