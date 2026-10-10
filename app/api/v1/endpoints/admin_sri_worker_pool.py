@@ -14,9 +14,13 @@ router = APIRouter(
 
 
 class PruebaWorkerPoolRequest(BaseModel):
+    rucs: list[str] = Field(
+        min_length=1,
+        max_length=5,
+        description="Entre 1 y 5 RUC seleccionados explícitamente para la prueba.",
+    )
     anio: int = Field(ge=2000, le=2100)
     mes: int = Field(ge=1, le=12)
-    cantidad: int = Field(default=5, ge=1, le=10)
     tipo_comprobante: int = Field(default=1, ge=1, le=7)
     operacion: Literal[
         "compras",
@@ -27,6 +31,35 @@ class PruebaWorkerPoolRequest(BaseModel):
         "retenciones_emitidas",
         "ventas_validar",
     ] = "compras"
+    confirmar_ejecucion_real: bool = False
+
+
+@router.post("/prueba/preview")
+def previsualizar_worker_pool(
+    request: PruebaWorkerPoolRequest,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Valida RUC y credenciales sin crear trabajos ni abrir Chromium."""
+    try:
+        resultado = SriWorkerPoolService.previsualizar(
+            rucs=request.rucs,
+            anio=request.anio,
+            mes=request.mes,
+            tipo_comprobante=request.tipo_comprobante,
+            operacion=request.operacion,
+        )
+        return {
+            "usuario": usuario["usrname"],
+            "tipo": "sri_worker_pool_preview",
+            **resultado,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error validando la previsualización del worker pool: {exc}",
+        )
 
 
 @router.post("/prueba")
@@ -34,12 +67,20 @@ def iniciar_prueba_worker_pool(
     request: PruebaWorkerPoolRequest,
     usuario: dict = Depends(get_admin_user),
 ):
-    """Encola una prueba controlada con clientes activos distintos."""
+    """Encola trabajos reales solo después de confirmar expresamente."""
+    if not request.confirmar_ejecucion_real:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No se creó ningún trabajo. Primero usa /prueba/preview y, "
+                "cuando confirmes los RUC, envía confirmar_ejecucion_real=true."
+            ),
+        )
     try:
         resultado = SriWorkerPoolService.iniciar_prueba(
+            rucs=request.rucs,
             anio=request.anio,
             mes=request.mes,
-            cantidad=request.cantidad,
             tipo_comprobante=request.tipo_comprobante,
             operacion=request.operacion,
         )
