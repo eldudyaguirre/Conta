@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     # Cantidad de tareas simultáneas por instancia del worker.
     # Para una arquitectura de 5 PCs, usar 1 en cada PC.
     SRI_WORKER_CONCURRENCY: int = 1
+    # Activar solo en el entorno de pruebas del worker pool.
+    SRI_WORKER_POOL_ONLY: bool = False
     SRI_WORKER_USER: str = ""
     SRI_WORKER_HEARTBEAT_SECONDS: int = 10
 
