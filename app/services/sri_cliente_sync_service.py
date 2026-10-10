@@ -1876,13 +1876,15 @@ class SriClienteSyncService:
 
     @classmethod
     async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
-        """Abre y recupera el panel AJAX de detalle de factura del portal SRI.
+        """Recupera el HTML del detalle de factura desde la respuesta AJAX real del SRI.
 
-        El SRI no devuelve necesariamente un diálogo PrimeFaces: el clic sobre
-        el enlace de la fila actualiza form-detalle-factura:panel-detalle-factura.
-        Por eso esperamos el panel actualizado y devolvemos su HTML al parser.
+        En el portal observado, el clic dispara una respuesta PrimeFaces XML con
+        <update id="form-detalle-factura:panel-detalle-factura">. Leer esa respuesta
+        es más fiable que esperar un diálogo o asumir que el DOM ya se actualizó.
         """
         import logging
+        import re
+        import xml.etree.ElementTree as ET
 
         logger = logging.getLogger(__name__)
         selector_filas = "#frmPrincipal\\:tablaCompEmitidos_data tr"
@@ -1891,81 +1893,78 @@ class SriClienteSyncService:
             logger.warning("SRI detalle emitido: no existe fila índice=%s", fila_idx)
             return None
 
-        # En la pantalla real el enlace que abre el detalle es j_idt53.
-        # No usar el primer enlace de la fila: puede ser el enlace del PDF.
+        # El HAR confirma que el origen del AJAX es ...tablaCompEmitidos:{índice}:j_idt53.
         enlace_detalle = fila.locator("a[id$=':j_idt53']")
         if await enlace_detalle.count() == 0:
-            # Respaldo para cambios menores en los identificadores JSF.
-            enlaces = fila.locator("a")
-            for i in range(await enlaces.count()):
-                enlace = enlaces.nth(i)
-                try:
-                    etiqueta = " ".join((await enlace.inner_text()).split()).lower()
-                    onclick = (await enlace.get_attribute("onclick") or "").lower()
-                    href = (await enlace.get_attribute("href") or "").lower()
-                    if (
-                        "detalle" in etiqueta
-                        or "j_idt53" in onclick
-                        or "j_idt53" in href
-                    ):
-                        enlace_detalle = enlace
-                        break
-                except Exception:
-                    continue
-
-        if await enlace_detalle.count() == 0:
             logger.warning(
-                "SRI detalle emitido: no se encontró enlace de detalle en fila=%s",
+                "SRI detalle emitido: no se encontró el enlace j_idt53 en fila=%s",
                 fila_idx + 1,
             )
             return None
 
-        panel = page.locator("#form-detalle-factura\\:panel-detalle-factura")
-        html_previo = ""
-        try:
-            if await panel.count():
-                html_previo = await panel.first.inner_html()
-        except Exception:
-            pass
-
         for intento in range(1, 4):
             try:
-                await enlace_detalle.first.scroll_into_view_if_needed(timeout=4000)
-                await enlace_detalle.first.click(timeout=8000)
+                await enlace_detalle.first.scroll_into_view_if_needed(timeout=5000)
+                async with page.expect_response(
+                    lambda response: (
+                        "recuperarComprobantes.jsf" in response.url
+                        and response.request.method == "POST"
+                        and "javax.faces.partial.ajax" in (response.request.post_data or "")
+                        and "form-detalle-factura%3Apanel-detalle-factura"
+                        in (response.request.post_data or "")
+                    ),
+                    timeout=12000,
+                ) as respuesta_esperada:
+                    await enlace_detalle.first.click(timeout=8000)
 
-                # PrimeFaces responde con partial-response XML y actualiza el
-                # panel de detalle sin cambiar de página ni abrir un diálogo.
-                for _ in range(40):
-                    await page.wait_for_timeout(250)
-                    if await panel.count():
-                        html = await panel.first.inner_html()
-                        texto = " ".join((await panel.first.inner_text()).split())
-                        es_detalle = (
-                            "tabla-impuestos-detalle-factura" in html
-                            or (
-                                "Detalle factura" in texto
-                                and ("Identificación Comprador" in texto or "Fecha Emisión" in texto)
-                            )
-                        )
-                        if es_detalle and (html != html_previo or intento > 1):
-                            logger.info(
-                                "SRI detalle emitido recuperado: fila=%s intento=%s caracteres=%s",
-                                fila_idx + 1, intento, len(html),
-                            )
-                            return html
+                respuesta = await respuesta_esperada.value
+                if not respuesta.ok:
+                    logger.warning(
+                        "SRI detalle emitido: HTTP %s fila=%s intento=%s",
+                        respuesta.status, fila_idx + 1, intento,
+                    )
+                    continue
+
+                cuerpo = await respuesta.text()
+                try:
+                    raiz = ET.fromstring(cuerpo)
+                    panel = raiz.find(".//update[@id='form-detalle-factura:panel-detalle-factura']")
+                    html = panel.text if panel is not None and panel.text else ""
+                except ET.ParseError:
+                    # Respaldo para respuestas XML mal formadas pero con CDATA intacta.
+                    coincidencia = re.search(
+                        r'<update\\s+id=["\\']form-detalle-factura:panel-detalle-factura["\\']\\s*>'
+                        r'\\s*<!\\[CDATA\\[(.*?)\\]\\]>',
+                        cuerpo,
+                        flags=re.DOTALL,
+                    )
+                    html = coincidencia.group(1) if coincidencia else ""
+
+                texto = " ".join(re.sub(r"<[^>]+>", " ", html).split())
+                if html and (
+                    "tabla-impuestos-detalle-factura" in html
+                    or (
+                        "Detalle factura" in texto
+                        and ("Identificación Comprador" in texto or "Fecha Emisión" in texto)
+                    )
+                ):
+                    logger.info(
+                        "SRI detalle emitido recuperado desde AJAX: fila=%s intento=%s caracteres=%s",
+                        fila_idx + 1, intento, len(html),
+                    )
+                    return html
 
                 logger.warning(
-                    "SRI detalle emitido: respuesta AJAX sin detalle, fila=%s intento=%s",
-                    fila_idx + 1, intento,
+                    "SRI detalle emitido: la respuesta AJAX no contenía el panel esperado "
+                    "(fila=%s intento=%s, HTTP=%s, bytes=%s)",
+                    fila_idx + 1, intento, respuesta.status, len(cuerpo),
                 )
-                # Evita devolver un panel viejo como si correspondiera a esta fila.
-                html_previo = html if "html" in locals() else html_previo
             except Exception as exc:
                 logger.warning(
                     "SRI detalle emitido: fallo intento=%s fila=%s: %s",
                     intento, fila_idx + 1, exc,
                 )
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(400)
 
         return None
 
