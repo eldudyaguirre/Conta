@@ -475,6 +475,40 @@ class SriVentasValidatorService:
                         ),
                     )
 
+                finally:
+                    # El detalle se abre en un diálogo modal PrimeFaces. Si queda
+                    # abierto, su overlay bloquea el clic del paginador y provoca
+                    # el timeout de Playwright al pasar a la siguiente página.
+                    try:
+                        dialogo = page.locator(".ui-dialog:visible").last
+                        if await dialogo.count():
+                            cerrar = dialogo.locator(
+                                ".ui-dialog-titlebar-close, "
+                                "button[aria-label='Close'], "
+                                "button[aria-label='Cerrar']"
+                            ).first
+                            if await cerrar.count() and await cerrar.is_visible():
+                                await cerrar.click(timeout=3000)
+                            else:
+                                await page.keyboard.press("Escape")
+                            await page.locator(".ui-widget-overlay").wait_for(
+                                state="hidden", timeout=3000
+                            )
+                    except Exception:
+                        # Evitar que un cierre no estándar impida continuar;
+                        # el control adicional antes de paginar vuelve a comprobarlo.
+                        pass
+
+            # Salvaguarda antes de cambiar de página: no pulsar el paginador
+            # mientras el overlay modal del detalle siga visible.
+            try:
+                overlay = page.locator(".ui-widget-overlay:visible").last
+                if await overlay.count():
+                    await page.keyboard.press("Escape")
+                    await overlay.wait_for(state="hidden", timeout=3000)
+            except Exception:
+                pass
+
             boton_next = page.locator("[class*='ui-paginator-next']").first
             if await boton_next.count() == 0:
                 break
