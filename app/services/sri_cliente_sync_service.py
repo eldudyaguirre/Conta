@@ -1933,8 +1933,7 @@ class SriClienteSyncService:
                 except ET.ParseError:
                     # Respaldo para respuestas XML mal formadas pero con CDATA intacta.
                     coincidencia = re.search(
-                        r'<update\\s+id=["\\']form-detalle-factura:panel-detalle-factura["\\']\\s*>'
-                        r'\\s*<!\\[CDATA\\[(.*?)\\]\\]>',
+                        r"""<update\s+id=["']form-detalle-factura:panel-detalle-factura["']\s*>\s*<!\[CDATA\[(.*?)\]\]>""",
                         cuerpo,
                         flags=re.DOTALL,
                     )
