@@ -1875,7 +1875,6 @@ class SriClienteSyncService:
         return await filas.count()
 
     @classmethod
-    @classmethod
     async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
         """Abre y recupera el panel AJAX de detalle de factura del portal SRI.
 
