@@ -79,7 +79,31 @@ class SriVentasValidatorService:
             db = obtener_session_cliente(ruc)
             ultimo_dia = calendar.monthrange(anio, mes)[1]
 
-            for dia in range(1, ultimo_dia + 1):
+            dias_a_revisar = list(range(1, ultimo_dia + 1))
+            if job_id:
+                with SriClienteSyncService.__dict__.get("unused", lambda: None)() if False else __import__("contextlib").nullcontext():
+                    pass
+                with __import__("app.database.connection", fromlist=["engine"]).engine.connect() as job_db:
+                    detalle_job = job_db.execute(
+                        text("SELECT detalle FROM conta_sri_jobs WHERE job_id = :job_id"),
+                        {"job_id": job_id},
+                    ).scalar()
+                try:
+                    payload_job = json.loads(detalle_job or "{}")
+                    fechas_objetivo = payload_job.get("dias_objetivo") or []
+                except (TypeError, ValueError):
+                    fechas_objetivo = []
+                if fechas_objetivo:
+                    dias_a_revisar = sorted({
+                        date.fromisoformat(str(fecha)).day
+                        for fecha in fechas_objetivo
+                        if date.fromisoformat(str(fecha)).year == anio
+                        and date.fromisoformat(str(fecha)).month == mes
+                    })
+                    if not dias_a_revisar:
+                        raise ValueError("No hay fechas válidas para reparar en el período seleccionado.")
+
+            for dia in dias_a_revisar:
                 SriClienteSyncService._verificar_cancelacion(job_id)
                 fecha_consulta = date(anio, mes, dia)
                 fecha_txt = fecha_consulta.strftime("%Y-%m-%d")
