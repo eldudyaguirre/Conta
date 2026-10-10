@@ -101,6 +101,10 @@ class SriVentasValidatorService:
                     if not dias_a_revisar:
                         raise ValueError("No hay fechas válidas para reparar en el período seleccionado.")
 
+            # Primera fase: recorrer todas las fechas comparando cantidades.
+            # Las revisiones factura por factura quedan para el final del recorrido.
+            dias_pendientes_revision: list[tuple[date, dict[str, Any]]] = []
+
             for dia in dias_a_revisar:
                 SriClienteSyncService._verificar_cancelacion(job_id)
                 fecha_consulta = date(anio, mes, dia)
@@ -153,64 +157,15 @@ class SriVentasValidatorService:
 
                 if cantidad_sri != cantidad_bd:
                     result["dias_diferentes"] += 1
+                    dias_pendientes_revision.append((fecha_consulta, dia_info))
                     SriClienteSyncService._job_update(
                         job_id,
                         dias_revisados=result["dias_revisados"],
                         dias_ok=result["dias_ok"],
                         dias_diferentes=result["dias_diferentes"],
                         mensaje=(
-                            f"Diferencia {fecha_ui}: SRI={cantidad_sri}, "
-                            f"BD={cantidad_bd}. Revisando factura por factura."
-                        ),
-                    )
-                    faltantes, sobrantes = await cls._revisar_dia_uno_por_uno(
-                        page, db, fecha_consulta, result, job_id
-                    )
-                    dia_info["faltantes"] = len(faltantes)
-                    dia_info["sobrantes"] = len(sobrantes)
-                    dia_info["claves_faltantes"] = faltantes[:100]
-                    dia_info["claves_sobrantes"] = sobrantes[:100]
-                    result["faltantes"] += len(faltantes)
-                    result["sobrantes"] += len(sobrantes)
-
-                    if job_id:
-                        with __import__("app.database.connection", fromlist=["engine"]).engine.connect() as job_db:
-                            operacion_job = job_db.execute(
-                                text("SELECT operacion FROM conta_sri_jobs WHERE job_id = :job_id"),
-                                {"job_id": job_id},
-                            ).scalar()
-                        if operacion_job == "ventas_reparar":
-                            cantidad_bd_final = db.execute(text("""
-                                SELECT COUNT(*)
-                                FROM ventas
-                                WHERE TRIM(fecfactur::text) = :fecha
-                                  AND TRIM(mes::text) = :mes
-                                  AND TRIM(año::text) = :anio
-                                  AND TRIM(codcomp::text) = '18'
-                            """), {
-                                "fecha": fecha_ui,
-                                "mes": f"{mes:02d}",
-                                "anio": str(anio),
-                            }).scalar_one()
-                            dia_info["base_datos"] = int(cantidad_bd_final)
-                            dia_info["estado"] = (
-                                "OK" if int(cantidad_sri) == int(cantidad_bd_final)
-                                and not sobrantes
-                                else "DIFERENCIA"
-                            )
-                            if dia_info["estado"] == "OK":
-                                result["dias_diferentes"] = max(0, result["dias_diferentes"] - 1)
-                                result["dias_ok"] += 1
-
-                    SriClienteSyncService._job_update(
-                        job_id,
-                        faltantes=result["faltantes"],
-                        sobrantes=result["sobrantes"],
-                        guardadas=result["guardadas"],
-                        descargadas=result["descargadas"],
-                        mensaje=(
-                            f"{fecha_ui}: revisión individual terminada. "
-                            f"Faltantes={len(faltantes)}, sobrantes={len(sobrantes)}."
+                            f"Diferencia {fecha_ui}: SRI={cantidad_sri}, BD={cantidad_bd}. "
+                            "Se revisarán las facturas de este día al finalizar el recorrido."
                         ),
                     )
 
@@ -223,6 +178,69 @@ class SriVentasValidatorService:
                     faltantes=result["faltantes"],
                     sobrantes=result["sobrantes"],
                     detalle=json.dumps(result["detalle_dias"], ensure_ascii=False, default=str),
+                )
+
+            # Segunda fase: después de recorrer todas las fechas, revisar en
+            # detalle solo los días que tuvieron diferencias de cantidad.
+            for fecha_pendiente, dia_info in dias_pendientes_revision:
+                SriClienteSyncService._verificar_cancelacion(job_id)
+                fecha_ui = fecha_pendiente.strftime("%d/%m/%Y")
+                SriClienteSyncService._job_update(
+                    job_id,
+                    mensaje=(
+                        f"Revisión final de diferencias: {fecha_ui}. "
+                        "El recorrido de fechas ya terminó."
+                    ),
+                )
+                faltantes, sobrantes = await cls._revisar_dia_uno_por_uno(
+                    page, db, fecha_pendiente, result, job_id
+                )
+                dia_info["faltantes"] = len(faltantes)
+                dia_info["sobrantes"] = len(sobrantes)
+                dia_info["claves_faltantes"] = faltantes[:100]
+                dia_info["claves_sobrantes"] = sobrantes[:100]
+                result["faltantes"] += len(faltantes)
+                result["sobrantes"] += len(sobrantes)
+
+                if job_id:
+                    with __import__("app.database.connection", fromlist=["engine"]).engine.connect() as job_db:
+                        operacion_job = job_db.execute(
+                            text("SELECT operacion FROM conta_sri_jobs WHERE job_id = :job_id"),
+                            {"job_id": job_id},
+                        ).scalar()
+                    if operacion_job == "ventas_reparar":
+                        cantidad_bd_final = db.execute(text("""
+                            SELECT COUNT(*)
+                            FROM ventas
+                            WHERE TRIM(fecfactur::text) = :fecha
+                              AND TRIM(mes::text) = :mes
+                              AND TRIM(año::text) = :anio
+                              AND TRIM(codcomp::text) = '18'
+                        """), {
+                            "fecha": fecha_ui,
+                            "mes": f"{mes:02d}",
+                            "anio": str(anio),
+                        }).scalar_one()
+                        dia_info["base_datos"] = int(cantidad_bd_final)
+                        dia_info["estado"] = (
+                            "OK" if int(dia_info["sri"]) == int(cantidad_bd_final)
+                            and not sobrantes
+                            else "DIFERENCIA"
+                        )
+                        if dia_info["estado"] == "OK":
+                            result["dias_diferentes"] = max(0, result["dias_diferentes"] - 1)
+                            result["dias_ok"] += 1
+
+                SriClienteSyncService._job_update(
+                    job_id,
+                    faltantes=result["faltantes"],
+                    sobrantes=result["sobrantes"],
+                    guardadas=result["guardadas"],
+                    descargadas=result["descargadas"],
+                    mensaje=(
+                        f"{fecha_ui}: revisión final terminada. "
+                        f"Faltantes={len(faltantes)}, sobrantes={len(sobrantes)}."
+                    ),
                 )
 
             detalle = json.dumps(
