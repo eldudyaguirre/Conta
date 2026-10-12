@@ -893,6 +893,56 @@ class SriClienteSyncService:
                 pass
 
     @classmethod
+    async def _cerrar_sesion_sri(cls, page, context) -> None:
+        """Cierra la sesión web del SRI y elimina credenciales persistidas del perfil.
+
+        Chrome usa un perfil persistente por RUC. Cerrar solo la ventana no
+        invalida las cookies de Keycloak/SRI, por lo que la siguiente tarea
+        podría arrancar autenticada con una sesión anterior.
+        """
+        logger_sri = logging.getLogger("conta.sri")
+
+        # Primero intentamos la salida oficial del portal si está disponible.
+        if page is not None:
+            for selector in (
+                "a:has-text('Cerrar sesión')",
+                "button:has-text('Cerrar sesión')",
+                "a:has-text('Cerrar Sesión')",
+                "button:has-text('Cerrar Sesión')",
+                "a[href*='logout']",
+                "a[href*='salir']",
+            ):
+                try:
+                    salida = page.locator(selector).first
+                    if await salida.count() and await salida.is_visible():
+                        await salida.click(timeout=3000)
+                        await page.wait_for_timeout(800)
+                        logger_sri.info("Se ejecutó la salida oficial del portal SRI.")
+                        break
+                except Exception:
+                    continue
+
+        # Borrar cookies del contexto evita que la siguiente ejecución reutilice
+        # la sesión autenticada, incluso si el portal no mostró un botón de salida.
+        try:
+            await context.clear_cookies()
+        except Exception as exc:
+            logger_sri.warning("No se pudieron limpiar todas las cookies SRI: %s", exc)
+
+        # Limpiar almacenamiento web del origen SRI en todas las pestañas abiertas.
+        # No navegamos a otros sitios ni tocamos perfiles ajenos a Conta.
+        if context is not None:
+            for pestaña in context.pages:
+                try:
+                    if "srienlinea.sri.gob.ec" in (pestaña.url or "").lower():
+                        await pestaña.evaluate("""() => {
+                            try { localStorage.clear(); } catch (_) {}
+                            try { sessionStorage.clear(); } catch (_) {}
+                        }""")
+                except Exception as exc:
+                    logger_sri.debug("No se pudo limpiar almacenamiento SRI de una pestaña: %s", exc)
+
+    @classmethod
     async def _login(cls, ruc: str, clave: str):
         p = await async_playwright().start()
         browser = None
@@ -3345,9 +3395,37 @@ class SriClienteSyncService:
                     tipo_emitido="retencion" if operacion == "retenciones_emitidas" else "factura",
                 )
             else:
-                filas_recibidos = await cls._consultar_recibidos(
-                    page, anio, mes, tipo_comprobante
-                )
+                try:
+                    filas_recibidos = await cls._consultar_recibidos(
+                        page, anio, mes, tipo_comprobante
+                    )
+                except RuntimeError as exc:
+                    # Un rechazo del CAPTCHA puede ocurrir si el token oficial
+                    # expiró o fue consumido durante una respuesta lenta del SRI.
+                    # Permitimos UN solo intento nuevo desde el formulario oficial,
+                    # que vuelve a generar su propio token al pulsar Consultar.
+                    # No resolvemos ni evitamos el CAPTCHA automáticamente.
+                    if "captcha incorrecta" not in str(exc).casefold():
+                        raise
+                    cls._job_update(
+                        job_id,
+                        estado="captcha",
+                        mensaje=(
+                            "El SRI rechazó el primer CAPTCHA. Se volverá a abrir "
+                            "una sola vez el formulario oficial para generar una "
+                            "validación nueva."
+                        ),
+                        detalle=str(exc),
+                    )
+                    logger.warning(
+                        "SRI rechazó CAPTCHA; se realizará un único intento "
+                        "nuevo con formulario oficial | job_id=%s | ruc=%s",
+                        job_id, ruc,
+                    )
+                    await page.wait_for_timeout(1500)
+                    filas_recibidos = await cls._consultar_recibidos(
+                        page, anio, mes, tipo_comprobante
+                    )
                 if filas_recibidos == 0:
                     result["mensaje"] = (
                         "El SRI terminó la consulta y no encontró comprobantes "
@@ -3555,6 +3633,11 @@ class SriClienteSyncService:
             finally:
                 db.close()
         finally:
+            if context is not None:
+                try:
+                    await cls._cerrar_sesion_sri(page, context)
+                except Exception as exc:
+                    logger.warning("No se pudo completar el cierre de sesión SRI: %s", exc)
             if browser is not None:
                 try:
                     await browser.close()
