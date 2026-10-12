@@ -2869,7 +2869,28 @@ class SriClienteSyncService:
         )
 
     @classmethod
+    def _asegurar_columnas_ventas(cls, db) -> None:
+        """Añade columnas tributarias recientes que falten en bases antiguas de clientes."""
+        clave = "conta_columnas_ventas_iva_actualizadas"
+        if db.info.get(clave):
+            return
+
+        # Son campos monetarios: NUMERIC conserva precisión decimal.
+        # IF NOT EXISTS permite ejecutar esta comprobación en bases nuevas y antiguas.
+        columnas = (
+            "baseiva5", "baseiva8", "baseiva14", "baseiva15",
+            "iva5", "iva8", "iva14", "iva15",
+        )
+        for columna in columnas:
+            db.execute(text(
+                f"ALTER TABLE public.ventas "
+                f"ADD COLUMN IF NOT EXISTS {columna} NUMERIC NOT NULL DEFAULT 0"
+            ))
+        db.info[clave] = True
+
+    @classmethod
     def _insertar_venta(cls, db, factura: dict[str, Any], codcomp: str = "18") -> None:
+        cls._asegurar_columnas_ventas(db)
         b = factura["bases_iva"]
         i = factura["ivas"]
         values = {
@@ -3534,6 +3555,7 @@ class SriClienteSyncService:
             )
             return False
 
+        cls._asegurar_columnas_ventas(db)
         cero = Decimal("0")
         values = {
             "numfactur": "RECAP",
