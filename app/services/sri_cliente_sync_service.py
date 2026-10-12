@@ -926,8 +926,10 @@ class SriClienteSyncService:
             "--lang=es-EC",
             "--window-size=1366,900",
         ]
-        if settings.SRI_HEADLESS:
-            args.append("--headless=new")
+        # El worker debe mostrar Chrome para permitir la intervención humana
+        # en las validaciones oficiales del SRI (por ejemplo, CAPTCHA).
+        # No usar headless en esta sesión de sincronización.
+
 
         try:
             chrome_process = subprocess.Popen(
