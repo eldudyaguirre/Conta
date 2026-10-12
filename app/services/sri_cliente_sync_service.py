@@ -976,9 +976,10 @@ class SriClienteSyncService:
             "--lang=es-EC",
             "--window-size=1366,900",
         ]
-        # El worker debe mostrar Chrome para permitir la intervención humana
-        # en las validaciones oficiales del SRI (por ejemplo, CAPTCHA).
-        # No usar headless en esta sesión de sincronización.
+        # En producción, ejecutar Chrome oculto salvo que SRI_HEADLESS=False
+        # esté configurado explícitamente para depuración interactiva.
+        if settings.SRI_HEADLESS:
+            args.append("--headless=new")
 
 
         try:
