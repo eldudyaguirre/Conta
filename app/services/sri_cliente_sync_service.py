@@ -199,12 +199,16 @@ class SriClienteSyncService:
 
     @classmethod
     async def _ejecutar_job(cls, job_id: str, ruc: str, anio: int, mes: int, tipo_comprobante: int, operacion: str = "compras") -> None:
-        cls._job_update(
-            job_id,
-            estado="ejecutando",
-            mensaje="Worker SRI activo. Iniciando navegador y conexión con el SRI.",
+        contexto = (
+            f"job_id={job_id} | ruc={ruc} | anio={anio} | "
+            f"mes={mes} | tipo={tipo_comprobante} | operacion={operacion}"
         )
         try:
+            cls._job_update(
+                job_id,
+                estado="ejecutando",
+                mensaje="Worker SRI activo. Iniciando navegador y conexión con el SRI.",
+            )
             if operacion == "ventas_validar":
                 from app.services.sri_ventas_validator_service import SriVentasValidatorService
                 resultado = await SriVentasValidatorService.sincronizar_mes(
@@ -229,27 +233,55 @@ class SriClienteSyncService:
                     ruc, anio, mes, tipo_comprobante, job_id=job_id,
                     operacion=operacion, dias_objetivo=dias_objetivo,
                 )
-            mensaje_final = str(
-                resultado.get("mensaje")
-                or "Sincronización finalizada."
-            )
+
             resultado_final = dict(resultado)
-            resultado_final["estado"] = "finalizado"
+            errores = resultado_final.get("errores") or []
+            mensaje_base = str(
+                resultado_final.get("mensaje") or "Sincronización finalizada."
+            )
+            if errores:
+                estado_final = "error"
+                mensaje_final = (
+                    f"{mensaje_base} Atención: se registraron {len(errores)} "
+                    "error(es). Revise el detalle del trabajo."
+                )
+                logger.warning(
+                    "Trabajo SRI finalizado con errores parciales | %s | cantidad_errores=%s",
+                    contexto, len(errores),
+                )
+            else:
+                estado_final = "finalizado"
+                mensaje_final = mensaje_base
+                logger.info("Trabajo SRI finalizado correctamente | %s", contexto)
+
+            resultado_final["estado"] = estado_final
             resultado_final["mensaje"] = mensaje_final
             cls._job_update(job_id, **resultado_final)
+
         except SriJobCancelado as exc:
+            logger.warning("Trabajo SRI cancelado | %s | motivo=%s", contexto, str(exc))
             cls._job_update(
                 job_id,
                 estado="cancelado",
                 mensaje=str(exc),
             )
         except Exception as exc:
-            cls._job_update(
-                job_id,
-                estado="error",
-                mensaje=str(exc),
-                detalle=str(exc),
+            logger.exception(
+                "Fallo ejecutando trabajo SRI | %s | error_tipo=%s | error=%s",
+                contexto, type(exc).__name__, str(exc),
             )
+            try:
+                cls._job_update(
+                    job_id,
+                    estado="error",
+                    mensaje=f"{type(exc).__name__}: {exc}",
+                    detalle=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception:
+                logger.exception(
+                    "No se pudo registrar el error en PostgreSQL | %s",
+                    contexto,
+                )
 
     @classmethod
     def cancelar_sincronizacion(cls, job_id: str) -> dict[str, Any] | None:
