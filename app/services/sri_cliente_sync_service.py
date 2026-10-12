@@ -853,44 +853,81 @@ class SriClienteSyncService:
 
     @staticmethod
     def _cerrar_chrome(chrome_process) -> None:
-        """Cierra de forma segura el Chrome SRI que abrió Conta."""
+        """Cierra Chrome y todos los procesos hijos iniciados por Conta.
+
+        Chrome puede dejar procesos renderer/GPU abiertos aunque termine el
+        proceso que recibió Popen. Por eso se termina primero el árbol del PID
+        propio de esta tarea, nunca todos los procesos chrome.exe del equipo.
+        """
         if chrome_process is None:
             return
 
         pid = getattr(chrome_process, "pid", None)
-        try:
-            if chrome_process.poll() is None:
-                chrome_process.terminate()
-                try:
-                    chrome_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    chrome_process.kill()
-                    try:
-                        chrome_process.wait(timeout=3)
-                    except Exception:
-                        pass
 
-            # En Windows, si el proceso principal dejó procesos hijos de Chrome
-            # abiertos, cerramos únicamente el árbol del PID que Conta inició.
-            if pid and chrome_process.poll() is None:
+        # En Windows, matar primero el árbol evita dejar ventanas/procesos
+        # huérfanos cuando el proceso principal de Chrome ya terminó.
+        if pid:
+            try:
                 subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=False,
+                    timeout=10,
                 )
-        except Exception:
-            # El cierre nunca debe convertir una sincronización exitosa en error.
+            except Exception:
+                logger.debug(
+                    "No se pudo finalizar inicialmente el árbol de Chrome PID %s.",
+                    pid,
+                    exc_info=True,
+                )
+
+        try:
+            chrome_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             try:
-                if pid:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
+                chrome_process.terminate()
+                chrome_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    chrome_process.kill()
+                    chrome_process.wait(timeout=3)
+                except Exception:
+                    logger.warning(
+                        "No se pudo confirmar el cierre del proceso Chrome PID %s.",
+                        pid,
+                        exc_info=True,
                     )
             except Exception:
-                pass
+                logger.warning(
+                    "Error al terminar Chrome PID %s.",
+                    pid,
+                    exc_info=True,
+                )
+        except Exception:
+            logger.debug(
+                "Error esperando el cierre de Chrome PID %s.",
+                pid,
+                exc_info=True,
+            )
+
+        # Segunda pasada como respaldo: si taskkill no pudo resolver el árbol
+        # mientras el padre se cerraba, intenta eliminar solo ese árbol de PID.
+        if pid:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=10,
+                )
+            except Exception:
+                logger.debug(
+                    "No se pudo completar la limpieza del árbol Chrome PID %s.",
+                    pid,
+                    exc_info=True,
+                )
 
     @classmethod
     async def _cerrar_sesion_sri(cls, page, context) -> None:
