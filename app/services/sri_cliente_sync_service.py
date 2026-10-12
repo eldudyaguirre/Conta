@@ -3092,6 +3092,22 @@ class SriClienteSyncService:
             ultima = 0
 
             while time.monotonic() < limite:
+                # Detectar el rechazo del CAPTCHA sin esperar todo el plazo.
+                try:
+                    cuerpo = await page.locator("body").inner_text(timeout=1500)
+                    normalizado = " ".join(cuerpo.split()).casefold()
+
+                    if "captcha incorrecta" in normalizado:
+                        raise RuntimeError(
+                            "El SRI rechazó el CAPTCHA al consultar comprobantes "
+                            "recibidos. No se modificó el proceso de compras. "
+                            + await cls._diagnostico_consulta(page)
+                        )
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+
                 filas = await contar_filas()
                 if filas > 0:
                     return filas
