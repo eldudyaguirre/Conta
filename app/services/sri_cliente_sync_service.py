@@ -894,53 +894,51 @@ class SriClienteSyncService:
 
     @classmethod
     async def _cerrar_sesion_sri(cls, page, context) -> None:
-        """Cierra la sesión web del SRI y elimina credenciales persistidas del perfil.
+        """Ejecuta la salida oficial del SRI y limpia la sesión persistida.
 
-        Chrome usa un perfil persistente por RUC. Cerrar solo la ventana no
-        invalida las cookies de Keycloak/SRI, por lo que la siguiente tarea
-        podría arrancar autenticada con una sesión anterior.
+        La secuencia se basa en el HAR capturado al pulsar Cerrar sesión:
+        /tuportal-internet/salir.jspa -> logout de Keycloak -> salirSSO.jsp.
         """
         logger_sri = logging.getLogger("conta.sri")
+        origen_sri = "https://srienlinea.sri.gob.ec"
 
-        # Primero intentamos la salida oficial del portal si está disponible.
+        # Reproducir la ruta oficial registrada en el HAR. El primer endpoint
+        # redirige a Keycloak y después al cierre de sesión SSO del portal.
         if page is not None:
-            for selector in (
-                "a:has-text('Cerrar sesión')",
-                "button:has-text('Cerrar sesión')",
-                "a:has-text('Cerrar Sesión')",
-                "button:has-text('Cerrar Sesión')",
-                "a[href*='logout']",
-                "a[href*='salir']",
-            ):
-                try:
-                    salida = page.locator(selector).first
-                    if await salida.count() and await salida.is_visible():
-                        await salida.click(timeout=3000)
-                        await page.wait_for_timeout(800)
-                        logger_sri.info("Se ejecutó la salida oficial del portal SRI.")
-                        break
-                except Exception:
-                    continue
+            try:
+                await page.goto(
+                    f"{origen_sri}/tuportal-internet/salir.jspa",
+                    wait_until="domcontentloaded",
+                    timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
+                )
+                logger_sri.info(
+                    "Se ejecutó la ruta oficial de cierre de sesión SRI; URL final: %s",
+                    page.url,
+                )
+            except Exception as exc:
+                logger_sri.warning(
+                    "No se completó la navegación de salida oficial SRI: %s", exc
+                )
 
-        # Borrar cookies del contexto evita que la siguiente ejecución reutilice
-        # la sesión autenticada, incluso si el portal no mostró un botón de salida.
-        try:
-            await context.clear_cookies()
-        except Exception as exc:
-            logger_sri.warning("No se pudieron limpiar todas las cookies SRI: %s", exc)
-
-        # Limpiar almacenamiento web del origen SRI en todas las pestañas abiertas.
-        # No navegamos a otros sitios ni tocamos perfiles ajenos a Conta.
+        # El cierre remoto es lo principal; limpiar también el perfil evita que
+        # la siguiente ejecución reutilice cookies o almacenamiento local.
         if context is not None:
-            for pestaña in context.pages:
+            try:
+                await context.clear_cookies()
+            except Exception as exc:
+                logger_sri.warning("No se pudieron limpiar todas las cookies SRI: %s", exc)
+
+            for pestana in context.pages:
                 try:
-                    if "srienlinea.sri.gob.ec" in (pestaña.url or "").lower():
-                        await pestaña.evaluate("""() => {
+                    if origen_sri in (pestana.url or "").lower():
+                        await pestana.evaluate("""() => {
                             try { localStorage.clear(); } catch (_) {}
                             try { sessionStorage.clear(); } catch (_) {}
                         }""")
                 except Exception as exc:
-                    logger_sri.debug("No se pudo limpiar almacenamiento SRI de una pestaña: %s", exc)
+                    logger_sri.debug(
+                        "No se pudo limpiar almacenamiento SRI de una pestaña: %s", exc
+                    )
 
     @classmethod
     async def _login(cls, ruc: str, clave: str):
