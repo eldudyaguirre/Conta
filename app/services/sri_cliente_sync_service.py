@@ -3101,12 +3101,33 @@ class SriClienteSyncService:
                                 break
 
                     if not seleccionado:
+                        logger.error(
+                            "SRI RECIBIDOS | tipo solicitado no disponible | "
+                            "ruc no registrado en log de interfaz | tipo=%s | opciones=%s",
+                            value, opciones,
+                        )
                         raise RuntimeError(
                             "El combo Tipo de Comprobante del SRI no contiene la opción "
                             f"solicitada ({value}). Opciones disponibles: {opciones}"
                         )
+
+                    # Registrar el valor y la etiqueta realmente seleccionados.
+                    try:
+                        seleccion_real = await combo.locator(
+                            "option:checked"
+                        ).evaluate("(o) => ({value:o.value, text:(o.textContent || '').trim()})")
+                    except Exception as exc:
+                        seleccion_real = {"error": str(exc)}
+                    logger.info(
+                        "SRI RECIBIDOS | tipo seleccionado | solicitado=%s | seleccionado=%s",
+                        value, seleccion_real,
+                    )
                 else:
                     await cls._seleccionar(page, selector, value)
+                    logger.info(
+                        "SRI RECIBIDOS | campo establecido | campo=%s | valor=%s",
+                        nombre, value,
+                    )
 
             boton = None
             for selector in boton_selectores:
@@ -3164,10 +3185,15 @@ class SriClienteSyncService:
                     normalizado = " ".join(cuerpo.split()).casefold()
 
                     if "captcha incorrecta" in normalizado:
+                        diagnostico = await cls._diagnostico_consulta(page)
+                        logger.error(
+                            "SRI RECIBIDOS | CAPTCHA RECHAZADO | tipo_solicitado=%s | %s",
+                            tipo_comprobante, diagnostico,
+                        )
                         raise RuntimeError(
                             "El SRI rechazó el CAPTCHA al consultar comprobantes "
-                            "recibidos. No se modificó el proceso de compras. "
-                            + await cls._diagnostico_consulta(page)
+                            f"recibidos (tipo solicitado {tipo_comprobante}). "
+                            + diagnostico
                         )
                 except RuntimeError:
                     raise
@@ -3324,6 +3350,24 @@ class SriClienteSyncService:
                 "iframe[src*='recaptcha'], iframe[title*='reCAPTCHA'], "
                 "[class*='captcha'], [id*='captcha']"
             ).count()
+            tipo_real = None
+            try:
+                tipo_real = await page.locator(
+                    "#frmPrincipal\\:cmbTipoComprobante"
+                ).evaluate("""e => ({
+                    value: e.value,
+                    text: e.options[e.selectedIndex]?.text || ''
+                })""")
+            except Exception:
+                pass
+            parametros = {}
+            for campo in ("ano", "mes", "dia"):
+                try:
+                    parametros[campo] = await page.locator(
+                        f"#frmPrincipal\\:{campo}"
+                    ).input_value(timeout=1000)
+                except Exception:
+                    parametros[campo] = None
             boton = await page.locator(
                 "#frmPrincipal\\:btnBuscar, "
                 "button[id$=':btnBuscar'], "
@@ -3331,7 +3375,8 @@ class SriClienteSyncService:
                 "input[id$=':btnConsultarSinRe'], button[id$=':btnConsultarSinRe']"
             ).count()
             return (
-                f"URL={url}; título={title!r}; botón_consultar={boton}; "
+                f"URL={url}; título={title!r}; tipo_seleccionado={tipo_real!r}; "
+                f"parametros={parametros!r}; botón_consultar={boton}; "
                 f"captcha_elementos={captcha}; texto={body!r}"
             )
         except Exception as exc:
