@@ -3345,9 +3345,37 @@ class SriClienteSyncService:
                     tipo_emitido="retencion" if operacion == "retenciones_emitidas" else "factura",
                 )
             else:
-                filas_recibidos = await cls._consultar_recibidos(
-                    page, anio, mes, tipo_comprobante
-                )
+                try:
+                    filas_recibidos = await cls._consultar_recibidos(
+                        page, anio, mes, tipo_comprobante
+                    )
+                except RuntimeError as exc:
+                    # Un rechazo del CAPTCHA puede ocurrir si el token oficial
+                    # expiró o fue consumido durante una respuesta lenta del SRI.
+                    # Permitimos UN solo intento nuevo desde el formulario oficial,
+                    # que vuelve a generar su propio token al pulsar Consultar.
+                    # No resolvemos ni evitamos el CAPTCHA automáticamente.
+                    if "captcha incorrecta" not in str(exc).casefold():
+                        raise
+                    cls._job_update(
+                        job_id,
+                        estado="captcha",
+                        mensaje=(
+                            "El SRI rechazó el primer CAPTCHA. Se volverá a abrir "
+                            "una sola vez el formulario oficial para generar una "
+                            "validación nueva."
+                        ),
+                        detalle=str(exc),
+                    )
+                    logger.warning(
+                        "SRI rechazó CAPTCHA; se realizará un único intento "
+                        "nuevo con formulario oficial | job_id=%s | ruc=%s",
+                        job_id, ruc,
+                    )
+                    await page.wait_for_timeout(1500)
+                    filas_recibidos = await cls._consultar_recibidos(
+                        page, anio, mes, tipo_comprobante
+                    )
                 if filas_recibidos == 0:
                     result["mensaje"] = (
                         "El SRI terminó la consulta y no encontró comprobantes "
