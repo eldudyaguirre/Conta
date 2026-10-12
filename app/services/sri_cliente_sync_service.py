@@ -3111,6 +3111,14 @@ class SriClienteSyncService:
                             f"solicitada ({value}). Opciones disponibles: {opciones}"
                         )
 
+                    # Playwright select_option cambia el <select>, pero el formulario JSF/PrimeFaces
+                    # del SRI también depende de sus eventos para registrar el valor en el widget.
+                    # Disparamos los eventos estándar y damos un breve margen antes del submit oficial.
+                    await combo.dispatch_event("input")
+                    await combo.dispatch_event("change")
+                    await combo.dispatch_event("blur")
+                    await page.wait_for_timeout(250)
+
                     # Registrar el valor y la etiqueta realmente seleccionados.
                     try:
                         seleccion_real = await combo.locator(
