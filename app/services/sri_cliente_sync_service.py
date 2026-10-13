@@ -2147,7 +2147,7 @@ class SriClienteSyncService:
                 except ET.ParseError:
                     # Respaldo para respuestas parciales mal formadas: extraer todos los updates CDATA.
                     for coincidencia in re.finditer(
-                        r"""<update\\s+id=["']([^"']+)["']\\s*>\\s*<!\\[CDATA\\[(.*?)\\]\\]>""",
+                        r"""<update\s+id=["']([^"']+)["']\s*>\s*<!\[CDATA\[(.*?)\]\]>""",
                         cuerpo, flags=re.DOTALL,
                     ):
                         paneles.append((coincidencia.group(1), coincidencia.group(2)))
