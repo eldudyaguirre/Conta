@@ -2433,6 +2433,14 @@ class SriClienteSyncService:
                 # detalle no debe cambiar la cantidad de filas de la página.
                 for idx in range(cantidad):
                     cls._verificar_cancelacion(job_id)
+                    cls._job_update(
+                        job_id,
+                        mensaje=(
+                            f"Procesando {texto_tipo} emitido del "
+                            f"{fecha_consulta.strftime('%d/%m/%Y')} "
+                            f"(página {pagina}, fila {idx + 1} de {cantidad})."
+                        ),
+                    )
                     try:
                         fila = filas.nth(idx)
                         columnas = await fila.locator("td").all_inner_texts()
@@ -2469,6 +2477,20 @@ class SriClienteSyncService:
 
                         html = await cls._obtener_detalle_emitido(page, idx)
                         if not html:
+                            result["errores"].append({
+                                "fecha": fecha_consulta.isoformat(),
+                                "pagina": pagina,
+                                "fila": idx + 1,
+                                "detalle": "No se pudo recuperar el panel de detalle del SRI.",
+                            })
+                            cls._job_update(
+                                job_id,
+                                errores=result["errores"],
+                                mensaje=(
+                                    f"No se pudo abrir el detalle de {texto_tipo} "
+                                    f"del {fecha_consulta.strftime('%d/%m/%Y')}, fila {idx + 1}."
+                                ),
+                            )
                             continue
 
                         if destino == "retenciones_emitidas":
