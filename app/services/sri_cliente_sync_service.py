@@ -1085,8 +1085,8 @@ class SriClienteSyncService:
 
                 with chrome_log_path.open("ab") as chrome_log:
                     chrome_log.write(
-                        f"\\n--- Inicio Chrome SRI {datetime.now().isoformat(timespec='seconds')} "
-                        f"| RUC={ruc} | puerto={port} | perfil={profile_dir} ---\\n".encode("utf-8")
+                        f"\n--- Inicio Chrome SRI {datetime.now().isoformat(timespec='seconds')} "
+                        f"| RUC={ruc} | puerto={port} | perfil={profile_dir} ---\n".encode("utf-8")
                     )
                     chrome_process = subprocess.Popen(
                         args,
