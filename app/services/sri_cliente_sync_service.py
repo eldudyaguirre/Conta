@@ -853,7 +853,7 @@ class SriClienteSyncService:
                 detalle = ""
                 if log_path and log_path.is_file():
                     try:
-                        detalle = "\\n".join(
+                        detalle = "\n".join(
                             log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
                         )
                     except OSError:
@@ -876,7 +876,7 @@ class SriClienteSyncService:
         detalle = ""
         if log_path and log_path.is_file():
             try:
-                detalle = "\\n".join(
+                detalle = "\n".join(
                     log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
                 )
             except OSError:
@@ -1011,6 +1011,7 @@ class SriClienteSyncService:
             chrome_path,
             f"--user-data-dir={profile_dir}",
             f"--remote-debugging-port={port}",
+            "--remote-debugging-address=127.0.0.1",
             "--no-first-run",
             "--no-default-browser-check",
             "--lang=es-EC",
@@ -1027,8 +1028,8 @@ class SriClienteSyncService:
             chrome_log_path.parent.mkdir(parents=True, exist_ok=True)
             with chrome_log_path.open("ab") as chrome_log:
                 chrome_log.write(
-                    f"\\n--- Inicio Chrome SRI {datetime.now().isoformat(timespec='seconds')} "
-                    f"| RUC={ruc} | puerto={port} | perfil={profile_dir} ---\\n".encode("utf-8")
+                    f"\n--- Inicio Chrome SRI {datetime.now().isoformat(timespec='seconds')} "
+                    f"| RUC={ruc} | puerto={port} | perfil={profile_dir} ---\n".encode("utf-8")
                 )
                 chrome_process = subprocess.Popen(
                     args,
