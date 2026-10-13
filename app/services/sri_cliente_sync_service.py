@@ -833,6 +833,43 @@ class SriClienteSyncService:
             sock.bind(("127.0.0.1", 0))
             return int(sock.getsockname()[1])
 
+    @staticmethod
+    def _puerto_cdp_perfil_activo(profile_dir: Path) -> int | None:
+        """Detecta Chrome ya abierto con este perfil y devuelve su puerto CDP."""
+        if os.name != "nt":
+            return None
+
+        perfil = str(profile_dir.resolve()).replace("'", "''")
+        script = (
+            "$perfil = '" + perfil + "'; "
+            "$procesos = Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" "
+            "| Where-Object { $_.CommandLine -and "
+            "$_.CommandLine.IndexOf($perfil, [StringComparison]::OrdinalIgnoreCase) -ge 0 "
+            "-and $_.CommandLine -match '--remote-debugging-port=(\\d+)' }; "
+            "foreach ($proceso in $procesos) { "
+            "if ($proceso.CommandLine -match '--remote-debugging-port=(\\d+)') "
+            "{ $Matches[1]; break } }"
+        )
+        try:
+            resultado = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if resultado.returncode != 0 or not resultado.stdout.strip():
+                return None
+            puerto = int(resultado.stdout.strip().splitlines()[-1])
+            if not 1 <= puerto <= 65535:
+                return None
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{puerto}/json/version", timeout=1.5
+            ) as response:
+                return puerto if response.status == 200 else None
+        except Exception:
+            return None
+
     @classmethod
     async def _esperar_cdp(
         cls,
@@ -1005,46 +1042,58 @@ class SriClienteSyncService:
         profile_dir.mkdir(parents=True, exist_ok=True)
 
         puerto_preferido = int(settings.SRI_CDP_PORT or 9222)
-        port = cls._puerto_cdp_disponible(puerto_preferido)
-        if port != puerto_preferido:
-            logging.getLogger("conta.sri").warning(
-                "Puerto CDP %s ocupado; usando puerto disponible %s para RUC %s.",
-                puerto_preferido,
-                port,
+        port = cls._puerto_cdp_perfil_activo(profile_dir)
+        reutilizando_chrome = port is not None
+
+        if reutilizando_chrome:
+            logging.getLogger("conta.sri").info(
+                "Reutilizando Chrome existente para RUC %s en puerto CDP %s (perfil %s).",
                 ruc,
+                port,
+                profile_dir,
             )
-
-        chrome_path = cls._chrome_executable()
-        args = [
-            chrome_path,
-            f"--user-data-dir={profile_dir}",
-            f"--remote-debugging-port={port}",
-            "--remote-debugging-address=127.0.0.1",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--lang=es-EC",
-            "--window-size=1366,900",
-        ]
-        # En producción, ejecutar Chrome oculto salvo que SRI_HEADLESS=False
-        # esté configurado explícitamente para depuración interactiva.
-        if settings.SRI_HEADLESS:
-            args.append("--headless=new")
-
+        else:
+            port = cls._puerto_cdp_disponible(puerto_preferido)
+            if port != puerto_preferido:
+                logging.getLogger("conta.sri").warning(
+                    "Puerto CDP %s ocupado; usando puerto disponible %s para RUC %s.",
+                    puerto_preferido,
+                    port,
+                    ruc,
+                )
 
         try:
             chrome_log_path = Path(__file__).resolve().parents[2] / "logs" / "sri_chrome_cdp.log"
             chrome_log_path.parent.mkdir(parents=True, exist_ok=True)
-            with chrome_log_path.open("ab") as chrome_log:
-                chrome_log.write(
-                    f"\n--- Inicio Chrome SRI {datetime.now().isoformat(timespec='seconds')} "
-                    f"| RUC={ruc} | puerto={port} | perfil={profile_dir} ---\n".encode("utf-8")
-                )
-                chrome_process = subprocess.Popen(
-                    args,
-                    cwd=str(profile_dir),
-                    stdout=chrome_log,
-                    stderr=subprocess.STDOUT,
-                )
+
+            if not reutilizando_chrome:
+                chrome_path = cls._chrome_executable()
+                args = [
+                    chrome_path,
+                    f"--user-data-dir={profile_dir}",
+                    f"--remote-debugging-port={port}",
+                    "--remote-debugging-address=127.0.0.1",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--lang=es-EC",
+                    "--window-size=1366,900",
+                ]
+                # En producción, ejecutar Chrome oculto salvo que SRI_HEADLESS=False
+                # esté configurado explícitamente para depuración interactiva.
+                if settings.SRI_HEADLESS:
+                    args.append("--headless=new")
+
+                with chrome_log_path.open("ab") as chrome_log:
+                    chrome_log.write(
+                        f"\\n--- Inicio Chrome SRI {datetime.now().isoformat(timespec='seconds')} "
+                        f"| RUC={ruc} | puerto={port} | perfil={profile_dir} ---\\n".encode("utf-8")
+                    )
+                    chrome_process = subprocess.Popen(
+                        args,
+                        cwd=str(profile_dir),
+                        stdout=chrome_log,
+                        stderr=subprocess.STDOUT,
+                    )
 
             await cls._esperar_cdp(
                 port,
