@@ -2110,11 +2110,13 @@ class SriClienteSyncService:
             logger.warning("SRI detalle emitido: no existe fila índice=%s", fila_idx)
             return None
 
-        # El HAR de retenciones usa j_idt61; en facturas puede ser otro ID.
-        # Seleccionamos el enlace de detalle por el icono dentro de la fila.
-        enlace_detalle = fila.locator("a:has(img)").first
+        # Seleccionar primero el enlace que abre el detalle del comprobante.
+        # En el HAR de retenciones es j_idt61 y contiene la clave de acceso.
+        # No usar a:has(img) como primera opción: esa fila también tiene enlaces
+        # a PDF y documentos relacionados, que no abren el panel de retención.
+        enlace_detalle = fila.locator("a[id$=':j_idt61'], a[id$=':j_idt53']").first
         if await enlace_detalle.count() == 0:
-            enlace_detalle = fila.locator("a[id$=':j_idt53'], a[id$=':j_idt61']").first
+            enlace_detalle = fila.locator("a:has(img)").first
         if await enlace_detalle.count() == 0:
             logger.warning("SRI detalle emitido: no se encontró enlace de detalle en fila=%s", fila_idx + 1)
             return None
