@@ -2110,10 +2110,11 @@ class SriClienteSyncService:
             logger.warning("SRI detalle emitido: no existe fila índice=%s", fila_idx)
             return None
 
-        # El identificador del enlace de detalle puede variar entre tipos de comprobante.
-        enlace_detalle = fila.locator("a[id$=':j_idt53']")
+        # El HAR de retenciones usa j_idt61; en facturas puede ser otro ID.
+        # Seleccionamos el enlace de detalle por el icono dentro de la fila.
+        enlace_detalle = fila.locator("a:has(img)").first
         if await enlace_detalle.count() == 0:
-            enlace_detalle = fila.locator("a").filter(has=page.locator("img")).first
+            enlace_detalle = fila.locator("a[id$=':j_idt53'], a[id$=':j_idt61']").first
         if await enlace_detalle.count() == 0:
             logger.warning("SRI detalle emitido: no se encontró enlace de detalle en fila=%s", fila_idx + 1)
             return None
@@ -2439,7 +2440,15 @@ class SriClienteSyncService:
                             " ".join(columnas[1].strip().split())
                             if len(columnas) >= 2 else ""
                         )
-                        tipo_normalizado = tipo_texto.lower()
+                        import unicodedata
+                        tipo_normalizado = "".join(
+                            caracter for caracter in unicodedata.normalize("NFKD", tipo_texto.casefold())
+                            if not unicodedata.combining(caracter)
+                        )
+                        tipo_busqueda = "".join(
+                            caracter for caracter in unicodedata.normalize("NFKD", texto_tipo.casefold())
+                            if not unicodedata.combining(caracter)
+                        )
                         if texto_tipo == "factura":
                             es_tipo = (
                                 tipo_texto == "01"
@@ -2447,9 +2456,11 @@ class SriClienteSyncService:
                                 or " factura " in f" {tipo_normalizado} "
                             )
                         else:
+                            # El SRI puede mostrar "Comprobante de Retención"
+                            # o solo el código 6/07 según la vista.
                             es_tipo = (
-                                tipo_normalizado.startswith(texto_tipo)
-                                or f" {texto_tipo} " in f" {tipo_normalizado} "
+                                tipo_busqueda in tipo_normalizado
+                                or tipo_texto.strip() in {"6", "07"}
                             )
                         if tipo_texto and not es_tipo:
                             continue
@@ -2540,7 +2551,7 @@ class SriClienteSyncService:
                             job_id,
                             errores=result["errores"],
                             mensaje=(
-                                f"Error factura emitida {fecha_consulta.strftime('%d/%m/%Y')} "
+                                f"Error {texto_tipo} emitido {fecha_consulta.strftime('%d/%m/%Y')} "
                                 f"fila {idx + 1}: {exc}"
                             ),
                         )
