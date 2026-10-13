@@ -2098,12 +2098,7 @@ class SriClienteSyncService:
 
     @classmethod
     async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
-        """Recupera el HTML del detalle de factura desde la respuesta AJAX real del SRI.
-
-        En el portal observado, el clic dispara una respuesta PrimeFaces XML con
-        <update id="form-detalle-factura:panel-detalle-factura">. Leer esa respuesta
-        es más fiable que esperar un diálogo o asumir que el DOM ya se actualizó.
-        """
+        """Recupera el detalle de una fila emitida (factura o retención) desde AJAX PrimeFaces."""
         import logging
         import re
         import xml.etree.ElementTree as ET
@@ -2115,13 +2110,12 @@ class SriClienteSyncService:
             logger.warning("SRI detalle emitido: no existe fila índice=%s", fila_idx)
             return None
 
-        # El HAR confirma que el origen del AJAX es ...tablaCompEmitidos:{índice}:j_idt53.
+        # El identificador del enlace de detalle puede variar entre tipos de comprobante.
         enlace_detalle = fila.locator("a[id$=':j_idt53']")
         if await enlace_detalle.count() == 0:
-            logger.warning(
-                "SRI detalle emitido: no se encontró el enlace j_idt53 en fila=%s",
-                fila_idx + 1,
-            )
+            enlace_detalle = fila.locator("a").filter(has=page.locator("img")).first
+        if await enlace_detalle.count() == 0:
+            logger.warning("SRI detalle emitido: no se encontró enlace de detalle en fila=%s", fila_idx + 1)
             return None
 
         for intento in range(1, 4):
@@ -2132,8 +2126,6 @@ class SriClienteSyncService:
                         "recuperarComprobantes.jsf" in response.url
                         and response.request.method == "POST"
                         and "javax.faces.partial.ajax" in (response.request.post_data or "")
-                        and "form-detalle-factura%3Apanel-detalle-factura"
-                        in (response.request.post_data or "")
                     ),
                     timeout=12000,
                 ) as respuesta_esperada:
@@ -2141,75 +2133,79 @@ class SriClienteSyncService:
 
                 respuesta = await respuesta_esperada.value
                 if not respuesta.ok:
-                    logger.warning(
-                        "SRI detalle emitido: HTTP %s fila=%s intento=%s",
-                        respuesta.status, fila_idx + 1, intento,
-                    )
+                    logger.warning("SRI detalle emitido: HTTP %s fila=%s intento=%s",
+                                   respuesta.status, fila_idx + 1, intento)
                     continue
 
                 cuerpo = await respuesta.text()
+                paneles = []
                 try:
                     raiz = ET.fromstring(cuerpo)
-                    panel = raiz.find(".//update[@id='form-detalle-factura:panel-detalle-factura']")
-                    html = panel.text if panel is not None and panel.text else ""
+                    for panel in raiz.findall(".//update"):
+                        if panel.text and panel.text.strip():
+                            paneles.append((panel.attrib.get("id", ""), panel.text))
                 except ET.ParseError:
-                    # Respaldo para respuestas XML mal formadas pero con CDATA intacta.
-                    coincidencia = re.search(
-                        r"""<update\s+id=["']form-detalle-factura:panel-detalle-factura["']\s*>\s*<!\[CDATA\[(.*?)\]\]>""",
-                        cuerpo,
-                        flags=re.DOTALL,
-                    )
-                    html = coincidencia.group(1) if coincidencia else ""
+                    # Respaldo para respuestas parciales mal formadas: extraer todos los updates CDATA.
+                    for coincidencia in re.finditer(
+                        r"""<update\\s+id=["']([^"']+)["']\\s*>\\s*<!\\[CDATA\\[(.*?)\\]\\]>""",
+                        cuerpo, flags=re.DOTALL,
+                    ):
+                        paneles.append((coincidencia.group(1), coincidencia.group(2)))
 
-                texto = " ".join(re.sub(r"<[^>]+>", " ", html).split())
-                if html and (
-                    "tabla-impuestos-detalle-factura" in html
-                    or (
-                        "Detalle factura" in texto
-                        and ("Identificación Comprador" in texto or "Fecha Emisión" in texto)
-                    )
-                ):
+                html = ""
+                tipo_detalle = ""
+                for panel_id, contenido in paneles:
+                    texto = " ".join(re.sub(r"<[^>]+>", " ", contenido).split()).casefold()
+                    contenido_lower = contenido.casefold()
+                    if (
+                        "tabla-impuestos-comprobante-retencion" in contenido_lower
+                        or "identificación sujeto retenido" in texto
+                        or "identificacion sujeto retenido" in texto
+                        or ("fecha emisión" in texto and "número doc. sustento" in texto)
+                        or ("fecha emision" in texto and "numero doc. sustento" in texto)
+                    ):
+                        html, tipo_detalle = contenido, "retención"
+                        break
+                    if (
+                        "tabla-impuestos-detalle-factura" in contenido_lower
+                        or (
+                            "detalle factura" in texto
+                            and ("identificación comprador" in texto or "fecha emisión" in texto)
+                        )
+                    ):
+                        html, tipo_detalle = contenido, "factura"
+                        break
+
+                if html:
                     logger.info(
-                        "SRI detalle emitido recuperado desde AJAX: fila=%s intento=%s caracteres=%s",
-                        fila_idx + 1, intento, len(html),
+                        "SRI detalle emitido recuperado desde AJAX: tipo=%s fila=%s intento=%s caracteres=%s",
+                        tipo_detalle, fila_idx + 1, intento, len(html),
                     )
-                    # El AJAX actualiza el panel y abre un diálogo PrimeFaces.
-                    # Cerrarlo antes de devolver el HTML evita que el overlay
-                    # bloquee la siguiente fila o el paginador en la sincronización normal.
                     try:
                         dialogo = page.locator(".ui-dialog:visible").last
                         if await dialogo.count():
                             cerrar = dialogo.locator(
-                                ".ui-dialog-titlebar-close, "
-                                "button[aria-label='Close'], "
-                                "button[aria-label='Cerrar']"
+                                ".ui-dialog-titlebar-close, button[aria-label='Close'], button[aria-label='Cerrar']"
                             ).first
                             if await cerrar.count() and await cerrar.is_visible():
                                 await cerrar.click(timeout=3000)
                             else:
                                 await page.keyboard.press("Escape")
-                            await page.locator(".ui-widget-overlay").wait_for(
-                                state="hidden", timeout=3000
-                            )
+                            await page.locator(".ui-widget-overlay").wait_for(state="hidden", timeout=3000)
                     except Exception as exc:
-                        logger.warning(
-                            "SRI detalle emitido: no se pudo cerrar diálogo tras recuperar fila=%s: %s",
-                            fila_idx + 1, exc,
-                        )
+                        logger.warning("SRI detalle emitido: no se pudo cerrar diálogo fila=%s: %s",
+                                       fila_idx + 1, exc)
                     return html
 
                 logger.warning(
-                    "SRI detalle emitido: la respuesta AJAX no contenía el panel esperado "
-                    "(fila=%s intento=%s, HTTP=%s, bytes=%s)",
-                    fila_idx + 1, intento, respuesta.status, len(cuerpo),
+                    "SRI detalle emitido: AJAX sin panel de detalle reconocido; fila=%s intento=%s HTTP=%s updates=%s",
+                    fila_idx + 1, intento, respuesta.status,
+                    [panel_id for panel_id, _ in paneles],
                 )
             except Exception as exc:
-                logger.warning(
-                    "SRI detalle emitido: fallo intento=%s fila=%s: %s",
-                    intento, fila_idx + 1, exc,
-                )
+                logger.warning("SRI detalle emitido: fallo intento=%s fila=%s: %s",
+                               intento, fila_idx + 1, exc)
                 await page.wait_for_timeout(400)
-
         return None
 
     @classmethod
