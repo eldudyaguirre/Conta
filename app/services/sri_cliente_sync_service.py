@@ -834,21 +834,63 @@ class SriClienteSyncService:
             return int(sock.getsockname()[1])
 
     @classmethod
-    async def _esperar_cdp(cls, port: int, timeout: float = 20.0) -> None:
+    async def _esperar_cdp(
+        cls,
+        port: int,
+        timeout: float = 20.0,
+        chrome_process=None,
+        log_path: Path | None = None,
+    ) -> None:
         url = f"http://127.0.0.1:{port}/json/version"
         limite = time.monotonic() + timeout
         ultimo_error = None
+
         while time.monotonic() < limite:
+            # Chrome puede cerrar inmediatamente si el perfil ya está abierto
+            # por otro proceso. Detectarlo evita esperar 20 segundos sin motivo.
+            if chrome_process is not None and chrome_process.poll() is not None:
+                codigo = chrome_process.returncode
+                detalle = ""
+                if log_path and log_path.is_file():
+                    try:
+                        detalle = "\\n".join(
+                            log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
+                        )
+                    except OSError:
+                        pass
+                raise RuntimeError(
+                    f"Chrome terminó antes de abrir CDP (código {codigo}). "
+                    f"Perfil posiblemente ocupado: revise que no haya otro Chrome "
+                    f"usando el mismo perfil. Log: {log_path or 'no disponible'}. "
+                    f"Detalle: {detalle or 'Chrome no escribió diagnóstico.'}"
+                )
+
             try:
-                with urllib.request.urlopen(url, timeout=1.5) as response:
+                with urllib.request.urlopen(url, timeout=1.0) as response:
                     if response.status == 200:
                         return
             except Exception as exc:
                 ultimo_error = exc
             await asyncio.sleep(0.25)
+
+        detalle = ""
+        if log_path and log_path.is_file():
+            try:
+                detalle = "\\n".join(
+                    log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
+                )
+            except OSError:
+                pass
+        estado_proceso = (
+            f"PID={getattr(chrome_process, 'pid', None)}, "
+            f"poll={chrome_process.poll()}"
+            if chrome_process is not None else "proceso no disponible"
+        )
         raise RuntimeError(
             f"Chrome no abrió el puerto CDP {port} dentro de {timeout:.0f} segundos. "
-            f"Último error: {ultimo_error}"
+            f"Último error: {ultimo_error}. {estado_proceso}. "
+            f"Log de arranque: {log_path or 'no disponible'}. "
+            f"Detalle: {detalle or 'Chrome no escribió diagnóstico.'}"
         )
 
     @staticmethod
@@ -981,14 +1023,26 @@ class SriClienteSyncService:
 
 
         try:
-            chrome_process = subprocess.Popen(
-                args,
-                cwd=str(profile_dir),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            chrome_log_path = Path(__file__).resolve().parents[2] / "logs" / "sri_chrome_cdp.log"
+            chrome_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with chrome_log_path.open("ab") as chrome_log:
+                chrome_log.write(
+                    f"\\n--- Inicio Chrome SRI {datetime.now().isoformat(timespec='seconds')} "
+                    f"| RUC={ruc} | puerto={port} | perfil={profile_dir} ---\\n".encode("utf-8")
+                )
+                chrome_process = subprocess.Popen(
+                    args,
+                    cwd=str(profile_dir),
+                    stdout=chrome_log,
+                    stderr=subprocess.STDOUT,
+                )
 
-            await cls._esperar_cdp(port)
+            await cls._esperar_cdp(
+                port,
+                timeout=20.0,
+                chrome_process=chrome_process,
+                log_path=chrome_log_path,
+            )
 
             browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
             context = browser.contexts[0]
