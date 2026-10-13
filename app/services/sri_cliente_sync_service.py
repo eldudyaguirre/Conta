@@ -2098,12 +2098,7 @@ class SriClienteSyncService:
 
     @classmethod
     async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
-        """Recupera el HTML del detalle de factura desde la respuesta AJAX real del SRI.
-
-        En el portal observado, el clic dispara una respuesta PrimeFaces XML con
-        <update id="form-detalle-factura:panel-detalle-factura">. Leer esa respuesta
-        es más fiable que esperar un diálogo o asumir que el DOM ya se actualizó.
-        """
+        """Recupera el detalle de una fila emitida (factura o retención) desde AJAX PrimeFaces."""
         import logging
         import re
         import xml.etree.ElementTree as ET
@@ -2115,13 +2110,13 @@ class SriClienteSyncService:
             logger.warning("SRI detalle emitido: no existe fila índice=%s", fila_idx)
             return None
 
-        # El HAR confirma que el origen del AJAX es ...tablaCompEmitidos:{índice}:j_idt53.
-        enlace_detalle = fila.locator("a[id$=':j_idt53']")
+        # El HAR de retenciones usa j_idt61; en facturas puede ser otro ID.
+        # Seleccionamos el enlace de detalle por el icono dentro de la fila.
+        enlace_detalle = fila.locator("a:has(img)").first
         if await enlace_detalle.count() == 0:
-            logger.warning(
-                "SRI detalle emitido: no se encontró el enlace j_idt53 en fila=%s",
-                fila_idx + 1,
-            )
+            enlace_detalle = fila.locator("a[id$=':j_idt53'], a[id$=':j_idt61']").first
+        if await enlace_detalle.count() == 0:
+            logger.warning("SRI detalle emitido: no se encontró enlace de detalle en fila=%s", fila_idx + 1)
             return None
 
         for intento in range(1, 4):
@@ -2132,8 +2127,6 @@ class SriClienteSyncService:
                         "recuperarComprobantes.jsf" in response.url
                         and response.request.method == "POST"
                         and "javax.faces.partial.ajax" in (response.request.post_data or "")
-                        and "form-detalle-factura%3Apanel-detalle-factura"
-                        in (response.request.post_data or "")
                     ),
                     timeout=12000,
                 ) as respuesta_esperada:
@@ -2141,75 +2134,79 @@ class SriClienteSyncService:
 
                 respuesta = await respuesta_esperada.value
                 if not respuesta.ok:
-                    logger.warning(
-                        "SRI detalle emitido: HTTP %s fila=%s intento=%s",
-                        respuesta.status, fila_idx + 1, intento,
-                    )
+                    logger.warning("SRI detalle emitido: HTTP %s fila=%s intento=%s",
+                                   respuesta.status, fila_idx + 1, intento)
                     continue
 
                 cuerpo = await respuesta.text()
+                paneles = []
                 try:
                     raiz = ET.fromstring(cuerpo)
-                    panel = raiz.find(".//update[@id='form-detalle-factura:panel-detalle-factura']")
-                    html = panel.text if panel is not None and panel.text else ""
+                    for panel in raiz.findall(".//update"):
+                        if panel.text and panel.text.strip():
+                            paneles.append((panel.attrib.get("id", ""), panel.text))
                 except ET.ParseError:
-                    # Respaldo para respuestas XML mal formadas pero con CDATA intacta.
-                    coincidencia = re.search(
-                        r"""<update\s+id=["']form-detalle-factura:panel-detalle-factura["']\s*>\s*<!\[CDATA\[(.*?)\]\]>""",
-                        cuerpo,
-                        flags=re.DOTALL,
-                    )
-                    html = coincidencia.group(1) if coincidencia else ""
+                    # Respaldo para respuestas parciales mal formadas: extraer todos los updates CDATA.
+                    for coincidencia in re.finditer(
+                        r"""<update\s+id=["']([^"']+)["']\s*>\s*<!\[CDATA\[(.*?)\]\]>""",
+                        cuerpo, flags=re.DOTALL,
+                    ):
+                        paneles.append((coincidencia.group(1), coincidencia.group(2)))
 
-                texto = " ".join(re.sub(r"<[^>]+>", " ", html).split())
-                if html and (
-                    "tabla-impuestos-detalle-factura" in html
-                    or (
-                        "Detalle factura" in texto
-                        and ("Identificación Comprador" in texto or "Fecha Emisión" in texto)
-                    )
-                ):
+                html = ""
+                tipo_detalle = ""
+                for panel_id, contenido in paneles:
+                    texto = " ".join(re.sub(r"<[^>]+>", " ", contenido).split()).casefold()
+                    contenido_lower = contenido.casefold()
+                    if (
+                        "tabla-impuestos-comprobante-retencion" in contenido_lower
+                        or "identificación sujeto retenido" in texto
+                        or "identificacion sujeto retenido" in texto
+                        or ("fecha emisión" in texto and "número doc. sustento" in texto)
+                        or ("fecha emision" in texto and "numero doc. sustento" in texto)
+                    ):
+                        html, tipo_detalle = contenido, "retención"
+                        break
+                    if (
+                        "tabla-impuestos-detalle-factura" in contenido_lower
+                        or (
+                            "detalle factura" in texto
+                            and ("identificación comprador" in texto or "fecha emisión" in texto)
+                        )
+                    ):
+                        html, tipo_detalle = contenido, "factura"
+                        break
+
+                if html:
                     logger.info(
-                        "SRI detalle emitido recuperado desde AJAX: fila=%s intento=%s caracteres=%s",
-                        fila_idx + 1, intento, len(html),
+                        "SRI detalle emitido recuperado desde AJAX: tipo=%s fila=%s intento=%s caracteres=%s",
+                        tipo_detalle, fila_idx + 1, intento, len(html),
                     )
-                    # El AJAX actualiza el panel y abre un diálogo PrimeFaces.
-                    # Cerrarlo antes de devolver el HTML evita que el overlay
-                    # bloquee la siguiente fila o el paginador en la sincronización normal.
                     try:
                         dialogo = page.locator(".ui-dialog:visible").last
                         if await dialogo.count():
                             cerrar = dialogo.locator(
-                                ".ui-dialog-titlebar-close, "
-                                "button[aria-label='Close'], "
-                                "button[aria-label='Cerrar']"
+                                ".ui-dialog-titlebar-close, button[aria-label='Close'], button[aria-label='Cerrar']"
                             ).first
                             if await cerrar.count() and await cerrar.is_visible():
                                 await cerrar.click(timeout=3000)
                             else:
                                 await page.keyboard.press("Escape")
-                            await page.locator(".ui-widget-overlay").wait_for(
-                                state="hidden", timeout=3000
-                            )
+                            await page.locator(".ui-widget-overlay").wait_for(state="hidden", timeout=3000)
                     except Exception as exc:
-                        logger.warning(
-                            "SRI detalle emitido: no se pudo cerrar diálogo tras recuperar fila=%s: %s",
-                            fila_idx + 1, exc,
-                        )
+                        logger.warning("SRI detalle emitido: no se pudo cerrar diálogo fila=%s: %s",
+                                       fila_idx + 1, exc)
                     return html
 
                 logger.warning(
-                    "SRI detalle emitido: la respuesta AJAX no contenía el panel esperado "
-                    "(fila=%s intento=%s, HTTP=%s, bytes=%s)",
-                    fila_idx + 1, intento, respuesta.status, len(cuerpo),
+                    "SRI detalle emitido: AJAX sin panel de detalle reconocido; fila=%s intento=%s HTTP=%s updates=%s",
+                    fila_idx + 1, intento, respuesta.status,
+                    [panel_id for panel_id, _ in paneles],
                 )
             except Exception as exc:
-                logger.warning(
-                    "SRI detalle emitido: fallo intento=%s fila=%s: %s",
-                    intento, fila_idx + 1, exc,
-                )
+                logger.warning("SRI detalle emitido: fallo intento=%s fila=%s: %s",
+                               intento, fila_idx + 1, exc)
                 await page.wait_for_timeout(400)
-
         return None
 
     @classmethod
@@ -2443,7 +2440,15 @@ class SriClienteSyncService:
                             " ".join(columnas[1].strip().split())
                             if len(columnas) >= 2 else ""
                         )
-                        tipo_normalizado = tipo_texto.lower()
+                        import unicodedata
+                        tipo_normalizado = "".join(
+                            caracter for caracter in unicodedata.normalize("NFKD", tipo_texto.casefold())
+                            if not unicodedata.combining(caracter)
+                        )
+                        tipo_busqueda = "".join(
+                            caracter for caracter in unicodedata.normalize("NFKD", texto_tipo.casefold())
+                            if not unicodedata.combining(caracter)
+                        )
                         if texto_tipo == "factura":
                             es_tipo = (
                                 tipo_texto == "01"
@@ -2451,9 +2456,11 @@ class SriClienteSyncService:
                                 or " factura " in f" {tipo_normalizado} "
                             )
                         else:
+                            # El SRI puede mostrar "Comprobante de Retención"
+                            # o solo el código 6/07 según la vista.
                             es_tipo = (
-                                tipo_normalizado.startswith(texto_tipo)
-                                or f" {texto_tipo} " in f" {tipo_normalizado} "
+                                tipo_busqueda in tipo_normalizado
+                                or tipo_texto.strip() in {"6", "07"}
                             )
                         if tipo_texto and not es_tipo:
                             continue
@@ -2462,20 +2469,20 @@ class SriClienteSyncService:
                         if not html:
                             continue
 
-                        if destino == "ncventas":
-                            factura = cls._parsear_nota_credito_emitida_html(html)
+                        if destino == "retenciones_emitidas":
+                            comprobante = cls._parsear_retencion_emitida_html(html)
+                        elif destino == "ncventas":
+                            comprobante = cls._parsear_nota_credito_emitida_html(html)
                         else:
-                            factura = cls._parsear_factura_emitida_html(html)
+                            comprobante = cls._parsear_factura_emitida_html(html)
 
-                        # Seguridad adicional: si el SRI conserva temporalmente
-                        # la tabla anterior después de un AJAX, nunca guardamos
-                        # una factura de otro día.
-                        if factura["fecha"].date() != fecha_consulta:
+                        # Seguridad adicional: nunca guardar datos de otra fecha.
+                        if comprobante["fecha"].date() != fecha_consulta:
                             continue
 
-                        clave = factura["clave_acceso"].strip()
+                        clave = comprobante["clave_acceso"].strip()
                         if not clave:
-                            raise ValueError("La factura emitida no contiene clave de acceso.")
+                            raise ValueError("El comprobante emitido no contiene clave de acceso.")
 
                         result["sri"] += 1
 
@@ -2484,6 +2491,19 @@ class SriClienteSyncService:
                             continue
 
                         procesadas.add(clave)
+
+                        if destino == "retenciones_emitidas":
+                            actualizadas = cls._actualizar_retencion_emitida_compras(db, comprobante)
+                            db.commit()
+                            result["descargadas"] += 1
+                            result["guardadas"] += actualizadas
+                            cls._job_update(
+                                job_id, sri=result["sri"], guardadas=result["guardadas"],
+                                descargadas=result["descargadas"], ya_existentes=result["ya_existentes"],
+                                mensaje=f"Retención emitida {comprobante['numest']}-{comprobante['numptoemi']}-{comprobante['numsec']} procesada.",
+                            )
+                            continue
+                        factura = comprobante
 
                         if destino == "ncventas":
                             existe = db.execute(text("""
@@ -2531,7 +2551,7 @@ class SriClienteSyncService:
                             job_id,
                             errores=result["errores"],
                             mensaje=(
-                                f"Error factura emitida {fecha_consulta.strftime('%d/%m/%Y')} "
+                                f"Error {texto_tipo} emitido {fecha_consulta.strftime('%d/%m/%Y')} "
                                 f"fila {idx + 1}: {exc}"
                             ),
                         )
@@ -2570,97 +2590,13 @@ class SriClienteSyncService:
 
     @classmethod
     async def _procesar_emitidos_retenciones(cls, page, db, result, job_id, procesadas, anio: int, mes: int) -> None:
-        """Procesa retenciones emitidas y actualiza las compras afectadas."""
-        import calendar
-        from datetime import date
-
-        ultimo_dia = calendar.monthrange(anio, mes)[1]
-        for dia in range(1, ultimo_dia + 1):
-            cls._verificar_cancelacion(job_id)
-            fecha_consulta = date(anio, mes, dia)
-            cls._job_update(job_id, mensaje=f"Consultando retenciones emitidas del {fecha_consulta.strftime('%d/%m/%Y')}.")
-            if await cls._consultar_emitidos_dia(page, fecha_consulta) == 0:
-                continue
-
-            pagina = 1
-            while True:
-                cls._verificar_cancelacion(job_id)
-                result["paginas"] += 1
-                cls._job_update(job_id, paginas=result["paginas"], mensaje=f"Procesando retenciones emitidas del {fecha_consulta.strftime('%d/%m/%Y')} (página {pagina}).")
-                filas = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr")
-                cantidad = await filas.count()
-
-                for idx in range(cantidad):
-                    cls._verificar_cancelacion(job_id)
-                    try:
-                        columnas = await filas.nth(idx).locator("td").all_inner_texts()
-                        tipo = " ".join(columnas[1].strip().split()).lower() if len(columnas) >= 2 else ""
-                        # El SRI puede mostrar el tipo como "07", "Retención"
-                        # o "Comprobante de Retención 001-001-000000001".
-                        # En este último caso "retención" no está al inicio.
-                        tipo_sin_tilde = tipo.replace("retención", "retencion")
-                        es_retencion = (
-                            tipo == "07"
-                            or tipo.startswith("retención")
-                            or tipo.startswith("retencion")
-                            or " retención " in f" {tipo} "
-                            or " retencion " in f" {tipo_sin_tilde} "
-                            or "comprobante de retencion" in tipo_sin_tilde
-                        )
-                        if tipo and not es_retencion:
-                            continue
-
-                        html = await cls._obtener_detalle_emitido(page, idx)
-                        if not html:
-                            continue
-                        retencion = cls._parsear_retencion_emitida_html(html)
-                        if retencion["fecha"].date() != fecha_consulta:
-                            continue
-
-                        clave = retencion["clave_acceso"].strip()
-                        if not clave:
-                            raise ValueError("La retención emitida no contiene clave de acceso.")
-                        if clave in procesadas:
-                            result["ya_existentes"] += 1
-                            continue
-                        procesadas.add(clave)
-                        result["sri"] += 1
-
-                        actualizadas = cls._actualizar_retencion_emitida_compras(db, retencion)
-                        db.commit()
-                        result["descargadas"] += 1
-                        result["guardadas"] += actualizadas
-                        cls._job_update(
-                            job_id, sri=result["sri"], guardadas=result["guardadas"],
-                            descargadas=result["descargadas"], ya_existentes=result["ya_existentes"],
-                            mensaje=f"Retención emitida {retencion['numest']}-{retencion['numptoemi']}-{retencion['numsec']} procesada.",
-                        )
-                    except Exception as exc:
-                        db.rollback()
-                        result["errores"].append({"fecha": fecha_consulta.isoformat(), "pagina": pagina, "fila": idx + 1, "detalle": str(exc)})
-                        cls._job_update(job_id, errores=result["errores"], mensaje=f"Error retención emitida {fecha_consulta.strftime('%d/%m/%Y')} fila {idx + 1}: {exc}")
-
-                boton_next = page.locator("[class*='ui-paginator-next']").first
-                if await boton_next.count() == 0:
-                    break
-                clases = (await boton_next.get_attribute("class") or "").lower()
-                if "ui-state-disabled" in clases:
-                    break
-                try:
-                    primera = await filas.first.inner_text()
-                except Exception:
-                    primera = ""
-                await boton_next.click()
-                for _ in range(30):
-                    await page.wait_for_timeout(500)
-                    try:
-                        if not primera or await filas.first.inner_text() != primera:
-                            break
-                    except Exception:
-                        pass
-                pagina += 1
-
-            await cls._volver_pagina_1_emitidos(page)
+        """Reutiliza el recorrido de ventas con el selector y parser de retenciones."""
+        await cls._procesar_emitidos_ventas(
+            page, db, result, job_id, procesadas, anio, mes,
+            texto_tipo="retencion",
+            codcomp="07",
+            destino="retenciones_emitidas",
+        )
 
     @classmethod
     def _actualizar_retencion_emitida_compras(cls, db, retencion: dict[str, Any]) -> int:
