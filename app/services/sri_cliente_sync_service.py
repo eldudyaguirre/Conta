@@ -845,32 +845,40 @@ class SriClienteSyncService:
         limite = time.monotonic() + timeout
         ultimo_error = None
 
-        while time.monotonic() < limite:
-            # Chrome puede cerrar inmediatamente si el perfil ya está abierto
-            # por otro proceso. Detectarlo evita esperar 20 segundos sin motivo.
-            if chrome_process is not None and chrome_process.poll() is not None:
-                codigo = chrome_process.returncode
-                detalle = ""
-                if log_path and log_path.is_file():
-                    try:
-                        detalle = "\n".join(
-                            log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
-                        )
-                    except OSError:
-                        pass
-                raise RuntimeError(
-                    f"Chrome terminó antes de abrir CDP (código {codigo}). "
-                    f"Perfil posiblemente ocupado: revise que no haya otro Chrome "
-                    f"usando el mismo perfil. Log: {log_path or 'no disponible'}. "
-                    f"Detalle: {detalle or 'Chrome no escribió diagnóstico.'}"
-                )
+        proceso_terminado_en = None
 
+        while time.monotonic() < limite:
+            # Primero comprobar CDP: en Windows, chrome.exe puede terminar como
+            # lanzador mientras el proceso del navegador queda funcionando.
             try:
                 with urllib.request.urlopen(url, timeout=1.0) as response:
                     if response.status == 200:
                         return
             except Exception as exc:
                 ultimo_error = exc
+
+            # No declarar fallo inmediatamente si el proceso lanzador terminó.
+            # Chrome puede tardar unos segundos más en publicar el endpoint CDP.
+            if chrome_process is not None and chrome_process.poll() is not None:
+                if proceso_terminado_en is None:
+                    proceso_terminado_en = time.monotonic()
+                elif time.monotonic() - proceso_terminado_en >= 3.0:
+                    codigo = chrome_process.returncode
+                    detalle = ""
+                    if log_path and log_path.is_file():
+                        try:
+                            detalle = "\n".join(
+                                log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
+                            )
+                        except OSError:
+                            pass
+                    raise RuntimeError(
+                        f"El proceso lanzador de Chrome terminó (código {codigo}) "
+                        f"y CDP no respondió tras 3 segundos adicionales. "
+                        f"Último error CDP: {ultimo_error}. "
+                        f"Log: {log_path or 'no disponible'}. "
+                        f"Detalle: {detalle or 'Chrome no escribió diagnóstico.'}"
+                    )
             await asyncio.sleep(0.25)
 
         detalle = ""
