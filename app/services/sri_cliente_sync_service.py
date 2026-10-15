@@ -3132,6 +3132,41 @@ class SriClienteSyncService:
         db.execute(text(f"INSERT INTO ventas ({cols}) VALUES ({params})"), values)
 
     @classmethod
+    async def _consultar_recibidos_con_limite(
+        cls, page, anio: int, mes: int, tipo_comprobante: int,
+        job_id: str | None = None, timeout_seconds: int = 90,
+    ) -> int:
+        """Limita la consulta del SRI y permite cancelar sin bloquear la cola."""
+        tarea = asyncio.create_task(
+            cls._consultar_recibidos(page, anio, mes, tipo_comprobante)
+        )
+        try:
+            limite = time.monotonic() + timeout_seconds
+            while not tarea.done():
+                if job_id:
+                    cls._verificar_cancelacion(job_id)
+                restante = limite - time.monotonic()
+                if restante <= 0:
+                    tarea.cancel()
+                    await asyncio.gather(tarea, return_exceptions=True)
+                    raise RuntimeError(
+                        "La consulta de comprobantes recibidos superó "
+                        f"{timeout_seconds} segundos. El trabajo se cerrará para "
+                        "liberar Chrome y permitir continuar con otros clientes. "
+                        "Verifique el CAPTCHA del SRI y vuelva a intentar."
+                    )
+                await asyncio.wait({tarea}, timeout=min(2.0, restante))
+            return await tarea
+        except SriJobCancelado:
+            tarea.cancel()
+            await asyncio.gather(tarea, return_exceptions=True)
+            raise
+        except asyncio.CancelledError:
+            tarea.cancel()
+            await asyncio.gather(tarea, return_exceptions=True)
+            raise
+
+    @classmethod
     async def _consultar_recibidos(cls, page, anio: int, mes: int, tipo_comprobante: int) -> None:
         """Consulta recibidos y espera la tabla AJAX, no los enlaces XML.
 
@@ -3553,8 +3588,8 @@ class SriClienteSyncService:
                 )
             else:
                 try:
-                    filas_recibidos = await cls._consultar_recibidos(
-                        page, anio, mes, tipo_comprobante
+                    filas_recibidos = await cls._consultar_recibidos_con_limite(
+                        page, anio, mes, tipo_comprobante, job_id=job_id
                     )
                 except RuntimeError as exc:
                     # Un rechazo del CAPTCHA puede ocurrir si el token oficial
@@ -3580,8 +3615,8 @@ class SriClienteSyncService:
                         job_id, ruc,
                     )
                     await page.wait_for_timeout(1500)
-                    filas_recibidos = await cls._consultar_recibidos(
-                        page, anio, mes, tipo_comprobante
+                    filas_recibidos = await cls._consultar_recibidos_con_limite(
+                        page, anio, mes, tipo_comprobante, job_id=job_id
                     )
                 if filas_recibidos == 0:
                     result["mensaje"] = (
