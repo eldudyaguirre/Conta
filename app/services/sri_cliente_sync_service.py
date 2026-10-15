@@ -270,19 +270,20 @@ class SriClienteSyncService:
                 "Fallo ejecutando trabajo SRI | %s | error_tipo=%s | error=%s",
                 contexto, type(exc).__name__, str(exc),
             )
-            # Un CAPTCHA rechazado por el portal no es un fallo de datos ni
-            # debe confundirse con una sincronización completada. Se clasifica
-            # aparte para que la interfaz pueda identificar la intervención
-            # necesaria y no se disparen reintentos automáticos.
+            # El CAPTCHA ya tuvo su único reintento dentro de sincronizar_mes().
+            # En este punto el navegador se cerrará y no existe una sesión
+            # interactiva pendiente que pueda continuar el trabajo. Dejar el job
+            # en estado "captcha" lo bloquearía como duplicado indefinidamente.
+            # Marcamos error terminal para permitir un nuevo requerimiento manual.
             texto_error = str(exc).casefold()
             es_captcha = "captcha incorrecta" in texto_error or (
                 "captcha" in texto_error and "rechazó" in texto_error
             )
-            estado_error = "captcha" if es_captcha else "error"
+            estado_error = "error"
             mensaje_error = (
-                "El SRI rechazó el CAPTCHA. No se guardó una sincronización "
-                "completa; vuelva a intentar únicamente después de resolver "
-                "la validación oficial del SRI."
+                "El SRI rechazó el CAPTCHA incluso después del único reintento. "
+                "Este intento terminó y no queda una sesión activa esperando "
+                "validación. Verifique el SRI y solicite una nueva sincronización."
                 if es_captcha else f"{type(exc).__name__}: {exc}"
             )
             try:
