@@ -3184,7 +3184,16 @@ class SriClienteSyncService:
                             f"solicitada ({value}). Opciones disponibles: {opciones}"
                         )
 
-                    # Registrar el valor y la etiqueta realmente seleccionados.
+                    # PrimeFaces/JSF no siempre registra el cambio producido por
+                    # select_option(). Disparar los eventos del control evita que el
+                    # formulario conserve el tipo anterior (por ejemplo, Factura al
+                    # pasar a Nota de crédito) aunque visualmente el combo cambie.
+                    await combo.dispatch_event("input")
+                    await combo.dispatch_event("change")
+                    await combo.dispatch_event("blur")
+                    await page.wait_for_timeout(350)
+
+                    # Confirmar el valor real después de notificar al widget.
                     try:
                         seleccion_real = await combo.locator(
                             "option:checked"
