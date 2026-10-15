@@ -941,44 +941,75 @@ class SriClienteSyncService:
 
     @staticmethod
     def _cerrar_chrome(chrome_process) -> None:
-        """Cierra de forma segura el Chrome SRI que abrió Conta."""
+        """Cierra el árbol de Chrome iniciado por Conta sin afectar otros Chrome."""
         if chrome_process is None:
             return
 
         pid = getattr(chrome_process, "pid", None)
-        try:
-            if chrome_process.poll() is None:
-                chrome_process.terminate()
-                try:
-                    chrome_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    chrome_process.kill()
-                    try:
-                        chrome_process.wait(timeout=3)
-                    except Exception:
-                        pass
 
-            # En Windows, si el proceso principal dejó procesos hijos de Chrome
-            # abiertos, cerramos únicamente el árbol del PID que Conta inició.
-            if pid and chrome_process.poll() is None:
+        # En Windows, finalizar primero el árbol evita dejar procesos renderer/GPU
+        # huérfanos cuando el proceso principal lanzado por Popen ya terminó.
+        if os.name == "nt" and pid:
+            try:
                 subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=False,
+                    timeout=10,
                 )
-        except Exception:
-            # El cierre nunca debe convertir una sincronización exitosa en error.
+            except Exception:
+                logger.debug(
+                    "No se pudo finalizar inicialmente el árbol de Chrome PID %s.",
+                    pid,
+                    exc_info=True,
+                )
+
+        try:
+            chrome_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             try:
-                if pid:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
+                chrome_process.terminate()
+                chrome_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    chrome_process.kill()
+                    chrome_process.wait(timeout=3)
+                except Exception:
+                    logger.warning(
+                        "No se pudo confirmar el cierre del proceso Chrome PID %s.",
+                        pid,
+                        exc_info=True,
                     )
             except Exception:
-                pass
+                logger.warning(
+                    "Error al terminar Chrome PID %s.",
+                    pid,
+                    exc_info=True,
+                )
+        except Exception:
+            logger.debug(
+                "Error esperando el cierre de Chrome PID %s.",
+                pid,
+                exc_info=True,
+            )
+
+        # Segunda pasada como respaldo, limitada al PID que abrió Conta.
+        if os.name == "nt" and pid:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=10,
+                )
+            except Exception:
+                logger.debug(
+                    "No se pudo completar la limpieza del árbol Chrome PID %s.",
+                    pid,
+                    exc_info=True,
+                )
 
     @classmethod
     async def _cerrar_sesion_sri(cls, page, context) -> None:
@@ -3184,7 +3215,16 @@ class SriClienteSyncService:
                             f"solicitada ({value}). Opciones disponibles: {opciones}"
                         )
 
-                    # Registrar el valor y la etiqueta realmente seleccionados.
+                    # PrimeFaces/JSF no siempre registra el cambio producido por
+                    # select_option(). Disparar los eventos del control evita que el
+                    # formulario conserve el tipo anterior (por ejemplo, Factura al
+                    # pasar a Nota de crédito) aunque visualmente el combo cambie.
+                    await combo.dispatch_event("input")
+                    await combo.dispatch_event("change")
+                    await combo.dispatch_event("blur")
+                    await page.wait_for_timeout(350)
+
+                    # Confirmar el valor real después de notificar al widget.
                     try:
                         seleccion_real = await combo.locator(
                             "option:checked"
