@@ -270,20 +270,19 @@ class SriClienteSyncService:
                 "Fallo ejecutando trabajo SRI | %s | error_tipo=%s | error=%s",
                 contexto, type(exc).__name__, str(exc),
             )
-            # El CAPTCHA ya tuvo su único reintento dentro de sincronizar_mes().
-            # En este punto el navegador se cerrará y no existe una sesión
-            # interactiva pendiente que pueda continuar el trabajo. Dejar el job
-            # en estado "captcha" lo bloquearía como duplicado indefinidamente.
-            # Marcamos error terminal para permitir un nuevo requerimiento manual.
+            # Un rechazo de CAPTCHA es terminal para esta sesión: no hacemos
+            # reintentos ciegos ni dejamos el trabajo en estado "captcha", porque
+            # el worker puede ejecutarse como servicio no interactivo de Windows.
+            # El navegador se cerrará y el usuario podrá iniciar una nueva consulta.
             texto_error = str(exc).casefold()
             es_captcha = "captcha incorrecta" in texto_error or (
                 "captcha" in texto_error and "rechazó" in texto_error
             )
             estado_error = "error"
             mensaje_error = (
-                "El SRI rechazó el CAPTCHA incluso después del único reintento. "
-                "Este intento terminó y no queda una sesión activa esperando "
-                "validación. Verifique el SRI y solicite una nueva sincronización."
+                "El SRI rechazó el CAPTCHA. Conta no reintentó automáticamente y "
+                "cerró esta sesión para evitar reutilizar un token rechazado. "
+                "Revise el acceso al SRI y vuelva a iniciar la sincronización."
                 if es_captcha else f"{type(exc).__name__}: {exc}"
             )
             try:
@@ -3334,9 +3333,22 @@ class SriClienteSyncService:
 
                     if "captcha incorrecta" in normalizado:
                         diagnostico = await cls._diagnostico_consulta(page)
+                        captura = Path(tempfile.gettempdir()) / (
+                            f"conta_sri_captcha_rechazado_{anio}_{mes:02d}_"
+                            f"{tipo_comprobante}_{int(time.time())}.png"
+                        )
+                        try:
+                            await page.screenshot(path=str(captura), full_page=True)
+                        except Exception as captura_exc:
+                            logger.warning(
+                                "SRI RECIBIDOS | no se pudo guardar captura CAPTCHA | error=%s",
+                                captura_exc,
+                            )
+                            captura = None
                         logger.error(
-                            "SRI RECIBIDOS | CAPTCHA RECHAZADO | tipo_solicitado=%s | %s",
-                            tipo_comprobante, diagnostico,
+                            "SRI RECIBIDOS | CAPTCHA RECHAZADO | tipo_solicitado=%s | captura=%s | %s",
+                            tipo_comprobante, str(captura) if captura else "no disponible",
+                            diagnostico,
                         )
                         raise RuntimeError(
                             "El SRI rechazó el CAPTCHA al consultar comprobantes "
@@ -3587,37 +3599,15 @@ class SriClienteSyncService:
                     tipo_emitido="retencion" if operacion == "retenciones_emitidas" else "factura",
                 )
             else:
-                try:
-                    filas_recibidos = await cls._consultar_recibidos_con_limite(
-                        page, anio, mes, tipo_comprobante, job_id=job_id
-                    )
-                except RuntimeError as exc:
-                    # Un rechazo del CAPTCHA puede ocurrir si el token oficial
-                    # expiró o fue consumido durante una respuesta lenta del SRI.
-                    # Permitimos UN solo intento nuevo desde el formulario oficial,
-                    # que vuelve a generar su propio token al pulsar Consultar.
-                    # No resolvemos ni evitamos el CAPTCHA automáticamente.
-                    if "captcha incorrecta" not in str(exc).casefold():
-                        raise
-                    cls._job_update(
-                        job_id,
-                        estado="captcha",
-                        mensaje=(
-                            "El SRI rechazó el primer CAPTCHA. Se volverá a abrir "
-                            "una sola vez el formulario oficial para generar una "
-                            "validación nueva."
-                        ),
-                        detalle=str(exc),
-                    )
-                    logger.warning(
-                        "SRI rechazó CAPTCHA; se realizará un único intento "
-                        "nuevo con formulario oficial | job_id=%s | ruc=%s",
-                        job_id, ruc,
-                    )
-                    await page.wait_for_timeout(1500)
-                    filas_recibidos = await cls._consultar_recibidos_con_limite(
-                        page, anio, mes, tipo_comprobante, job_id=job_id
-                    )
+                # No repetir automáticamente una consulta cuando el SRI rechaza
+                # el CAPTCHA. El token puede ser de un solo uso y un segundo envío
+                # inmediato no permite al usuario resolver un desafío nuevo.
+                # La sesión de este navegador pertenece al worker; al ser un servicio
+                # de Windows, no se debe dejar el trabajo esperando una interacción
+                # que quizá no sea visible para el usuario.
+                filas_recibidos = await cls._consultar_recibidos_con_limite(
+                    page, anio, mes, tipo_comprobante, job_id=job_id
+                )
                 if filas_recibidos == 0:
                     result["mensaje"] = (
                         "El SRI terminó la consulta y no encontró comprobantes "
