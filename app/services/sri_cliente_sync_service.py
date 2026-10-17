@@ -1072,7 +1072,7 @@ class SriClienteSyncService:
                     )
 
     @classmethod
-    async def _login(cls, ruc: str, clave: str):
+    async def _login(cls, ruc: str, clave: str, perfil_aislado: bool = False):
         p = await async_playwright().start()
         browser = None
         context = None
@@ -1082,7 +1082,7 @@ class SriClienteSyncService:
         if not profile_root:
             profile_root = str(Path.cwd() / "sri_profiles")
 
-        profile_dir = Path(profile_root) / f"{ruc}_chrome"
+        profile_dir = Path(profile_root) / (f"{ruc}_chrome_retry_{uuid.uuid4().hex}" if perfil_aislado else f"{ruc}_chrome")
         profile_dir.mkdir(parents=True, exist_ok=True)
 
         puerto_preferido = int(settings.SRI_CDP_PORT or 9222)
@@ -3656,15 +3656,55 @@ class SriClienteSyncService:
                     tipo_emitido="retencion" if operacion == "retenciones_emitidas" else "factura",
                 )
             else:
-                # No repetir automáticamente una consulta cuando el SRI rechaza
-                # el CAPTCHA. El token puede ser de un solo uso y un segundo envío
-                # inmediato no permite al usuario resolver un desafío nuevo.
-                # La sesión de este navegador pertenece al worker; al ser un servicio
-                # de Windows, no se debe dejar el trabajo esperando una interacción
-                # que quizá no sea visible para el usuario.
-                filas_recibidos = await cls._consultar_recibidos_con_limite(
-                    page, anio, mes, tipo_comprobante, job_id=job_id
-                )
+                try:
+                    filas_recibidos = await cls._consultar_recibidos_con_limite(
+                        page, anio, mes, tipo_comprobante, job_id=job_id
+                    )
+                except RuntimeError as exc:
+                    # Solo ante un rechazo explícito del CAPTCHA abrimos una
+                    # sesión nueva y hacemos un único segundo intento. No se
+                    # recarga la página que recibió el rechazo ni se reenvía
+                    # el token consumido.
+                    error = str(exc).casefold()
+                    if "captcha" not in error or "rechaz" not in error:
+                        raise
+
+                    logger.warning(
+                        "SRI RECIBIDOS | CAPTCHA rechazado; se abrirá una sesión "
+                        "nueva para un único reintento | ruc=%s | tipo=%s",
+                        ruc, tipo_comprobante,
+                    )
+                    try:
+                        if context is not None:
+                            await context.close()
+                    except Exception as cleanup_exc:
+                        logger.warning("SRI RECIBIDOS | error cerrando contexto anterior: %s", cleanup_exc)
+                    try:
+                        if browser is not None:
+                            await browser.close()
+                    except Exception:
+                        pass
+                    try:
+                        cls._cerrar_chrome(chrome_process)
+                    except Exception as cleanup_exc:
+                        logger.warning("SRI RECIBIDOS | error cerrando Chrome anterior: %s", cleanup_exc)
+                    try:
+                        if p is not None:
+                            await p.stop()
+                    except Exception:
+                        pass
+
+                    p = browser = context = page = chrome_process = None
+                    cls._job_update(
+                        job_id,
+                        estado="captcha",
+                        mensaje="El SRI rechazó el CAPTCHA. Abriendo una sesión nueva para un único reintento.",
+                    )
+                    p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"], perfil_aislado=True)
+                    filas_recibidos = await cls._consultar_recibidos_con_limite(
+                        page, anio, mes, tipo_comprobante, job_id=job_id
+                    )
+
                 if filas_recibidos == 0:
                     result["mensaje"] = (
                         "El SRI terminó la consulta y no encontró comprobantes "
