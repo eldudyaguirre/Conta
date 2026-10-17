@@ -417,6 +417,19 @@ class SriClienteSyncService:
                 """), {"job_id": row["job_id"], "worker": worker_id})
         return dict(row)
 
+    @classmethod
+    def liberar_trabajo_worker(cls, worker_id: str, job_id: str) -> None:
+        """Libera el trabajo actual solo si todavía pertenece a este worker."""
+        cls._ensure_jobs_table()
+        with engine.begin() as db:
+            db.execute(text(f"""
+                UPDATE {cls.WORKER_TABLE}
+                SET job_actual = NULL,
+                    ultimo_heartbeat = CURRENT_TIMESTAMP
+                WHERE worker_id = :worker_id
+                  AND job_actual = :job_id
+            """), {"worker_id": worker_id, "job_id": job_id})
+
 
     """Sincroniza automáticamente comprobantes recibidos del SRI hacia comprasnue.
 
