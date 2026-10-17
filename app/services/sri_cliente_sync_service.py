@@ -1072,7 +1072,7 @@ class SriClienteSyncService:
                     )
 
     @classmethod
-    async def _login(cls, ruc: str, clave: str):
+    async def _login(cls, ruc: str, clave: str, perfil_aislado: bool = False):
         p = await async_playwright().start()
         browser = None
         context = None
@@ -1082,7 +1082,7 @@ class SriClienteSyncService:
         if not profile_root:
             profile_root = str(Path.cwd() / "sri_profiles")
 
-        profile_dir = Path(profile_root) / f"{ruc}_chrome"
+        profile_dir = Path(profile_root) / (f"{ruc}_chrome_retry_{uuid.uuid4().hex}" if perfil_aislado else f"{ruc}_chrome")
         profile_dir.mkdir(parents=True, exist_ok=True)
 
         puerto_preferido = int(settings.SRI_CDP_PORT or 9222)
@@ -3700,7 +3700,7 @@ class SriClienteSyncService:
                         estado="captcha",
                         mensaje="El SRI rechazó el CAPTCHA. Abriendo una sesión nueva para un único reintento.",
                     )
-                    p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"])
+                    p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"], perfil_aislado=True)
                     filas_recibidos = await cls._consultar_recibidos_con_limite(
                         page, anio, mes, tipo_comprobante, job_id=job_id
                     )
