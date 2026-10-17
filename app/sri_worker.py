@@ -126,6 +126,18 @@ async def _procesar_trabajo(worker_numero: int) -> None:
                     mensaje=f"Error inesperado del worker {worker_id}. Revise el log.",
                 )
             await asyncio.sleep(5)
+        finally:
+            if trabajo:
+                try:
+                    SriClienteSyncService.liberar_trabajo_worker(
+                        worker_id, str(trabajo["job_id"])
+                    )
+                except Exception:
+                    logger.exception(
+                        "No se pudo liberar job_actual del worker %s para el trabajo %s.",
+                        worker_id,
+                        trabajo.get("job_id"),
+                    )
 
 
 async def main() -> None:
