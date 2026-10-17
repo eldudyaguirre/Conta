@@ -3187,12 +3187,21 @@ class SriClienteSyncService:
         es la que llena tablaCompRecibidos. Por eso el criterio de éxito es que
         la tabla tenga filas, no que ya existan enlaces .xml en el DOM.
         """
+        # El código tributario se registra siempre con dos dígitos (p. ej. 07).
+        # El valor interno del <option> del SRI puede ser distinto; por eso no
+        # se fuerza "07" al select si el portal usa otro value, sino que se
+        # registra el código solicitado y la opción real seleccionada.
+        tipo_codigo_sri = f"{int(tipo_comprobante):02d}"
         campos = {
             "ano": str(anio),
             "mes": str(mes),
             "dia": "0",
             "cmbTipoComprobante": str(tipo_comprobante),
         }
+        logger.info(
+            "SRI RECIBIDOS | inicio consulta | codigo_sri=%s | valor_interno_solicitado=%s | anio=%s | mes=%s",
+            tipo_codigo_sri, campos["cmbTipoComprobante"], anio, mes,
+        )
 
         boton_selectores = [
             "#frmPrincipal\\:btnBuscar",
@@ -3359,14 +3368,14 @@ class SriClienteSyncService:
                             )
                             captura = None
                         logger.error(
-                            "SRI RECIBIDOS | CAPTCHA RECHAZADO | tipo_solicitado=%s | captura=%s | %s",
-                            tipo_comprobante, str(captura) if captura else "no disponible",
-                            diagnostico,
+                            "SRI RECIBIDOS | CAPTCHA RECHAZADO | codigo_sri=%s | valor_interno_solicitado=%s | captura=%s | %s",
+                            tipo_codigo_sri, tipo_comprobante,
+                            str(captura) if captura else "no disponible", diagnostico,
                         )
                         raise RuntimeError(
                             "El SRI rechazó el CAPTCHA al consultar comprobantes "
-                            f"recibidos (tipo solicitado {tipo_comprobante}). "
-                            + diagnostico
+                            f"recibidos (código SRI {tipo_codigo_sri}, valor interno solicitado "
+                            f"{tipo_comprobante}). " + diagnostico
                         )
                 except RuntimeError:
                     raise
@@ -3541,16 +3550,51 @@ class SriClienteSyncService:
                     ).input_value(timeout=1000)
                 except Exception:
                     parametros[campo] = None
-            boton = await page.locator(
-                "#frmPrincipal\\:btnBuscar, "
-                "button[id$=':btnBuscar'], "
-                "#frmPrincipal\\:btnConsultarSinRe, "
-                "input[id$=':btnConsultarSinRe'], button[id$=':btnConsultarSinRe']"
-            ).count()
+
+            # Diagnóstico seguro del formulario: nunca leer ni registrar
+            # g-recaptcha-response, cookies, cabeceras ni credenciales.
+            opciones_tipo = []
+            try:
+                opciones_tipo = await page.locator(
+                    "#frmPrincipal\\:cmbTipoComprobante"
+                ).locator("option").evaluate_all(
+                    "(els) => els.map(o => ({value:o.value, text:(o.textContent || '').trim(), selected:o.selected}))"
+                )
+            except Exception:
+                pass
+            formulario = {}
+            try:
+                formulario = await page.locator("#frmPrincipal").evaluate(
+                    "e => ({id:e.id, method:(e.method || '').toUpperCase(), action:e.action || ''})"
+                )
+            except Exception:
+                pass
+            mensajes = []
+            for selector_mensaje in (
+                ".ui-messages", ".ui-message", ".ui-growl",
+                "[role='alert']", ".mensajeError", ".errorMessage"
+            ):
+                try:
+                    texto_mensaje = await page.locator(selector_mensaje).all_inner_texts()
+                    mensajes.extend(" ".join(t.split()) for t in texto_mensaje if t.strip())
+                except Exception:
+                    pass
+            boton_estado = []
+            try:
+                boton_estado = await page.locator(
+                    "#frmPrincipal\\:btnBuscar, button[id$=':btnBuscar'], "
+                    "#frmPrincipal\\:btnConsultarSinRe, input[id$=':btnConsultarSinRe'], "
+                    "button[id$=':btnConsultarSinRe']"
+                ).evaluate_all(
+                    "(els) => els.map(e => ({id:e.id, text:(e.innerText || e.value || '').trim(), disabled:!!e.disabled, type:e.type || ''}))"
+                )
+            except Exception:
+                pass
             return (
                 f"URL={url}; título={title!r}; tipo_seleccionado={tipo_real!r}; "
-                f"parametros={parametros!r}; botón_consultar={boton}; "
-                f"captcha_elementos={captcha}; texto={body!r}"
+                f"opciones_tipo={opciones_tipo!r}; parametros={parametros!r}; "
+                f"formulario={formulario!r}; botones={boton_estado!r}; "
+                f"mensajes={mensajes!r}; captcha_elementos={captcha}; texto={body!r}"
             )
         except Exception as exc:
             return f"Diagnóstico adicional no disponible: {exc}"
