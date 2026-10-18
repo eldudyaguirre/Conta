@@ -43,6 +43,14 @@ async def sincronizar_ventas(
             tipo_comprobante=1,
             operacion="ventas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_ventas",
@@ -70,6 +78,14 @@ async def validar_ventas(
             tipo_comprobante=1,
             operacion="ventas_validar",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_validar_ventas",
@@ -106,6 +122,14 @@ async def reparar_diferencias_ventas(
             operacion="ventas_reparar",
             dias_objetivo=fechas,
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_reparar_ventas_diferencias",
@@ -131,6 +155,14 @@ async def sincronizar_notas_credito_emitidas(
             tipo_comprobante=3,
             operacion="notas_credito_emitidas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_notas_credito_emitidas",
@@ -159,6 +191,14 @@ async def sincronizar_retenciones_recibidas(
             tipo_comprobante=7,
             operacion="retenciones_recibidas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_retenciones_recibidas",
@@ -187,6 +227,14 @@ async def sincronizar_retenciones_emitidas(
             tipo_comprobante=7,
             operacion="retenciones_emitidas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_retenciones_emitidas",
@@ -217,6 +265,14 @@ async def sincronizar_notas_credito_recibidas(
             tipo_comprobante=3,
             operacion="notas_credito_recibidas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_notas_credito_recibidas",
@@ -252,6 +308,14 @@ async def sincronizar_compras(
             "API COMPRAS | trabajo creado | resultado=%s",
             resultado,
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync",
@@ -307,6 +371,14 @@ async def descargar_certificados_ruc(
 
     try:
         resultado = SriCertificadoRucService.iniciar_todos()
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_certificados_ruc",
