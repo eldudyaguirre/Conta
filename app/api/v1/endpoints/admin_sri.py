@@ -371,14 +371,6 @@ async def descargar_certificados_ruc(
 
     try:
         resultado = SriCertificadoRucService.iniciar_todos()
-        if resultado.get("duplicado"):
-            raise HTTPException(
-                status_code=409,
-                detail=resultado.get(
-                    "aviso",
-                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
-                ),
-            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_certificados_ruc",
