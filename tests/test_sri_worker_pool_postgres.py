@@ -21,6 +21,7 @@ TEST_RUC = "1790012345001"
 @pytest.fixture
 def postgres_client(monkeypatch):
     # CI points this test at a disposable PostgreSQL 16 service, never production.
+    SriClienteSyncService._ensure_jobs_table()
     with engine.begin() as db:
         db.execute(text("""
             CREATE TABLE IF NOT EXISTS clientes (
@@ -30,7 +31,10 @@ def postgres_client(monkeypatch):
                 clavesri TEXT NOT NULL DEFAULT ''
             )
         """))
-        db.execute(text("DELETE FROM conta_sri_jobs WHERE TRIM(ruc) = :ruc"), {"ruc": TEST_RUC}) if _table_exists(db, "conta_sri_jobs") else None
+        db.execute(
+            text("DELETE FROM conta_sri_jobs WHERE TRIM(ruc) = :ruc"),
+            {"ruc": TEST_RUC},
+        )
         db.execute(text("""
             INSERT INTO clientes (ruccedcli, nomclient, activo, clavesri)
             VALUES (:ruc, 'Cliente de integración', TRUE, 'clave-ficticia')
@@ -42,10 +46,6 @@ def postgres_client(monkeypatch):
 
     # Prepare schema once before racing, then exercise the actual transaction,
     # advisory lock, active-job query, and insert path concurrently.
-    SriClienteSyncService._ensure_jobs_table()
-    with engine.begin() as db:
-        db.execute(text("DELETE FROM conta_sri_jobs WHERE TRIM(ruc) = :ruc"), {"ruc": TEST_RUC})
-
     monkeypatch.setattr(
         SriClienteSyncService,
         "_ensure_jobs_table",
@@ -54,17 +54,14 @@ def postgres_client(monkeypatch):
     yield TEST_RUC
 
     with engine.begin() as db:
-        db.execute(text("DELETE FROM conta_sri_jobs WHERE TRIM(ruc) = :ruc"), {"ruc": TEST_RUC)
-        db.execute(text("DELETE FROM clientes WHERE TRIM(ruccedcli) = :ruc"), {"ruc": TEST_RUC})
-
-
-def _table_exists(db, table_name: str) -> bool:
-    return bool(db.execute(text("""
-        SELECT EXISTS (
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name = :table_name
+        db.execute(
+            text("DELETE FROM conta_sri_jobs WHERE TRIM(ruc) = :ruc"),
+            {"ruc": TEST_RUC},
         )
-    """), {"table_name": table_name}).scalar())
+        db.execute(
+            text("DELETE FROM clientes WHERE TRIM(ruccedcli) = :ruc"),
+            {"ruc": TEST_RUC},
+        )
 
 
 def test_concurrent_sync_requests_for_same_ruc_create_only_one_job(postgres_client):
