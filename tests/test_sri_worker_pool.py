@@ -121,3 +121,42 @@ def test_normal_sync_returns_warning_for_any_active_job(monkeypatch):
     assert resultado["duplicado"] is True
     assert resultado["job_id"] == "job-existente"
     assert "No se creó otra solicitud" in resultado["aviso"]
+
+def test_preview_does_not_run_schema_ddl(monkeypatch):
+    class FakeDB:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeEngine:
+        def connect(self):
+            return FakeDB()
+
+    monkeypatch.setattr(
+        SriWorkerPoolService,
+        "_ensure_pool_schema",
+        lambda: pytest.fail("La previsualización no debe ejecutar DDL"),
+    )
+    monkeypatch.setattr(
+        "app.services.sri_worker_pool_service.engine",
+        FakeEngine(),
+    )
+    monkeypatch.setattr(
+        SriWorkerPoolService,
+        "_consultar_clientes",
+        lambda *args, **kwargs: [{
+            "ruc": "1790012345001",
+            "cliente": "Cliente de prueba",
+            "disponible": True,
+            "motivo": "Disponible para la prueba.",
+        }],
+    )
+
+    resultado = SriWorkerPoolService.previsualizar(
+        rucs=["1790012345001"], anio=2026, mes=9
+    )
+
+    assert resultado["cantidad_disponible"] == 1
+    assert resultado["sin_trabajos_creados"] is True
