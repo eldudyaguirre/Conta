@@ -70,10 +70,6 @@ class SriWorkerPoolService:
                     SELECT 1
                     FROM conta_sri_jobs j
                     WHERE TRIM(j.ruc) = TRIM(c.ruccedcli::text)
-                      AND j.anio = :anio
-                      AND j.mes = :mes
-                      AND j.tipo_comprobante = :tipo
-                      AND j.operacion = :operacion
                       AND j.estado IN ('pendiente', 'ejecutando', 'captcha')
                 ) AS trabajo_en_curso
             FROM clientes c
@@ -162,10 +158,8 @@ class SriWorkerPoolService:
             # Serializa solicitudes concurrentes para los mismos RUC durante
             # la validación y creación de los trabajos.
             for ruc in sorted(rucs):
-                db.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtext(:clave))"),
-                    {"clave": f"conta_sri_pool:{ruc}:{anio}:{mes}:{tipo}:{operacion}"},
-                )
+                # Usa exactamente el mismo bloqueo que las solicitudes normales.
+                SriClienteSyncService.bloquear_solicitudes_ruc(db, ruc)
 
             clientes = cls._consultar_clientes(
                 db, rucs, anio=anio, mes=mes, tipo=tipo, operacion=operacion
