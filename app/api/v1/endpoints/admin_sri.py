@@ -56,6 +56,8 @@ async def sincronizar_ventas(
             "tipo": "sri_sync_ventas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -91,6 +93,8 @@ async def validar_ventas(
             "tipo": "sri_validar_ventas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -135,6 +139,8 @@ async def reparar_diferencias_ventas(
             "tipo": "sri_reparar_ventas_diferencias",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -168,6 +174,8 @@ async def sincronizar_notas_credito_emitidas(
             "tipo": "sri_sync_notas_credito_emitidas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -204,6 +212,8 @@ async def sincronizar_retenciones_recibidas(
             "tipo": "sri_sync_retenciones_recibidas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -240,6 +250,8 @@ async def sincronizar_retenciones_emitidas(
             "tipo": "sri_sync_retenciones_emitidas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -278,6 +290,8 @@ async def sincronizar_notas_credito_recibidas(
             "tipo": "sri_sync_notas_credito_recibidas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -321,6 +335,8 @@ async def sincronizar_compras(
             "tipo": "sri_sync",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
