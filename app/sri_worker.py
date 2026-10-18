@@ -86,7 +86,9 @@ async def _procesar_trabajo(worker_numero: int) -> None:
                 SriClienteSyncService.registrar_worker(worker_id, usuario_worker)
                 ultimo_heartbeat = ahora
 
-            trabajo = SriClienteSyncService.obtener_trabajo_pendiente(worker_id)
+            trabajo = SriClienteSyncService.obtener_trabajo_pendiente(
+                worker_id, solo_pool=settings.SRI_WORKER_POOL_ONLY
+            )
             if trabajo:
                 SriClienteSyncService._iva_debug_log(
                     "WORKER | trabajo reclamado | worker=%s | job_id=%s | ruc=%s | anio=%s | mes=%s | tipo=%s | operacion=%s",
