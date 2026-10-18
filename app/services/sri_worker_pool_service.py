@@ -117,8 +117,11 @@ class SriWorkerPoolService:
         tipo_comprobante: int = 1,
         operacion: str = "compras",
     ) -> dict[str, Any]:
-        """Valida una selección explícita sin encolar ni ejecutar trabajos."""
-        cls._ensure_pool_schema()
+        """Valida una selección explícita sin encolar ni ejecutar trabajos.
+
+        Este método es estrictamente de lectura: el esquema debe estar preparado
+        por la inicialización/migración del servicio, nunca por la previsualización.
+        """
         rucs = cls._validar_rucs(rucs)
         tipo = SriClienteSyncService._tipo(tipo_comprobante)
         with engine.connect() as db:
