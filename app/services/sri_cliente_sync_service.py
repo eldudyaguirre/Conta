@@ -187,7 +187,6 @@ class SriClienteSyncService:
     def iniciar_sincronizacion(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, operacion: str = "compras", dias_objetivo: list[str] | None = None) -> dict[str, Any]:
         # El trabajo se guarda en PostgreSQL para que la API y el worker
         # interactivo compartan la misma cola, incluso en procesos separados.
-        cred = cls._credenciales(ruc)
         cls._ensure_jobs_table()
         tipo = cls._tipo(tipo_comprobante)
         with engine.begin() as db:
@@ -204,6 +203,26 @@ class SriClienteSyncService:
                         f"{existente['estado']}. No se creó otra solicitud."
                     ),
                 }
+
+            # Validar el cliente después de comprobar si ya tiene trabajo activo,
+            # usando la misma transacción protegida por el bloqueo del RUC.
+            fila_cliente = db.execute(text("""
+                SELECT ruccedcli, nomclient, activo, clavesri
+                FROM clientes
+                WHERE TRIM(ruccedcli::text) = :ruc
+                LIMIT 1
+            """), {"ruc": str(ruc).strip()}).mappings().first()
+            if not fila_cliente:
+                raise ValueError("El RUC no existe en BdTotal.")
+            if not bool(fila_cliente["activo"]):
+                raise ValueError("El cliente no está activo.")
+            if not str(fila_cliente["clavesri"] or "").strip():
+                raise ValueError("El cliente no tiene clave SRI configurada.")
+            cred = {
+                "ruc": str(fila_cliente["ruccedcli"]),
+                "nombre": str(fila_cliente["nomclient"] or ""),
+                "clave": str(fila_cliente["clavesri"]).strip(),
+            }
 
             job_id = uuid.uuid4().hex
             db.execute(text(f"""
