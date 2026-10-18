@@ -10,8 +10,29 @@ jobs:
   tests:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: conta_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d conta_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
       PYTHONPATH: .
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_NAME: conta_test
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      SRI_DB_INTEGRATION: "1"
 
     steps:
       - name: Checkout
