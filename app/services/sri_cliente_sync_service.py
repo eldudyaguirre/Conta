@@ -22,6 +22,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.database.client_connection import obtener_session_cliente
 from app.database.connection import engine
+from app.services.sri_ruc_lock import bloquear_sesion_sri_por_ruc
 
 
 logger = logging.getLogger("conta.sri_sync")
@@ -436,21 +437,73 @@ class SriClienteSyncService:
         *,
         solo_pool: bool = False,
     ) -> dict[str, Any] | None:
-        """Reclama un trabajo; opcionalmente limita la selección al Worker Pool."""
+        """Reclama un trabajo sin ejecutar simultáneamente trabajos del mismo RUC.
+
+        SKIP LOCKED distribuye filas entre workers. El advisory lock transaccional
+        por RUC cierra la carrera en la que dos workers intentan reclamar trabajos
+        distintos del mismo cliente a la vez. Una vez confirmado el estado
+        'ejecutando', los siguientes reclamos también excluyen ese RUC hasta que
+        el trabajo deje de estar activo.
+        """
         cls._ensure_jobs_table()
-        filtro_pool = "AND grupo_id IS NOT NULL" if solo_pool else ""
+        filtro_pool = "AND pendiente.grupo_id IS NOT NULL" if solo_pool else ""
         with engine.begin() as db:
-            row = db.execute(text(f"""
-                SELECT job_id, ruc, anio, mes, tipo_comprobante, operacion
-                FROM {cls.JOB_TABLE}
-                WHERE estado = 'pendiente'
+            candidatos = db.execute(text(f"""
+                SELECT pendiente.job_id, pendiente.ruc, pendiente.anio,
+                       pendiente.mes, pendiente.tipo_comprobante, pendiente.operacion
+                FROM {cls.JOB_TABLE} AS pendiente
+                WHERE pendiente.estado = 'pendiente'
                   {filtro_pool}
-                ORDER BY creado
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-            """)).mappings().first()
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM {cls.JOB_TABLE} AS activo
+                      WHERE activo.ruc = pendiente.ruc
+                        AND activo.estado IN ('ejecutando', 'captcha')
+                  )
+                ORDER BY pendiente.creado
+                LIMIT 50
+            """)).mappings().all()
+
+            row = None
+            for candidato in candidatos:
+                # El lock de dos claves separa este mecanismo de otros advisory
+                # locks de la aplicación. Se libera automáticamente al cerrar
+                # la transacción, tanto en éxito como en excepción.
+                bloqueado = db.execute(text("""
+                    SELECT pg_try_advisory_xact_lock(2408, hashtext(:ruc))
+                """), {"ruc": str(candidato["ruc"])}).scalar()
+                if not bloqueado:
+                    continue
+
+                # Revalidar la fila después de obtener el lock: otro worker
+                # pudo reclamarla desde que se leyó la lista de candidatos.
+                fila = db.execute(text(f"""
+                    SELECT job_id, ruc, anio, mes, tipo_comprobante, operacion
+                    FROM {cls.JOB_TABLE}
+                    WHERE job_id = :job_id AND estado = 'pendiente'
+                    FOR UPDATE SKIP LOCKED
+                """), {"job_id": candidato["job_id"]}).mappings().first()
+                if not fila:
+                    continue
+
+                # Segunda comprobación dentro de la misma transacción. Si otro
+                # trabajo del RUC ya estaba ejecutándose, no lo reclamamos.
+                trabajo_activo = db.execute(text(f"""
+                    SELECT 1
+                    FROM {cls.JOB_TABLE}
+                    WHERE ruc = :ruc
+                      AND estado IN ('ejecutando', 'captcha')
+                    LIMIT 1
+                """), {"ruc": str(fila["ruc"])}).first()
+                if trabajo_activo:
+                    continue
+
+                row = fila
+                break
+
             if not row:
                 return None
+
             db.execute(text(f"""
                 UPDATE {cls.JOB_TABLE}
                 SET estado = 'ejecutando',
@@ -3679,6 +3732,7 @@ class SriClienteSyncService:
         return False
 
     @classmethod
+    @bloquear_sesion_sri_por_ruc
     async def sincronizar_mes(
         cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1,
         job_id: str | None = None, operacion: str = "compras",

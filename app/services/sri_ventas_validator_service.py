@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from app.database.client_connection import obtener_session_cliente
 from app.services.sri_cliente_sync_service import SriClienteSyncService
+from app.services.sri_ruc_lock import bloquear_sesion_sri_por_ruc
 
 
 class SriVentasValidatorService:
@@ -24,6 +25,7 @@ class SriVentasValidatorService:
     """
 
     @classmethod
+    @bloquear_sesion_sri_por_ruc
     async def sincronizar_mes(
         cls,
         ruc: str,
