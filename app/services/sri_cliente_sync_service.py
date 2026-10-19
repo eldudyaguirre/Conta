@@ -96,6 +96,11 @@ class SriClienteSyncService:
             db.execute(text(
                 f"ALTER TABLE {cls.JOB_TABLE} ADD COLUMN IF NOT EXISTS operacion VARCHAR(30) NOT NULL DEFAULT 'compras'"
             ))
+            # Columna de agrupación del Worker Pool. Los trabajos normales
+            # permanecen con grupo_id NULL y siguen disponibles para workers estándar.
+            db.execute(text(
+                f"ALTER TABLE {cls.JOB_TABLE} ADD COLUMN IF NOT EXISTS grupo_id VARCHAR(64)"
+            ))
             db.execute(text(
                 f"ALTER TABLE {cls.JOB_TABLE} ADD COLUMN IF NOT EXISTS worker VARCHAR(150)"
             ))
@@ -153,31 +158,71 @@ class SriClienteSyncService:
             ), params)
 
     @classmethod
+    def bloquear_solicitudes_ruc(cls, db, ruc: str) -> None:
+        """Serializa la creación de cualquier solicitud SRI para el mismo RUC.
+
+        Todos los puntos de entrada (API normal y Worker Pool) deben usar la
+        misma clave para evitar que dos procesos validen simultáneamente y
+        creen trabajos activos para el mismo contribuyente.
+        """
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:clave))"),
+            {"clave": f"conta_sri_ruc:{str(ruc).strip()}"},
+        )
+
+    @classmethod
+    def obtener_solicitud_activa_ruc(cls, db, ruc: str) -> dict[str, Any] | None:
+        """Busca cualquier trabajo activo del RUC, sin limitar período u operación."""
+        row = db.execute(text(f"""
+            SELECT job_id, estado, anio, mes, tipo_comprobante, operacion, creado
+            FROM {cls.JOB_TABLE}
+            WHERE TRIM(ruc) = :ruc
+              AND estado IN ('pendiente', 'ejecutando', 'captcha')
+            ORDER BY creado DESC
+            LIMIT 1
+        """), {"ruc": str(ruc).strip()}).mappings().first()
+        return dict(row) if row else None
+
+    @classmethod
     def iniciar_sincronizacion(cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1, operacion: str = "compras", dias_objetivo: list[str] | None = None) -> dict[str, Any]:
         # El trabajo se guarda en PostgreSQL para que la API y el worker
         # interactivo compartan la misma cola, incluso en procesos separados.
-        cred = cls._credenciales(ruc)
         cls._ensure_jobs_table()
+        tipo = cls._tipo(tipo_comprobante)
         with engine.begin() as db:
-            existente = db.execute(text(f"""
-                SELECT job_id, estado
-                FROM {cls.JOB_TABLE}
-                WHERE ruc = :ruc AND anio = :anio AND mes = :mes
-                  AND tipo_comprobante = :tipo
-                  AND operacion = :operacion
-                  AND estado IN ('pendiente', 'ejecutando', 'captcha')
-                ORDER BY creado DESC
-                LIMIT 1
-            """), {
-                "ruc": ruc, "anio": anio, "mes": mes,
-                "tipo": cls._tipo(tipo_comprobante), "operacion": operacion,
-            }).mappings().first()
+            # Mismo bloqueo transaccional que usa el Worker Pool: una solicitud
+            # activa por RUC, incluso si cambia el período o la operación.
+            cls.bloquear_solicitudes_ruc(db, ruc)
+            existente = cls.obtener_solicitud_activa_ruc(db, ruc)
             if existente:
                 return {
-                    "job_id": existente["job_id"],
-                    "estado": existente["estado"],
+                    **existente,
                     "duplicado": True,
+                    "aviso": (
+                        f"El RUC {str(ruc).strip()} ya tiene una solicitud SRI "
+                        f"{existente['estado']}. No se creó otra solicitud."
+                    ),
                 }
+
+            # Validar el cliente después de comprobar si ya tiene trabajo activo,
+            # usando la misma transacción protegida por el bloqueo del RUC.
+            fila_cliente = db.execute(text("""
+                SELECT ruccedcli, nomclient, activo, clavesri
+                FROM clientes
+                WHERE TRIM(ruccedcli::text) = :ruc
+                LIMIT 1
+            """), {"ruc": str(ruc).strip()}).mappings().first()
+            if not fila_cliente:
+                raise ValueError("El RUC no existe en BdTotal.")
+            if not bool(fila_cliente["activo"]):
+                raise ValueError("El cliente no está activo.")
+            if not str(fila_cliente["clavesri"] or "").strip():
+                raise ValueError("El cliente no tiene clave SRI configurada.")
+            cred = {
+                "ruc": str(fila_cliente["ruccedcli"]),
+                "nombre": str(fila_cliente["nomclient"] or ""),
+                "clave": str(fila_cliente["clavesri"]).strip(),
+            }
 
             job_id = uuid.uuid4().hex
             db.execute(text(f"""
@@ -191,7 +236,7 @@ class SriClienteSyncService:
                 "cliente": cred["nombre"],
                 "anio": anio,
                 "mes": mes,
-                "tipo": cls._tipo(tipo_comprobante), "operacion": operacion,
+                "tipo": tipo, "operacion": operacion,
                 "mensaje": "Sincronización en cola. Esperando al worker SRI interactivo.",
                 "detalle": json.dumps({"dias_objetivo": dias_objetivo or []}, ensure_ascii=False) if operacion == "ventas_reparar" else None,
             })
@@ -385,14 +430,21 @@ class SriClienteSyncService:
             """), {"worker_id": worker_id, "usuario": usuario, "equipo": equipo})
 
     @classmethod
-    def obtener_trabajo_pendiente(cls, worker_id: str | None = None) -> dict[str, Any] | None:
-        """Reclama atómicamente un trabajo y lo identifica con el worker."""
+    def obtener_trabajo_pendiente(
+        cls,
+        worker_id: str | None = None,
+        *,
+        solo_pool: bool = False,
+    ) -> dict[str, Any] | None:
+        """Reclama un trabajo; opcionalmente limita la selección al Worker Pool."""
         cls._ensure_jobs_table()
+        filtro_pool = "AND grupo_id IS NOT NULL" if solo_pool else ""
         with engine.begin() as db:
             row = db.execute(text(f"""
                 SELECT job_id, ruc, anio, mes, tipo_comprobante, operacion
                 FROM {cls.JOB_TABLE}
                 WHERE estado = 'pendiente'
+                  {filtro_pool}
                 ORDER BY creado
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1

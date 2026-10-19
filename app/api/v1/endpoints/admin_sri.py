@@ -43,11 +43,21 @@ async def sincronizar_ventas(
             tipo_comprobante=1,
             operacion="ventas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_ventas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -70,11 +80,21 @@ async def validar_ventas(
             tipo_comprobante=1,
             operacion="ventas_validar",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_validar_ventas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -106,11 +126,21 @@ async def reparar_diferencias_ventas(
             operacion="ventas_reparar",
             dias_objetivo=fechas,
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_reparar_ventas_diferencias",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -131,11 +161,21 @@ async def sincronizar_notas_credito_emitidas(
             tipo_comprobante=3,
             operacion="notas_credito_emitidas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_notas_credito_emitidas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -159,11 +199,21 @@ async def sincronizar_retenciones_recibidas(
             tipo_comprobante=7,
             operacion="retenciones_recibidas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_retenciones_recibidas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -187,11 +237,21 @@ async def sincronizar_retenciones_emitidas(
             tipo_comprobante=7,
             operacion="retenciones_emitidas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_retenciones_emitidas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -217,11 +277,21 @@ async def sincronizar_notas_credito_recibidas(
             tipo_comprobante=3,
             operacion="notas_credito_recibidas",
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync_notas_credito_recibidas",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -252,11 +322,21 @@ async def sincronizar_compras(
             "API COMPRAS | trabajo creado | resultado=%s",
             resultado,
         )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_sync",
             **resultado,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
