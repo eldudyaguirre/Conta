@@ -1634,14 +1634,19 @@ class SriClienteSyncService:
 
                 # Inferir la tarifa efectiva a partir del IVA/base, no del
                 # código porcentaje que presenta la tabla del SRI.
-                tasa_fila = None
+                # Elegir la tarifa cuyo IVA calculado esté más cerca del valor
+                # real del SRI. No tomar la primera coincidencia: con bases pequeñas
+                # el redondeo puede hacer que 14% y 15% difieran por solo 0.02.
+                candidatos = []
                 for tasa in tasas_validas:
                     iva_esperado = (
                         base_fila * Decimal(tasa) / Decimal("100")
                     ).quantize(Decimal("0.01"))
-                    if abs(iva_esperado - iva_fila) <= Decimal("0.02"):
-                        tasa_fila = tasa
-                        break
+                    diferencia = abs(iva_esperado - iva_fila)
+                    candidatos.append((diferencia, tasa))
+                diferencia_minima, tasa_fila = min(candidatos, key=lambda item: item[0])
+                if diferencia_minima > Decimal("0.02"):
+                    tasa_fila = None
                 if tasa_fila is None:
                     logger_sri.warning(
                         "SRI resumen impuestos: tarifa no identificada base=%s iva=%s",
