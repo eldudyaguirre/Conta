@@ -450,6 +450,16 @@ class SriVentasValidatorService:
         job_id: str | None,
     ) -> tuple[list[str], list[str]]:
         """Obtiene cada clave del SRI y la compara individualmente con ventas."""
+        # La operación se determina aquí porque este método tiene su propio
+        # ámbito local; no puede usar la variable de sincronizar_mes().
+        operacion_job = "ventas_validar"
+        if job_id:
+            with __import__("app.database.connection", fromlist=["engine"]).engine.connect() as job_db:
+                operacion_job = job_db.execute(
+                    text("SELECT operacion FROM conta_sri_jobs WHERE job_id = :job_id"),
+                    {"job_id": job_id},
+                ).scalar() or "ventas_validar"
+
         await SriClienteSyncService._volver_pagina_1_emitidos(page)
         await SriClienteSyncService._consultar_emitidos_dia(page, fecha)
 
