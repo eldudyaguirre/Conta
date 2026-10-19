@@ -18,6 +18,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.database.connection import engine
 from app.services.sri_cliente_sync_service import SriClienteSyncService
+from app.services.sri_ruc_lock import bloquear_sesion_sri_por_ruc
 
 
 logger = logging.getLogger("conta.sri_certificados_ruc")
@@ -200,6 +201,7 @@ class SriCertificadoRucService:
                 cls._status["estado"] = "finalizado"
 
     @classmethod
+    @bloquear_sesion_sri_por_ruc
     async def descargar_cliente(cls, ruc: str) -> dict[str, Any]:
         logger.info("CERTIFICADO RUC | credenciales | ruc=%s", ruc)
         cred = SriClienteSyncService._credenciales(ruc)
