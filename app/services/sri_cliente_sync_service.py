@@ -1409,7 +1409,9 @@ class SriClienteSyncService:
     def _parsear_factura_emitida_html(cls, html: str) -> dict[str, Any]:
         from bs4 import BeautifulSoup
         import re
+        import logging
 
+        logger_sri = logging.getLogger("conta.sri")
         soup = BeautifulSoup(html, "html.parser")
         cab: dict[str, str] = {}
         pares: list[tuple[str, str]] = []
@@ -1595,9 +1597,10 @@ class SriClienteSyncService:
             for i_fila, fila in enumerate(filas_tabla):
                 celdas = [_txt(c) for c in fila.find_all(["td", "th"])]
                 norm = [normalizar(x).rstrip(":") for x in celdas]
+                norm_sin_tildes = [unicodedata.normalize("NFKD", x).encode("ascii", "ignore").decode("ascii") for x in norm]
                 if (
                     "impuesto" in norm
-                    and any("codigo porcentaje" in x or "código porcentaje" in x for x in norm)
+                    and any("codigo porcentaje" in x for x in norm_sin_tildes)
                     and "base imponible" in norm
                     and "valor" in norm
                 ):
