@@ -268,7 +268,8 @@ class SriVentasValidatorService:
                 mensaje=(
                     f"Validador terminado: {result['dias_revisados']} días revisados, "
                     f"{result['dias_diferentes']} con diferencia, "
-                    f"{result['faltantes']} faltantes recuperados y "
+                    f"{result['faltantes']} faltantes recuperados, "
+                    f"{result.get('ventas_corregidas', 0)} ventas corregidas y "
                     f"{len(result['errores'])} errores."
                 ),
             )
@@ -304,6 +305,14 @@ class SriVentasValidatorService:
         SriClienteSyncService._asegurar_columnas_ventas(db)
         b = factura["bases_iva"]
         i = factura["ivas"]
+        base_total_sri = (
+            factura["base_no_objeto"] + factura["base_iva0"]
+            + sum(b.values(), Decimal("0"))
+        )
+        # Si el HTML no permitió extraer bases, no interpretar el fallo del
+        # parser como una factura de valor cero ni sobrescribir datos válidos.
+        if base_total_sri <= 0:
+            return None
         nuevos = {
             "basenoobj": factura["base_no_objeto"],
             "baseiva0": factura["base_iva0"],
