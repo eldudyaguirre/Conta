@@ -33,6 +33,7 @@ def _try_lock(connection: Any, ruc: str) -> bool:
 
 
 def _unlock_and_close(connection: Any, ruc: str, acquired: bool) -> None:
+    invalidate = False
     try:
         if acquired:
             cursor = connection.cursor()
@@ -43,12 +44,21 @@ def _unlock_and_close(connection: Any, ruc: str, acquired: bool) -> None:
                 )
                 row = cursor.fetchone()
                 if not row or not row[0]:
+                    invalidate = True
                     logger.error("No se confirmó la liberación del lock SRI | ruc=%s", ruc)
+            except Exception:
+                # No devolver al pool una conexión que pudiera conservar el lock.
+                invalidate = True
+                logger.exception("Error liberando lock SRI; se invalidará la conexión | ruc=%s", ruc)
             finally:
                 cursor.close()
     finally:
-        # Si la conexión se pierde, PostgreSQL libera automáticamente sus locks.
-        connection.close()
+        try:
+            if invalidate:
+                connection.invalidate()
+        finally:
+            # El cierre físico/invalidación también hace que PostgreSQL libere locks.
+            connection.close()
 
 
 def bloquear_sesion_sri_por_ruc(function: F) -> F:
