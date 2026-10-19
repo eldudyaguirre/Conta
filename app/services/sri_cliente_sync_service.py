@@ -1468,7 +1468,20 @@ class SriClienteSyncService:
                 if textos[pos_impuesto].upper().strip() != "IVA":
                     continue
 
-                tasa = _canon_tasa(textos[pos_porcentaje]) or _canon_tasa(textos[pos_tarifa])
+                # "Porcentaje" en esta tabla contiene el código porcentaje
+                # del SRI, no necesariamente la tarifa efectiva (ej. 4.0 = 15%).
+                codigo_txt = textos[pos_porcentaje].strip()
+                try:
+                    codigo_num = Decimal(codigo_txt.replace(",", "."))
+                    codigo = str(int(codigo_num)) if codigo_num == codigo_num.to_integral_value() else ""
+                except (InvalidOperation, ValueError):
+                    codigo = ""
+                tasa_por_codigo = {
+                    "0": "0", "2": "12", "3": "14",
+                    "4": "15", "5": "5", "8": "8",
+                }.get(codigo)
+                # Si no es un código reconocido, usar la tarifa explícita de la fila.
+                tasa = tasa_por_codigo or _canon_tasa(textos[pos_tarifa])
                 if tasa not in {"0", "5", "8", "12", "14", "15"}:
                     continue
 
@@ -1580,10 +1593,10 @@ class SriClienteSyncService:
                 ivas[tasas_con_base[0]] = iva_generico
 
         # Fuente de verdad: el resumen "Totales por Impuesto" del SRI.
-        # Esta tabla ya consolida todas las líneas del comprobante, aunque el
-        # detalle de productos esté repartido en varias páginas. En esa tabla,
-        # "Código porcentaje" es un código del SRI (p. ej. 4.0), no la tarifa
-        # efectiva; la tarifa se determina con valor/base imponible.
+        # "Código porcentaje" es un código tributario: 0=0%, 2=12%, 3=14%,
+        # 4=15%, 5=5% y 8=IVA diferenciado (campo baseiva8). No inferir la
+        # clasificación comparando IVA/base, porque el redondeo puede confundir
+        # las tarifas y el código 8 se clasifica por su propio campo.
         bases_resumen: dict[str, Decimal] = {}
         ivas_resumen: dict[str, Decimal] = {}
         base0_resumen = Decimal("0")
@@ -1611,15 +1624,32 @@ class SriClienteSyncService:
                 continue
 
             pos_imp = encabezados_resumen.index("impuesto")
+            pos_codigo = next(
+                i for i, x in enumerate(
+                    unicodedata.normalize("NFKD", h).encode("ascii", "ignore").decode("ascii")
+                    for h in encabezados_resumen
+                )
+                if "codigo porcentaje" in x
+            )
             pos_base = encabezados_resumen.index("base imponible")
             pos_valor = encabezados_resumen.index("valor")
+            mapa_codigo_tasa = {
+                "0": "0", "2": "12", "3": "14",
+                "4": "15", "5": "5", "8": "8",
+            }
             for fila in filas_tabla[encabezado_idx + 1:]:
                 celdas = [_txt(c) for c in fila.find_all(["td", "th"])]
-                celdas = [x for x in celdas if x]
-                if len(celdas) <= max(pos_imp, pos_base, pos_valor):
+                if len(celdas) <= max(pos_imp, pos_codigo, pos_base, pos_valor):
                     continue
                 if celdas[pos_imp].strip().casefold() != "iva":
                     continue
+                codigo_txt = celdas[pos_codigo].strip()
+                try:
+                    codigo_num = Decimal(codigo_txt.replace(",", "."))
+                    codigo = str(int(codigo_num)) if codigo_num == codigo_num.to_integral_value() else ""
+                except (InvalidOperation, ValueError):
+                    codigo = ""
+                tasa_fila = mapa_codigo_tasa.get(codigo)
                 base_fila = cls._dec(celdas[pos_base])
                 iva_fila = cls._dec(celdas[pos_valor])
                 if base_fila < 0 or iva_fila < 0:
@@ -1628,25 +1658,15 @@ class SriClienteSyncService:
                 resumen_encontrado = True
                 if not base_fila:
                     continue
-                if not iva_fila:
-                    base0_resumen += base_fila
-                    continue
-
-                # Inferir la tarifa efectiva a partir del IVA/base, no del
-                # código porcentaje que presenta la tabla del SRI.
-                tasa_fila = None
-                for tasa in tasas_validas:
-                    iva_esperado = (
-                        base_fila * Decimal(tasa) / Decimal("100")
-                    ).quantize(Decimal("0.01"))
-                    if abs(iva_esperado - iva_fila) <= Decimal("0.02"):
-                        tasa_fila = tasa
-                        break
                 if tasa_fila is None:
                     logger_sri.warning(
-                        "SRI resumen impuestos: tarifa no identificada base=%s iva=%s",
-                        base_fila, iva_fila,
+                        "SRI resumen impuestos: código porcentaje no reconocido "
+                        "codigo=%s base=%s iva=%s",
+                        codigo_txt, base_fila, iva_fila,
                     )
+                    continue
+                if tasa_fila == "0":
+                    base0_resumen += base_fila
                     continue
                 bases_resumen[tasa_fila] = bases_resumen.get(tasa_fila, Decimal("0")) + base_fila
                 ivas_resumen[tasa_fila] = ivas_resumen.get(tasa_fila, Decimal("0")) + iva_fila
