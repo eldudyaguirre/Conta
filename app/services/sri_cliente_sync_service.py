@@ -270,6 +270,21 @@ class SriClienteSyncService:
             mensaje_base = str(
                 resultado_final.get("mensaje") or "Sincronización finalizada."
             )
+            # No sobrescribir el resumen detallado que necesita la reparación
+            # tributaria: la UI debe distinguir una ejecución sin errores de una
+            # reparación que realmente modificó facturas.
+            if operacion == "ventas_reparar":
+                revisadas = int(resultado_final.get("ventas_revisadas", resultado_final.get("ya_existentes", 0)) or 0)
+                corregidas = int(resultado_final.get("ventas_corregidas", 0) or 0)
+                sin_cambios = int(resultado_final.get("ventas_sin_cambios", 0) or 0)
+                sin_base = int(resultado_final.get("ventas_sin_base_sri", 0) or 0)
+                guardadas = int(resultado_final.get("guardadas", 0) or 0)
+                mensaje_base = (
+                    f"Reparación tributaria finalizada. Facturas revisadas: {revisadas}; "
+                    f"corregidas: {corregidas}; sin diferencias: {sin_cambios}; "
+                    f"sin base imponible válida extraída del SRI: {sin_base}; "
+                    f"comprobantes recuperados: {guardadas}."
+                )
             if errores:
                 estado_final = "error"
                 mensaje_final = (
