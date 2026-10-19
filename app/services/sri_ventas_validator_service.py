@@ -51,6 +51,8 @@ class SriVentasValidatorService:
             "faltantes": 0,
             "sobrantes": 0,
             "detalle_dias": [],
+            "ventas_corregidas": 0,
+            "detalle_reparaciones": [],
         }
 
         p = browser = context = page = chrome_process = None
@@ -180,6 +182,14 @@ class SriVentasValidatorService:
                     detalle=json.dumps(result["detalle_dias"], ensure_ascii=False, default=str),
                 )
 
+            operacion_job = "ventas_validar"
+            if job_id:
+                with __import__("app.database.connection", fromlist=["engine"]).engine.connect() as job_db:
+                    operacion_job = job_db.execute(
+                        text("SELECT operacion FROM conta_sri_jobs WHERE job_id = :job_id"),
+                        {"job_id": job_id},
+                    ).scalar() or "ventas_validar"
+
             # Segunda fase: después de recorrer todas las fechas, revisar en
             # detalle solo los días que tuvieron diferencias de cantidad.
             for fecha_pendiente, dia_info in dias_pendientes_revision:
@@ -281,6 +291,68 @@ class SriVentasValidatorService:
             SriClienteSyncService._cerrar_chrome(chrome_process)
             if p is not None:
                 await p.stop()
+
+    @classmethod
+    def _reparar_valores_venta(cls, db, clave: str, fila, factura: dict[str, Any]) -> dict[str, Any] | None:
+        """Corrige únicamente campos tributarios usando el detalle confirmado del SRI.
+
+        Guarda una auditoría antes/después en la misma transacción. No modifica
+        asientos, retenciones, número de factura ni elimina registros.
+        """
+        from decimal import Decimal
+
+        SriClienteSyncService._asegurar_columnas_ventas(db)
+        b = factura["bases_iva"]
+        i = factura["ivas"]
+        nuevos = {
+            "basenoobj": factura["base_no_objeto"],
+            "baseiva0": factura["base_iva0"],
+            "baseiva5": b["5"], "baseiva8": b["8"], "baseiva12": b["12"],
+            "baseiva14": b["14"], "baseiva15": b["15"],
+            "iva": Decimal("0"),
+            "iva5": i["5"], "iva8": i["8"], "iva12": i["12"],
+            "iva14": i["14"], "iva15": i["15"],
+        }
+        anteriores = {k: fila.get(k) for k in nuevos}
+        diferencias = {}
+        for campo, nuevo in nuevos.items():
+            anterior = anteriores.get(campo)
+            try:
+                a = Decimal(str(anterior or 0)).quantize(Decimal("0.01"))
+                n = Decimal(str(nuevo or 0)).quantize(Decimal("0.01"))
+            except Exception:
+                continue
+            if a != n:
+                diferencias[campo] = {"anterior": str(a), "nuevo": str(n)}
+        if not diferencias:
+            return None
+
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS public.conta_ventas_reparaciones_audit (
+                id BIGSERIAL PRIMARY KEY,
+                clave_acceso VARCHAR(100) NOT NULL,
+                fecha_cambio TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                datos_anteriores JSONB NOT NULL,
+                datos_nuevos JSONB NOT NULL,
+                diferencias JSONB NOT NULL
+            )
+        """))
+        db.execute(text("""
+            INSERT INTO public.conta_ventas_reparaciones_audit
+                (clave_acceso, datos_anteriores, datos_nuevos, diferencias)
+            VALUES (:clave, CAST(:anteriores AS JSONB), CAST(:nuevos AS JSONB), CAST(:diferencias AS JSONB))
+        """), {
+            "clave": clave,
+            "anteriores": json.dumps({k: str(v) if v is not None else None for k, v in anteriores.items()}, ensure_ascii=False),
+            "nuevos": json.dumps({k: str(v) for k, v in nuevos.items()}, ensure_ascii=False),
+            "diferencias": json.dumps(diferencias, ensure_ascii=False),
+        })
+        asignaciones = ", ".join(f"{campo} = :{campo}" for campo in nuevos)
+        db.execute(text(f"""
+            UPDATE ventas SET {asignaciones}
+            WHERE TRIM(autorizacion::text) = :clave
+        """), {**nuevos, "clave": clave})
+        return {"clave_acceso": clave, "diferencias": diferencias}
 
     @classmethod
     async def _contar_dia_sri(
@@ -425,14 +497,24 @@ class SriVentasValidatorService:
                     claves_sri.add(clave)
 
                     existe = db.execute(text("""
-                        SELECT 1
+                        SELECT *
                         FROM ventas
                         WHERE TRIM(autorizacion::text) = :clave
                         LIMIT 1
-                    """), {"clave": clave}).first()
+                        FOR UPDATE
+                    """), {"clave": clave}).mappings().first()
 
                     if existe:
                         result["ya_existentes"] += 1
+                        if operacion_job == "ventas_reparar":
+                            reparacion = cls._reparar_valores_venta(db, clave, existe, factura)
+                            if reparacion:
+                                db.commit()
+                                result.setdefault("ventas_corregidas", 0)
+                                result["ventas_corregidas"] += 1
+                                result.setdefault("detalle_reparaciones", []).append(reparacion)
+                            else:
+                                db.rollback()
                     else:
                         # Solo insertamos lo que realmente está en el SRI y
                         # falta en la base. Nunca borramos sobrantes locales.
