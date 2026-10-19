@@ -3286,30 +3286,34 @@ class SriClienteSyncService:
                     except Exception:
                         opciones = []
 
+                    # El value interno del SRI no es estable entre versiones.
+                    # Priorizar el significado visible del comprobante y usar el
+                    # value solicitado solo como fallback para tipos no mapeados.
+                    etiquetas = {
+                        "1": ("factura",),
+                        "3": ("nota de crédito", "notas de crédito", "nota crédito", "notas crédito"),
+                        "4": ("nota de crédito", "notas de crédito", "nota crédito", "notas crédito"),
+                        "6": ("comprobante de retención", "retención", "retencion"),
+                        "7": ("comprobante de retención", "retención", "retencion"),
+                    }
+                    candidatos = etiquetas.get(str(value), ())
                     for opcion in opciones:
-                        texto_opcion = " ".join(str(opcion["text"]).lower().split())
-                        valor_opcion = str(opcion["value"]).strip()
-                        if valor_opcion == str(value):
-                            await combo.select_option(value=valor_opcion)
+                        texto_opcion = " ".join(str(opcion["text"]).casefold().split())
+                        if candidatos and any(candidato in texto_opcion for candidato in candidatos):
+                            await combo.select_option(value=str(opcion["value"]))
                             seleccionado = True
+                            logger.info(
+                                "SRI RECIBIDOS | tipo seleccionado por etiqueta | solicitado=%s | value=%s | texto=%r",
+                                value, opcion["value"], opcion["text"],
+                            )
                             break
 
                     if not seleccionado:
-                        etiquetas = {
-                            "7": ("retencion", "retención", "comprobante de retención"),
-                            "4": ("nota de crédito", "nota crédito"),
-                            "1": ("factura",),
-                        }
-                        candidatos = etiquetas.get(str(value), ())
                         for opcion in opciones:
-                            texto_opcion = " ".join(str(opcion["text"]).lower().split())
-                            if any(candidato in texto_opcion for candidato in candidatos):
-                                await combo.select_option(value=str(opcion["value"]))
+                            valor_opcion = str(opcion["value"]).strip()
+                            if valor_opcion == str(value):
+                                await combo.select_option(value=valor_opcion)
                                 seleccionado = True
-                                print(
-                                    "SRI tipo comprobante: value=%s seleccionado por texto=%r"
-                                    % (opcion["value"], opcion["text"])
-                                )
                                 break
 
                     if not seleccionado:
@@ -3323,16 +3327,12 @@ class SriClienteSyncService:
                             f"solicitada ({value}). Opciones disponibles: {opciones}"
                         )
 
-                    # PrimeFaces/JSF no siempre registra el cambio producido por
-                    # select_option(). Disparar los eventos del control evita que el
-                    # formulario conserve el tipo anterior (por ejemplo, Factura al
-                    # pasar a Nota de crédito) aunque visualmente el combo cambie.
-                    await combo.dispatch_event("input")
-                    await combo.dispatch_event("change")
-                    await combo.dispatch_event("blur")
-                    await page.wait_for_timeout(350)
+                    # Playwright select_option() ya dispara input/change. No volver
+                    # a despachar esos eventos: hacerlo puede ejecutar dos veces los
+                    # listeners del portal y dejar mensajes de validación inconsistentes.
+                    await combo.evaluate("(e) => e.blur()")
 
-                    # Confirmar el valor real después de notificar al widget.
+                    # Confirmar el valor real que se enviará con el formulario.
                     try:
                         seleccion_real = await combo.locator(
                             "option:checked"
@@ -3343,6 +3343,15 @@ class SriClienteSyncService:
                         "SRI RECIBIDOS | tipo seleccionado | solicitado=%s | seleccionado=%s",
                         value, seleccion_real,
                     )
+                    if isinstance(seleccion_real, dict):
+                        texto_seleccionado = " ".join(
+                            str(seleccion_real.get("text", "")).casefold().split()
+                        )
+                        if candidatos and not any(candidato in texto_seleccionado for candidato in candidatos):
+                            raise RuntimeError(
+                                "El SRI no conservó el tipo de comprobante solicitado "
+                                f"({value}); selección observada={seleccion_real!r}"
+                            )
                 else:
                     await cls._seleccionar(page, selector, value)
                     logger.info(
