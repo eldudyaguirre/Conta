@@ -116,8 +116,8 @@ class SriRucLockTests(unittest.IsolatedAsyncioTestCase):
                         if started:
                             break
                         await asyncio.sleep(0.01)
-                    second = __import__("asyncio").create_task(operation(None, "0105090062001", started, release))
-                    await __import__("asyncio").sleep(0.08)
+                    second = asyncio.create_task(operation(None, "0105090062001", started, release))
+                    await asyncio.sleep(0.08)
                     self.assertEqual(len(started), 1)
                     release.set()
                     await asyncio.gather(first, second)
@@ -147,15 +147,21 @@ class SriRucLockTests(unittest.IsolatedAsyncioTestCase):
 
         @sri_ruc_lock.bloquear_sesion_sri_por_ruc
         async def operation(cls, ruc):
+            nonlocal running, max_running
+            running += 1
+            max_running = max(max_running, running)
             await entered.put(ruc)
-            await __import__("asyncio").sleep(0.05)
-            return ruc
+            try:
+                await asyncio.sleep(0.05)
+                return ruc
+            finally:
+                running -= 1
 
         connections = [_Connection(), _Connection()]
         with patch.object(sri_ruc_lock.engine, "raw_connection", side_effect=connections):
             with patch.object(sri_ruc_lock, "_try_lock", side_effect=try_lock):
                 with patch.object(sri_ruc_lock, "_unlock_and_close", side_effect=unlock):
-                    results = await __import__("asyncio").gather(
+                    results = await asyncio.gather(
                         operation(None, "0105090062001"),
                         operation(None, "0190344363001"),
                     )
