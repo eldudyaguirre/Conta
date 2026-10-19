@@ -1410,6 +1410,7 @@ class SriClienteSyncService:
         from bs4 import BeautifulSoup
         import re
         import logging
+        import unicodedata
 
         logger_sri = logging.getLogger("conta.sri")
         soup = BeautifulSoup(html, "html.parser")
