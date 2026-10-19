@@ -254,29 +254,15 @@ class SriClienteSyncService:
                 estado="ejecutando",
                 mensaje="Worker SRI activo. Iniciando navegador y conexión con el SRI.",
             )
-            if operacion == "ventas_validar":
+            if operacion in {"ventas_validar", "ventas_reparar"}:
                 from app.services.sri_ventas_validator_service import SriVentasValidatorService
                 resultado = await SriVentasValidatorService.sincronizar_mes(
                     ruc, anio, mes, tipo_comprobante, job_id=job_id
                 )
             else:
-                dias_objetivo = None
-                if operacion == "ventas_reparar":
-                    with engine.connect() as job_db:
-                        detalle_job = job_db.execute(
-                            text(f"SELECT detalle FROM {cls.JOB_TABLE} WHERE job_id = :job_id"),
-                            {"job_id": job_id},
-                        ).scalar()
-                    try:
-                        dias_objetivo = json.loads(detalle_job or "{}").get("dias_objetivo") or []
-                    except (TypeError, ValueError):
-                        dias_objetivo = []
-                    if not dias_objetivo:
-                        raise ValueError("La reparación de ventas requiere al menos una fecha objetivo.")
-
                 resultado = await cls.sincronizar_mes(
                     ruc, anio, mes, tipo_comprobante, job_id=job_id,
-                    operacion=operacion, dias_objetivo=dias_objetivo,
+                    operacion=operacion,
                 )
 
             resultado_final = dict(resultado)
