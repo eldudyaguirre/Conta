@@ -22,6 +22,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.database.client_connection import obtener_session_cliente
 from app.database.connection import engine
+from app.services.sri_ruc_lock import bloquear_sesion_sri_por_ruc
 
 
 logger = logging.getLogger("conta.sri_sync")
@@ -3731,6 +3732,7 @@ class SriClienteSyncService:
         return False
 
     @classmethod
+    @bloquear_sesion_sri_por_ruc
     async def sincronizar_mes(
         cls, ruc: str, anio: int, mes: int, tipo_comprobante: int = 1,
         job_id: str | None = None, operacion: str = "compras",
