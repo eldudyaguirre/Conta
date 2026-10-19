@@ -1577,6 +1577,89 @@ class SriClienteSyncService:
             if len(tasas_con_base) == 1 and iva_generico:
                 ivas[tasas_con_base[0]] = iva_generico
 
+        # Fuente de verdad: el resumen "Totales por Impuesto" del SRI.
+        # Esta tabla ya consolida todas las líneas del comprobante, aunque el
+        # detalle de productos esté repartido en varias páginas. En esa tabla,
+        # "Código porcentaje" es un código del SRI (p. ej. 4.0), no la tarifa
+        # efectiva; la tarifa se determina con valor/base imponible.
+        bases_resumen: dict[str, Decimal] = {}
+        ivas_resumen: dict[str, Decimal] = {}
+        base0_resumen = Decimal("0")
+        resumen_encontrado = False
+        tasas_validas = ("5", "8", "12", "14", "15")
+
+        for tabla in soup.find_all("table"):
+            filas_tabla = tabla.find_all("tr")
+            encabezado_idx = None
+            encabezados_resumen: list[str] = []
+            for i_fila, fila in enumerate(filas_tabla):
+                celdas = [_txt(c) for c in fila.find_all(["td", "th"])]
+                norm = [normalizar(x).rstrip(":") for x in celdas]
+                if (
+                    "impuesto" in norm
+                    and any("codigo porcentaje" in x or "código porcentaje" in x for x in norm)
+                    and "base imponible" in norm
+                    and "valor" in norm
+                ):
+                    encabezado_idx = i_fila
+                    encabezados_resumen = norm
+                    break
+            if encabezado_idx is None:
+                continue
+
+            pos_imp = encabezados_resumen.index("impuesto")
+            pos_base = encabezados_resumen.index("base imponible")
+            pos_valor = encabezados_resumen.index("valor")
+            for fila in filas_tabla[encabezado_idx + 1:]:
+                celdas = [_txt(c) for c in fila.find_all(["td", "th"])]
+                celdas = [x for x in celdas if x]
+                if len(celdas) <= max(pos_imp, pos_base, pos_valor):
+                    continue
+                if celdas[pos_imp].strip().casefold() != "iva":
+                    continue
+                base_fila = cls._dec(celdas[pos_base])
+                iva_fila = cls._dec(celdas[pos_valor])
+                if base_fila < 0 or iva_fila < 0:
+                    continue
+
+                resumen_encontrado = True
+                if not base_fila:
+                    continue
+                if not iva_fila:
+                    base0_resumen += base_fila
+                    continue
+
+                # Inferir la tarifa efectiva a partir del IVA/base, no del
+                # código porcentaje que presenta la tabla del SRI.
+                tasa_fila = None
+                for tasa in tasas_validas:
+                    iva_esperado = (
+                        base_fila * Decimal(tasa) / Decimal("100")
+                    ).quantize(Decimal("0.01"))
+                    if abs(iva_esperado - iva_fila) <= Decimal("0.02"):
+                        tasa_fila = tasa
+                        break
+                if tasa_fila is None:
+                    logger_sri.warning(
+                        "SRI resumen impuestos: tarifa no identificada base=%s iva=%s",
+                        base_fila, iva_fila,
+                    )
+                    continue
+                bases_resumen[tasa_fila] = bases_resumen.get(tasa_fila, Decimal("0")) + base_fila
+                ivas_resumen[tasa_fila] = ivas_resumen.get(tasa_fila, Decimal("0")) + iva_fila
+
+        if resumen_encontrado:
+            # El resumen consolidado sustituye los acumulados parciales del
+            # detalle por página; no se suman ambas fuentes para evitar duplicar.
+            base0 = base0_resumen
+            for tasa in tasas_validas:
+                bases_iva[tasa] = bases_resumen.get(tasa, Decimal("0"))
+                ivas[tasa] = ivas_resumen.get(tasa, Decimal("0"))
+            logger_sri.info(
+                "SRI resumen impuestos aplicado: base0=%s bases=%s ivas=%s",
+                base0, bases_iva, ivas,
+            )
+
         baseiva_total = sum(bases_iva.values(), Decimal("0"))
         iva_total = sum(ivas.values(), Decimal("0"))
 
