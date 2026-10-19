@@ -103,8 +103,17 @@ class SriVentasValidatorService:
                     if not dias_a_revisar:
                         raise ValueError("No hay fechas válidas para reparar en el período seleccionado.")
 
-            # Primera fase: recorrer todas las fechas comparando cantidades.
-            # Las revisiones factura por factura quedan para el final del recorrido.
+            operacion_job = "ventas_validar"
+            if job_id:
+                with __import__("app.database.connection", fromlist=["engine"]).engine.connect() as job_db:
+                    operacion_job = job_db.execute(
+                        text("SELECT operacion FROM conta_sri_jobs WHERE job_id = :job_id"),
+                        {"job_id": job_id},
+                    ).scalar() or "ventas_validar"
+
+            # La reparación de valores debe revisar todas las fechas solicitadas,
+            # aunque el número de comprobantes coincida. La validación normal
+            # conserva el recorrido optimizado por diferencias de cantidad.
             dias_pendientes_revision: list[tuple[date, dict[str, Any]]] = []
 
             for dia in dias_a_revisar:
@@ -159,6 +168,8 @@ class SriVentasValidatorService:
 
                 if cantidad_sri != cantidad_bd:
                     result["dias_diferentes"] += 1
+
+                if cantidad_sri != cantidad_bd or operacion_job == "ventas_reparar":
                     dias_pendientes_revision.append((fecha_consulta, dia_info))
                     SriClienteSyncService._job_update(
                         job_id,
@@ -166,7 +177,8 @@ class SriVentasValidatorService:
                         dias_ok=result["dias_ok"],
                         dias_diferentes=result["dias_diferentes"],
                         mensaje=(
-                            f"Diferencia {fecha_ui}: SRI={cantidad_sri}, BD={cantidad_bd}. "
+                            f"{'Revisión tributaria' if operacion_job == 'ventas_reparar' else 'Diferencia'} "
+                            f"{fecha_ui}: SRI={cantidad_sri}, BD={cantidad_bd}. "
                             "Se revisarán las facturas de este día al finalizar el recorrido."
                         ),
                     )
@@ -182,16 +194,8 @@ class SriVentasValidatorService:
                     detalle=json.dumps(result["detalle_dias"], ensure_ascii=False, default=str),
                 )
 
-            operacion_job = "ventas_validar"
-            if job_id:
-                with __import__("app.database.connection", fromlist=["engine"]).engine.connect() as job_db:
-                    operacion_job = job_db.execute(
-                        text("SELECT operacion FROM conta_sri_jobs WHERE job_id = :job_id"),
-                        {"job_id": job_id},
-                    ).scalar() or "ventas_validar"
-
-            # Segunda fase: después de recorrer todas las fechas, revisar en
-            # detalle solo los días que tuvieron diferencias de cantidad.
+            # Segunda fase: revisar individualmente los días seleccionados.
+            # En modo reparación se recorren todas las fechas del período elegido.
             for fecha_pendiente, dia_info in dias_pendientes_revision:
                 SriClienteSyncService._verificar_cancelacion(job_id)
                 fecha_ui = fecha_pendiente.strftime("%d/%m/%Y")
