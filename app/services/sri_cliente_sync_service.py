@@ -2708,6 +2708,12 @@ class SriClienteSyncService:
         import calendar
         from datetime import date
 
+        # Asegurar el esquema de ventas en la base de este cliente ANTES
+        # de empezar a consultar/importar comprobantes. Así las columnas se
+        # crean incluso si la base es antigua y el lote no llega a insertar
+        # la primera factura.
+        cls._asegurar_columnas_ventas(db)
+
         ultimo_dia = calendar.monthrange(anio, mes)[1]
 
         # La sincronización normal recorre todo el mes. La reparación selectiva
@@ -3388,15 +3394,12 @@ class SriClienteSyncService:
     @classmethod
     def _asegurar_columnas_ventas(cls, db) -> None:
         """Añade columnas tributarias recientes que falten en bases antiguas de clientes."""
-        clave = "conta_columnas_ventas_iva_actualizadas"
-        if db.info.get(clave):
-            return
-
+        # Ejecutar la comprobación en cada base de cliente y cada vez que
+        # inicia el proceso. No usar db.info como caché: una sesión puede
+        # sobrevivir entre operaciones y omitir la creación en otra base.
+        # ADD COLUMN IF NOT EXISTS es idempotente y no modifica columnas existentes.
         # Son campos monetarios: NUMERIC conserva precisión decimal.
-        # IF NOT EXISTS permite ejecutar esta comprobación en bases nuevas y antiguas.
-        # Asegurar todas las columnas de bases e IVA que necesita la
-        # importación. Se incluyen también baseiva0/baseiva12/iva12 por
-        # compatibilidad con bases de clientes antiguas o creadas parcialmente.
+        # Se incluyen columnas existentes también para reparar esquemas parciales.
         columnas = (
             "baseiva0", "baseiva5", "baseiva8", "baseiva12",
             "baseiva14", "baseiva15",
@@ -3407,7 +3410,6 @@ class SriClienteSyncService:
                 f"ALTER TABLE public.ventas "
                 f"ADD COLUMN IF NOT EXISTS {columna} NUMERIC NOT NULL DEFAULT 0"
             ))
-        db.info[clave] = True
 
     @classmethod
     def _insertar_venta(cls, db, factura: dict[str, Any], codcomp: str = "18") -> None:
