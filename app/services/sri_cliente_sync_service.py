@@ -1821,7 +1821,6 @@ class SriClienteSyncService:
                     "Nombre o Razón Social",
                     "Nombres y Apellidos",
                 )
-                or "CONSUMIDOR FINAL"
             ),
             "establecimiento": val("Establecimiento"),
             "punto_emision": val("Punto de emisión"),
