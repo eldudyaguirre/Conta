@@ -3354,7 +3354,9 @@ class SriClienteSyncService:
         values = {
             "numnc": numnc,
             "autorizacion": factura["clave_acceso"],
-            "fecnc": factura["fecha"].strftime("%Y-%m-%d"),
+            # Las fechas en ncventas se almacenan como VARCHAR dd/mm/aaaa,
+            # igual que el formato utilizado por el sistema contable.
+            "fecnc": cls._fecha_varchar(factura["fecha"]),
             "ruccedcli": factura["identificacion"],
             "nomcli": factura["razon_social"],
             "tipid": factura.get("tipid") or cls._tipid_emitido(factura["identificacion"]),
@@ -3367,7 +3369,7 @@ class SriClienteSyncService:
             "ice": Decimal("0"),
             "numfac": numfac,
             "autfac": autfac,
-            "fecfac": fecfac or None,
+            "fecfac": cls._fecha_varchar(fecfac) if fecfac else None,
             "mes": f"{factura['fecha'].month:02d}",
             "año": str(factura["fecha"].year),
         }
