@@ -2219,22 +2219,21 @@ class SriClienteSyncService:
     async def _consultar_emitidos(
         cls, page, anio: int, mes: int, tipo_emitido: str = "factura"
     ) -> None:
-        """Abre la consulta de comprobantes emitidos.
-
-        La consulta es la misma para facturas y retenciones. La única
-        diferencia es el tipo de comprobante seleccionado en el formulario.
-        """
+        """Abre la consulta de comprobantes emitidos y selecciona el tipo solicitado."""
         await page.get_by_text("Comprobantes electrónicos emitidos", exact=True).click()
         await page.locator("#frmPrincipal\\:calendarFechaDesde_input").wait_for(
             state="visible", timeout=30000
         )
 
-        if tipo_emitido == "retencion":
-            # En emitidos usamos exactamente el mismo formulario de facturas.
-            # Para retenciones únicamente cambiamos el combo Tipo de comprobante.
+        # El formulario puede conservar el tipo predeterminado (Factura). Seleccionar
+        # explícitamente el tipo evita recorrer filas de facturas al pedir notas de crédito.
+        textos_objetivo = {
+            "retencion": ("comprobante de retención", "comprobante de retencion"),
+            "nota_credito": ("nota de crédito", "nota de credito", "notas de crédito", "notas de credito"),
+        }
+        if tipo_emitido in textos_objetivo:
             selects = page.locator("select")
             seleccionado = False
-
             for idx in range(await selects.count()):
                 combo = selects.nth(idx)
                 try:
@@ -2245,22 +2244,18 @@ class SriClienteSyncService:
                     continue
 
                 for opcion in opciones:
-                    texto = " ".join(str(opcion["text"]).lower().split())
-                    if (
-                        "comprobante de retención" in texto
-                        or "comprobante de retencion" in texto
-                    ):
+                    texto = " ".join(str(opcion["text"]).casefold().split())
+                    if any(objetivo in texto for objetivo in textos_objetivo[tipo_emitido]):
                         await combo.select_option(value=str(opcion["value"]))
                         seleccionado = True
                         break
-
                 if seleccionado:
                     break
 
             if not seleccionado:
+                etiqueta = "Notas de crédito" if tipo_emitido == "nota_credito" else "Comprobante de Retención"
                 raise RuntimeError(
-                    "No se encontró la opción 'Comprobante de Retención' "
-                    "en el selector Tipo de comprobante de emitidos."
+                    f"No se encontró la opción '{etiqueta}' en el selector Tipo de comprobante de emitidos."
                 )
     @classmethod
     async def _consultar_emitidos_dia(cls, page, fecha) -> int:
@@ -3811,7 +3806,7 @@ class SriClienteSyncService:
                     page,
                     anio,
                     mes,
-                    tipo_emitido="retencion" if operacion == "retenciones_emitidas" else "factura",
+                    tipo_emitido=("retencion" if operacion == "retenciones_emitidas" else "nota_credito" if operacion == "notas_credito_emitidas" else "factura"),
                 )
             else:
                 try:
