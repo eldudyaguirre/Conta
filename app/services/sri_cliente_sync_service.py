@@ -2722,6 +2722,69 @@ class SriClienteSyncService:
         return
 
     @classmethod
+    async def _obtener_datos_cliente_pdf_nota_credito(cls, page, idx: int) -> dict[str, str]:
+        """Descarga el PDF de una nota de crédito emitida y extrae los datos del comprador."""
+        import re
+        from io import BytesIO
+        from pypdf import PdfReader
+
+        filas = page.locator("#frmPrincipal\\:tablaCompEmitidos_data tr")
+        fila = filas.nth(idx)
+        enlace_pdf = fila.locator("a[id$=':lnkPdf']").first
+        if await enlace_pdf.count() == 0:
+            enlace_pdf = fila.locator("a[title*='PDF'], a[aria-label*='PDF']").first
+        if await enlace_pdf.count() == 0:
+            raise ValueError("No se encontró el enlace PDF de la nota de crédito en el SRI.")
+
+        async with page.expect_download(timeout=20000) as info:
+            await enlace_pdf.click(timeout=15000)
+        descarga = await info.value
+        ruta = await descarga.path()
+        if not ruta:
+            raise ValueError("El SRI no proporcionó un archivo PDF descargado.")
+        texto = "\\n".join(
+            pagina.extract_text() or ""
+            for pagina in PdfReader(ruta).pages
+        )
+        texto = " ".join(texto.split())
+
+        def extraer(etiquetas: list[str]) -> str:
+            for etiqueta in etiquetas:
+                patron = re.compile(
+                    re.escape(etiqueta) + r"\\s*:?\\s*(.{1,180}?)"
+                    r"(?=\\s+(?:Identificación|Identificacion|Fecha Emisión|"
+                    r"Fecha Emision|Comprobante que se modifica|Fecha Emisión \\(Comprobante|"
+                    r"Razón de Modificación|Razon de Modificacion)\\s*:|$)",
+                    re.IGNORECASE,
+                )
+                match = patron.search(texto)
+                if match:
+                    return match.group(1).strip(" :")
+            return ""
+
+        nombre = extraer(["Razón Social / Nombres y Apellidos", "Razon Social / Nombres y Apellidos"])
+        identificacion = extraer(["Identificación", "Identificacion"])
+        fecha_sustento = extraer([
+            "Fecha Emisión (Comprobante a modificar)",
+            "Fecha Emision (Comprobante a modificar)",
+        ])
+        numfac = extraer(["Comprobante que se modifica"])
+        m_num = re.search(r"\\b\\d{3}-\\d{3}-\\d{9}\\b", numfac)
+        m_fecha = re.search(r"\\b\\d{2}/\\d{2}/\\d{4}\\b", fecha_sustento)
+        if m_num:
+            numfac = m_num.group(0)
+        if m_fecha:
+            fecha_sustento = m_fecha.group(0)
+        tipo = cls._tipid_emitido(identificacion) if identificacion else ""
+        return {
+            "identificacion": identificacion,
+            "razon_social": nombre,
+            "tipid": tipo,
+            "numfac": numfac,
+            "fecfac": fecha_sustento,
+        }
+
+    @classmethod
     async def _procesar_emitidos_ventas(
         cls, page, db, result, job_id, procesadas, anio: int, mes: int,
         texto_tipo: str = "factura", codcomp: str = "18",
@@ -2856,6 +2919,19 @@ class SriClienteSyncService:
                             comprobante = cls._parsear_retencion_emitida_html(html)
                         elif destino == "ncventas":
                             comprobante = cls._parsear_nota_credito_emitida_html(html)
+                            # El detalle HTML identifica al emisor y puede no
+                            # mostrar al comprador. El PDF oficial sí contiene
+                            # los datos del cliente y del documento modificado.
+                            try:
+                                datos_pdf = await cls._obtener_datos_cliente_pdf_nota_credito(page, idx)
+                                for campo in ("identificacion", "razon_social", "tipid", "numfac", "fecfac"):
+                                    if datos_pdf.get(campo):
+                                        comprobante[campo] = datos_pdf[campo]
+                            except Exception as exc_pdf:
+                                logger.warning(
+                                    "NC EMITIDA | no se pudieron extraer datos del PDF | fila=%s | error=%s",
+                                    idx + 1, exc_pdf,
+                                )
                         else:
                             comprobante = cls._parsear_factura_emitida_html(html)
 
@@ -3394,23 +3470,37 @@ class SriClienteSyncService:
             LIMIT 1
         """), {"numfac_digitos": digitos_numfac}).mappings().first()
 
-        if not factura_original:
-            raise ValueError(
-                f"NC emitida {numnc}: no se encontró la factura afectada {numfac} "
-                "en ventas. No se guardará con el RUC/nombre del emisor."
-            )
-
-        autfac = str(factura_original["autorizacion"] or "").strip()
-        fecfac = factura_original["fecfactur"]
-        ruc_cliente = str(factura_original["ruccedcli"] or "").strip()
-        nombre_cliente = str(factura_original["nomcli"] or "").strip()
-        tipid_cliente = str(factura_original["tipid"] or "").strip()
+        autfac = str(factura_original["autorizacion"] or "").strip() if factura_original else ""
+        fecfac = factura_original["fecfactur"] if factura_original else factura.get("fecfac")
+        # Prioridad: comprador identificado en el PDF oficial de la NC;
+        # respaldo: datos de la factura afectada ya guardada en ventas.
+        ruc_cliente = str(factura.get("identificacion") or "").strip()
+        nombre_cliente = str(factura.get("razon_social") or "").strip()
+        tipid_cliente = str(factura.get("tipid") or "").strip()
+        if not ruc_cliente or not nombre_cliente:
+            ruc_cliente = str(factura_original["ruccedcli"] or "").strip() if factura_original else ""
+            nombre_cliente = str(factura_original["nomcli"] or "").strip() if factura_original else ""
+            tipid_cliente = str(factura_original["tipid"] or "").strip() if factura_original else ""
 
         if not ruc_cliente or not nombre_cliente:
             raise ValueError(
-                f"NC emitida {numnc}: la factura afectada {numfac} existe en ventas "
-                "pero no tiene identificación/nombre de cliente."
+                f"NC emitida {numnc}: no se pudieron obtener RUC/cédula y nombre del comprador "
+                f"desde el PDF ni desde la factura afectada {numfac}. No se usará el emisor."
             )
+        if not fecfac:
+            raise ValueError(
+                f"NC emitida {numnc}: falta la fecha de emisión de la factura modificada {numfac}."
+            )
+        if isinstance(fecfac, str):
+            try:
+                fecfac = datetime.strptime(fecfac, "%d/%m/%Y").strftime("%d/%m/%Y")
+            except ValueError:
+                pass
+        else:
+            try:
+                fecfac = fecfac.strftime("%d/%m/%Y")
+            except Exception:
+                fecfac = str(fecfac)
 
         values = {
             "numnc": numnc,
