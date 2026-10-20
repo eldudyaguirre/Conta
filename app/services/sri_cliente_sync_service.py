@@ -3322,7 +3322,7 @@ class SriClienteSyncService:
         # Normalizar el número de factura al formato 001-001-000000009.
         # El SRI puede mostrar espacios, separadores distintos o solo dígitos.
         import re
-        digitos_numfac = re.sub(r"\\D", "", numfac)
+        digitos_numfac = re.sub(r"\D", "", numfac)
         if len(digitos_numfac) == 15:
             numfac = (
                 f"{digitos_numfac[:3]}-{digitos_numfac[3:6]}-"
@@ -3339,7 +3339,7 @@ class SriClienteSyncService:
         tipid_cliente = str(factura.get("tipid") or "").strip()
 
         if numfac:
-            digitos_numfac = re.sub(r"\\D", "", numfac)
+            digitos_numfac = re.sub(r"\D", "", numfac)
             factura_original = db.execute(text("""
                 SELECT numfactur, autorizacion, fecfactur,
                        ruccedcli, nomcli, tipid
