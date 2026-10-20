@@ -3309,9 +3309,13 @@ class SriClienteSyncService:
 
         # Son campos monetarios: NUMERIC conserva precisión decimal.
         # IF NOT EXISTS permite ejecutar esta comprobación en bases nuevas y antiguas.
+        # Asegurar todas las columnas de bases e IVA que necesita la
+        # importación. Se incluyen también baseiva0/baseiva12/iva12 por
+        # compatibilidad con bases de clientes antiguas o creadas parcialmente.
         columnas = (
-            "baseiva5", "baseiva8", "baseiva14", "baseiva15",
-            "iva5", "iva8", "iva14", "iva15",
+            "baseiva0", "baseiva5", "baseiva8", "baseiva12",
+            "baseiva14", "baseiva15",
+            "iva5", "iva8", "iva12", "iva14", "iva15",
         )
         for columna in columnas:
             db.execute(text(
