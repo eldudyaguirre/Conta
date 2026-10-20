@@ -1853,10 +1853,27 @@ class SriClienteSyncService:
             if len(textos) >= 2:
                 pares.append((" ".join(textos[:-1]), textos[-1]))
 
-        def buscar(etiquetas):
+        def normalizar_etiqueta(valor: str) -> str:
+            import unicodedata
+            texto = unicodedata.normalize("NFD", str(valor or "").lower())
+            texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+            return " ".join(re.sub(r"[^a-z0-9]+", " ", texto).split())
+
+        def buscar(etiquetas, etiquetas_genericas=()):
+            # Primero buscar coincidencias exactas. Es crítico para no confundir
+            # "Código Documento Modificado" (valor 01) con
+            # "Número Documento Modificado" (número de factura).
+            objetivos = [normalizar_etiqueta(x) for x in etiquetas]
+            for objetivo in objetivos:
+                for etiqueta, valor in pares:
+                    if normalizar_etiqueta(etiqueta) == objetivo:
+                        return valor
+
+            # Solo recurrir a etiquetas genéricas después de intentar todas
+            # las etiquetas específicas y exactas.
             for etiqueta, valor in pares:
-                normal = etiqueta.lower()
-                if any(x in normal for x in etiquetas):
+                normal = normalizar_etiqueta(etiqueta)
+                if any(normalizar_etiqueta(x) in normal for x in etiquetas_genericas):
                     return valor
             return ""
 
@@ -1887,13 +1904,19 @@ class SriClienteSyncService:
             factura["tipid"] = tipo_identificacion.strip()
 
         numfac = buscar([
-            "número de documento modificado",
-            "numero de documento modificado",
-            "documento modificado",
+            "Número Documento Modificado",
+            "Número de Documento Modificado",
+            "Numero Documento Modificado",
+            "Numero de Documento Modificado",
+            "Factura Modificada",
+            "Comprobante Modificado",
+            "Documento que Modifica",
+        ], etiquetas_genericas=(
+            "numero documento modificado",
             "factura modificada",
             "comprobante modificado",
             "documento que modifica",
-        ])
+        ))
         fecfac = buscar([
             "fecha emisión sustento",
             "fecha emision sustento",
