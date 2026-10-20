@@ -1603,9 +1603,42 @@ class SriClienteSyncService:
             iva = buscar_valor_por_etiquetas(etiquetas_iva)
             return base, iva
 
-        fecha_txt = val("Fecha Emisión") or val("Fecha de Emisión")
+        # El panel de ventas y el de nota de crédito pueden etiquetar los
+        # datos del comprador de forma distinta. Normalizamos tildes y espacios
+        # y probamos las variantes conocidas sin depender de una etiqueta exacta.
+        def val_alguna(*nombres: str) -> str:
+            for nombre in nombres:
+                resultado = val(nombre)
+                if resultado and resultado.strip():
+                    return resultado.strip()
+            objetivos = [
+                unicodedata.normalize("NFKD", normalizar(nombre))
+                .encode("ascii", "ignore").decode("ascii")
+                for nombre in nombres
+            ]
+            for etiqueta, valor in pares:
+                etiqueta_normal = (
+                    unicodedata.normalize("NFKD", normalizar(etiqueta))
+                    .encode("ascii", "ignore").decode("ascii")
+                )
+                if any(
+                    etiqueta_normal == objetivo
+                    or etiqueta_normal.startswith(objetivo + " ")
+                    for objetivo in objetivos
+                ) and valor and valor.strip():
+                    return valor.strip()
+            return ""
+
+        fecha_txt = val_alguna("Fecha Emisión", "Fecha de Emisión")
         fecha = datetime.strptime(fecha_txt, "%d/%m/%Y")
-        identificacion = val("Identificación Comprador")
+        identificacion = val_alguna(
+            "Identificación Comprador",
+            "RUC/CI Comprador",
+            "RUC/CI",
+            "Identificación",
+            "Identificación del Comprador",
+            "Número de identificación del comprador",
+        )
 
         base0 = buscar_valor_por_etiquetas([
             "Base imponible IVA 0%", "Base IVA 0%", "Subtotal 0%", "Subtotal IVA 0%"
@@ -1780,7 +1813,15 @@ class SriClienteSyncService:
             "fecha_emision": fecha_txt,
             "fecha": fecha,
             "identificacion": identificacion,
-            "razon_social": val("Razón Social Comprador"),
+            "razon_social": (
+                val_alguna(
+                    "Razón Social Comprador",
+                    "Razón Social del Comprador",
+                    "Razón Social",
+                    "Nombre o Razón Social",
+                    "Nombres y Apellidos",
+                )
+            ),
             "establecimiento": val("Establecimiento"),
             "punto_emision": val("Punto de emisión"),
             "secuencial": val("Secuencial"),
