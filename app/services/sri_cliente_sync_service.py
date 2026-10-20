@@ -3225,28 +3225,43 @@ class SriClienteSyncService:
         )
         numfac = str(factura.get("numfac") or "").strip()
 
-        # La NC debe enlazarse con la factura original registrada en ventas.
+        # Normalizar el número de factura al formato 001-001-000000009.
+        # El SRI puede mostrar espacios, separadores distintos o solo dígitos.
+        import re
+        digitos_numfac = re.sub(r"\\D", "", numfac)
+        if len(digitos_numfac) == 15:
+            numfac = (
+                f"{digitos_numfac[:3]}-{digitos_numfac[3:6]}-"
+                f"{digitos_numfac[6:]}"
+            )
+
+        # Los datos de la factura afectada deben salir del registro original
+        # en ventas: número, autorización y fecha de esa factura.
         autfac = ""
-        fecfac = factura.get("fecfac") or ""
+        fecfac = None
 
         if numfac:
+            digitos_numfac = re.sub(r"\\D", "", numfac)
             factura_original = db.execute(text("""
-                SELECT autorizacion, fecfactur
+                SELECT numfactur, autorizacion, fecfactur
                 FROM ventas
-                WHERE TRIM(numfactur::text) = TRIM(:numfac)
+                WHERE REGEXP_REPLACE(TRIM(numfactur::text), '[^0-9]', '', 'g') = :numfac_digitos
+                ORDER BY numfactur ASC
                 LIMIT 1
-            """), {"numfac": numfac}).mappings().first()
+            """), {"numfac_digitos": digitos_numfac}).mappings().first()
 
             if factura_original:
+                # Conservar el número normalizado en la nota, y usar la
+                # autorización/fecha de la factura original, no de la NC.
                 autfac = str(factura_original["autorizacion"] or "").strip()
-                if not fecfac and factura_original["fecfactur"]:
-                    fecfac = factura_original["fecfactur"]
+                fecfac = factura_original["fecfactur"]
             else:
                 logger.warning(
                     "NC EMITIDA | no se encontró factura modificada en ventas | "
-                    "numnc=%s | numfac=%s",
+                    "numnc=%s | numfac=%s | digitos=%s",
                     numnc,
                     numfac,
+                    digitos_numfac,
                 )
 
         values = {
