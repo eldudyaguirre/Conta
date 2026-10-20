@@ -3308,6 +3308,7 @@ class SriClienteSyncService:
         el número de factura (numfac). Si SRI no entrega la fecha modificada,
         se usa como respaldo la fecha registrada en ventas.
         """
+        cls._asegurar_columnas_iva(db, "ncventas")
         b = factura["bases_iva"]
         i = factura["ivas"]
 
@@ -3379,8 +3380,17 @@ class SriClienteSyncService:
             "numemi": 1,
             "basenoobj": factura["base_no_objeto"],
             "baseiva0": factura["base_iva0"],
+            "baseiva5": b["5"],
+            "baseiva8": b["8"],
             "baseiva12": b["12"],
+            "baseiva14": b["14"],
+            "baseiva15": b["15"],
             "iva": sum(i.values(), Decimal("0")),
+            "iva5": i["5"],
+            "iva8": i["8"],
+            "iva12": i["12"],
+            "iva14": i["14"],
+            "iva15": i["15"],
             "ice": Decimal("0"),
             "numfac": numfac,
             "autfac": autfac,
@@ -3401,14 +3411,12 @@ class SriClienteSyncService:
         )
 
     @classmethod
-    def _asegurar_columnas_ventas(cls, db) -> None:
-        """Añade columnas tributarias recientes que falten en bases antiguas de clientes."""
-        # Ejecutar la comprobación en cada base de cliente y cada vez que
-        # inicia el proceso. No usar db.info como caché: una sesión puede
-        # sobrevivir entre operaciones y omitir la creación en otra base.
-        # ADD COLUMN IF NOT EXISTS es idempotente y no modifica columnas existentes.
-        # Son campos monetarios: NUMERIC conserva precisión decimal.
-        # Se incluyen columnas existentes también para reparar esquemas parciales.
+    def _asegurar_columnas_iva(cls, db, tabla: str) -> None:
+        """Crea las columnas de bases/IVA faltantes en ventas o ncventas."""
+        # El nombre de tabla se limita a esta lista para no interpolar valores externos.
+        if tabla not in {"ventas", "ncventas"}:
+            raise ValueError(f"Tabla no permitida para actualizar columnas IVA: {tabla}")
+
         columnas = (
             "baseiva0", "baseiva5", "baseiva8", "baseiva12",
             "baseiva14", "baseiva15",
@@ -3416,9 +3424,14 @@ class SriClienteSyncService:
         )
         for columna in columnas:
             db.execute(text(
-                f"ALTER TABLE public.ventas "
+                f"ALTER TABLE public.{tabla} "
                 f"ADD COLUMN IF NOT EXISTS {columna} NUMERIC NOT NULL DEFAULT 0"
             ))
+
+    @classmethod
+    def _asegurar_columnas_ventas(cls, db) -> None:
+        """Compatibilidad: asegura las columnas de IVA de la tabla ventas."""
+        cls._asegurar_columnas_iva(db, "ventas")
 
     @classmethod
     def _insertar_venta(cls, db, factura: dict[str, Any], codcomp: str = "18") -> None:
