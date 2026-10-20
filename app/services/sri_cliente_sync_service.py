@@ -1280,11 +1280,44 @@ class SriClienteSyncService:
                         login_ok = True
                         break
 
-                # Si Keycloak todavía muestra el campo de contraseña,
-                # simplemente seguimos esperando hasta que termine el redirect.
-                # No se ejecuta ningún bloque vacío aquí porque Python exige
-                # una instrucción dentro del if.
+                # Si el formulario sigue mostrando un rechazo explícito de credenciales,
+                # detener el flujo en el primer intento. Nunca volver a enviar la clave:
+                # el SRI puede bloquear el usuario tras varios intentos fallidos.
                 if tiene_password:
+                    try:
+                        texto_auth = " ".join(
+                            (await page.locator("body").inner_text(timeout=1500)).casefold().split()
+                        )
+                    except Exception:
+                        texto_auth = ""
+
+                    errores_credenciales = (
+                        "invalid username or password",
+                        "invalid user credentials",
+                        "nombre de usuario o contraseña no válidos",
+                        "nombre de usuario o contraseña no validos",
+                        "usuario o contraseña incorrectos",
+                        "usuario o contraseña no válidos",
+                        "usuario o contraseña no validos",
+                        "credenciales incorrectas",
+                        "contraseña incorrecta",
+                        "contrasena incorrecta",
+                        "clave incorrecta",
+                    )
+                    if any(mensaje in texto_auth for mensaje in errores_credenciales):
+                        logging.getLogger("conta.sri").error(
+                            "SRI LOGIN | credenciales rechazadas en el primer intento; "
+                            "se detiene sin reintentar | ruc=%s | url=%s",
+                            ruc, page.url,
+                        )
+                        raise ValueError(
+                            "El SRI rechazó las credenciales en el primer intento. "
+                            "Conta detuvo el inicio de sesión y no volverá a intentarlo. "
+                            "Verifique la clave antes de iniciar una nueva sesión."
+                        )
+
+                    # Sin un rechazo explícito, esperar el redirect normalmente;
+                    # no se vuelve a pulsar el botón de inicio de sesión.
                     continue
 
                 try:
