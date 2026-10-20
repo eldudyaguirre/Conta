@@ -1860,6 +1860,32 @@ class SriClienteSyncService:
                     return valor
             return ""
 
+        # El detalle de nota de crédito usa etiquetas propias para el cliente.
+        # Releerlas explícitamente: el parser compartido de facturas busca
+        # "Identificación Comprador", mientras la NC muestra "Número RUC".
+        ruc_cliente = buscar([
+            "número ruc",
+            "numero ruc",
+            "ruc",
+        ])
+        nombre_cliente = buscar([
+            "razón social",
+            "razon social",
+        ])
+        tipo_identificacion = buscar([
+            "tipo identificación comprador",
+            "tipo identificacion comprador",
+            "tipo identificación",
+            "tipo identificacion",
+        ])
+
+        if ruc_cliente:
+            factura["identificacion"] = ruc_cliente.strip()
+        if nombre_cliente:
+            factura["razon_social"] = nombre_cliente.strip()
+        if tipo_identificacion:
+            factura["tipid"] = tipo_identificacion.strip()
+
         numfac = buscar([
             "número de documento modificado",
             "numero de documento modificado",
