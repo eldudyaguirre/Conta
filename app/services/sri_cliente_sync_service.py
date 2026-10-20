@@ -1464,7 +1464,7 @@ class SriClienteSyncService:
         # totales del comprobante se ignora para evitar duplicar importes.
         for tabla in soup.find_all("table"):
             tabla_id = tabla.get("id") or ""
-            if "tabla-impuestos-detalle-factura" not in tabla_id:
+            if not any(nombre in tabla_id for nombre in ("tabla-impuestos-detalle-factura", "tabla-impuestos-detalle-nota-credito")):
                 continue
 
             filas = tabla.find_all("tr")
@@ -1526,7 +1526,7 @@ class SriClienteSyncService:
         # genéricos, porque eso puede mandar una base gravada a baseiva0.
         for tabla in soup.find_all("table"):
             tabla_id = tabla.get("id") or ""
-            if "tabla-impuestos-detalle-factura" in tabla_id:
+            if any(nombre in tabla_id for nombre in ("tabla-impuestos-detalle-factura", "tabla-impuestos-detalle-nota-credito")):
                 continue
 
             for fila in tabla.find_all("tr"):
@@ -2328,7 +2328,7 @@ class SriClienteSyncService:
 
     @classmethod
     async def _obtener_detalle_emitido(cls, page, fila_idx: int) -> str | None:
-        """Recupera el detalle de una fila emitida (factura o retención) desde AJAX PrimeFaces."""
+        """Recupera el detalle de una fila emitida (factura, nota de crédito o retención) desde AJAX PrimeFaces."""
         import logging
         import re
         import xml.etree.ElementTree as ET
@@ -2344,7 +2344,7 @@ class SriClienteSyncService:
         # En el HAR de retenciones es j_idt61 y contiene la clave de acceso.
         # No usar a:has(img) como primera opción: esa fila también tiene enlaces
         # a PDF y documentos relacionados, que no abren el panel de retención.
-        enlace_detalle = fila.locator("a[id$=':j_idt61'], a[id$=':j_idt53']").first
+        enlace_detalle = fila.locator("a[id$=':j_idt57'], a[id$=':j_idt61'], a[id$=':j_idt53']").first
         if await enlace_detalle.count() == 0:
             enlace_detalle = fila.locator("a:has(img)").first
         if await enlace_detalle.count() == 0:
@@ -2398,6 +2398,14 @@ class SriClienteSyncService:
                         or ("fecha emision" in texto and "numero doc. sustento" in texto)
                     ):
                         html, tipo_detalle = contenido, "retención"
+                        break
+                    if (
+                        "form-detalle-nota-credito:panel-detalle-nota-credito" in panel_id.casefold()
+                        or "tabla-detalles-nota-credito" in contenido_lower
+                        or "detalle nota de crédito" in texto
+                        or "detalle nota credito" in texto
+                    ):
+                        html, tipo_detalle = contenido, "nota_credito"
                         break
                     if (
                         "tabla-impuestos-detalle-factura" in contenido_lower
@@ -2694,6 +2702,11 @@ class SriClienteSyncService:
                                 tipo_texto == "01"
                                 or tipo_normalizado.startswith("factura")
                                 or " factura " in f" {tipo_normalizado} "
+                            )
+                        elif texto_tipo == "nota de crédito":
+                            es_tipo = (
+                                "nota de credito" in tipo_normalizado
+                                or tipo_texto.strip() == "04"
                             )
                         else:
                             # El SRI puede mostrar "Comprobante de Retención"
