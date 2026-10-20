@@ -1477,8 +1477,16 @@ class SriClienteSyncService:
                 normalizados = [t.lower().rstrip(":").strip() for t in textos]
 
                 if len(normalizados) >= 5:
-                    requeridos = {"impuesto", "porcentaje", "tarifa", "base imponible", "valor"}
-                    if requeridos.issubset(set(normalizados)):
+                    # En el SRI el encabezado real puede ser "Código porcentaje"
+                    # (p. ej. código 4.0 = tarifa IVA 15%), no "Porcentaje".
+                    tiene_codigo_porcentaje = any(
+                        texto in {"código porcentaje", "codigo porcentaje"}
+                        for texto in normalizados
+                    )
+                    requeridos = {"impuesto", "tarifa", "base imponible", "valor"}
+                    if requeridos.issubset(set(normalizados)) and (
+                        "porcentaje" in normalizados or tiene_codigo_porcentaje
+                    ):
                         indice_encabezado = indice
                         encabezados = normalizados
                         break
@@ -1487,7 +1495,15 @@ class SriClienteSyncService:
                 continue
 
             pos_impuesto = encabezados.index("impuesto")
-            pos_porcentaje = encabezados.index("porcentaje")
+            pos_porcentaje = next(
+                (
+                    indice for indice, encabezado in enumerate(encabezados)
+                    if encabezado in {"porcentaje", "código porcentaje", "codigo porcentaje"}
+                ),
+                -1,
+            )
+            if pos_porcentaje < 0:
+                continue
             pos_tarifa = encabezados.index("tarifa")
             pos_base = encabezados.index("base imponible")
             pos_valor = encabezados.index("valor")
