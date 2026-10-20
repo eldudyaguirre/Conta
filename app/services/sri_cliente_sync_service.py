@@ -2879,6 +2879,13 @@ class SriClienteSyncService:
                             """), {"clave": clave}).first()
 
                         if existe:
+                            # Reparar NC previamente importadas con datos del
+                            # emisor o con columnas tributarias sin completar.
+                            if destino == "ncventas":
+                                cls._insertar_nota_credito(
+                                    db, factura, actualizar_existente=True
+                                )
+                                db.commit()
                             result["ya_existentes"] += 1
                             continue
 
@@ -3301,7 +3308,9 @@ class SriClienteSyncService:
         return actualizadas
 
     @classmethod
-    def _insertar_nota_credito(cls, db, factura: dict[str, Any]) -> None:
+    def _insertar_nota_credito(
+        cls, db, factura: dict[str, Any], actualizar_existente: bool = False
+    ) -> None:
         """Guarda una nota de crédito emitida con la estructura completa de ncventas.
 
         La autorización de la factura modificada se obtiene desde ventas usando
@@ -3418,10 +3427,27 @@ class SriClienteSyncService:
         )
         params = ", ".join(f":{k}" for k in values)
 
-        db.execute(
-            text(f"INSERT INTO ncventas ({cols}) VALUES ({params})"),
-            values,
-        )
+        if actualizar_existente:
+            # La sincronización puede volver a encontrar una NC ya importada
+            # con los datos antiguos del emisor. Actualizarla con los datos
+            # validados de la factura afectada, sin crear un duplicado.
+            asignaciones = ", ".join(
+                f'"{k}" = :{k}' if k == "año" else f"{k} = :{k}"
+                for k in values
+                if k != "autorizacion"
+            )
+            db.execute(
+                text(
+                    f"UPDATE ncventas SET {asignaciones} "
+                    "WHERE TRIM(autorizacion::text) = :autorizacion"
+                ),
+                values,
+            )
+        else:
+            db.execute(
+                text(f"INSERT INTO ncventas ({cols}) VALUES ({params})"),
+                values,
+            )
 
     @classmethod
     def _asegurar_columnas_iva(cls, db, tabla: str) -> None:
