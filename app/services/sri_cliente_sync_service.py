@@ -3334,38 +3334,51 @@ class SriClienteSyncService:
         # "Número Documento Modificado", consultando esa factura en ventas.
         autfac = ""
         fecfac = None
-        ruc_cliente = str(factura.get("identificacion") or "").strip()
-        nombre_cliente = str(factura.get("razon_social") or "").strip()
-        tipid_cliente = str(factura.get("tipid") or "").strip()
+        # No usar los datos generales del detalle de la NC como cliente:
+        # esos campos identifican al emisor. El cliente debe venir de la
+        # factura afectada que indica "Número Documento Modificado".
+        ruc_cliente = ""
+        nombre_cliente = ""
+        tipid_cliente = ""
 
-        if numfac:
-            digitos_numfac = re.sub(r"\D", "", numfac)
-            factura_original = db.execute(text("""
-                SELECT numfactur, autorizacion, fecfactur,
-                       ruccedcli, nomcli, tipid
-                FROM ventas
-                WHERE REGEXP_REPLACE(TRIM(numfactur::text), '[^0-9]', '', 'g') = :numfac_digitos
-                ORDER BY numfactur ASC
-                LIMIT 1
-            """), {"numfac_digitos": digitos_numfac}).mappings().first()
+        if not numfac:
+            raise ValueError(
+                f"NC emitida {numnc}: el SRI no proporcionó Número Documento Modificado; "
+                "no se guardará con datos del emisor como si fueran del cliente."
+            )
 
-            if factura_original:
-                # Conservar el número normalizado en la nota, y tomar la
-                # autorización, fecha y datos del comprador desde la factura.
-                autfac = str(factura_original["autorizacion"] or "").strip()
-                fecfac = factura_original["fecfactur"]
-                ruc_cliente = str(factura_original["ruccedcli"] or "").strip()
-                nombre_cliente = str(factura_original["nomcli"] or "").strip()
-                tipid_cliente = str(factura_original["tipid"] or "").strip()
-            else:
-                logger.warning(
-                    "NC EMITIDA | no se encontró factura modificada en ventas; "
-                    "se conservan datos del detalle de NC como respaldo | "
-                    "numnc=%s | numfac=%s | digitos=%s",
-                    numnc,
-                    numfac,
-                    digitos_numfac,
-                )
+        digitos_numfac = re.sub(r"\D", "", numfac)
+        if len(digitos_numfac) != 15:
+            raise ValueError(
+                f"NC emitida {numnc}: número de documento modificado inválido: {numfac!r}."
+            )
+
+        factura_original = db.execute(text("""
+            SELECT numfactur, autorizacion, fecfactur,
+                   ruccedcli, nomcli, tipid
+            FROM ventas
+            WHERE REGEXP_REPLACE(TRIM(numfactur::text), '[^0-9]', '', 'g') = :numfac_digitos
+            ORDER BY numfactur ASC
+            LIMIT 1
+        """), {"numfac_digitos": digitos_numfac}).mappings().first()
+
+        if not factura_original:
+            raise ValueError(
+                f"NC emitida {numnc}: no se encontró la factura afectada {numfac} "
+                "en ventas. No se guardará con el RUC/nombre del emisor."
+            )
+
+        autfac = str(factura_original["autorizacion"] or "").strip()
+        fecfac = factura_original["fecfactur"]
+        ruc_cliente = str(factura_original["ruccedcli"] or "").strip()
+        nombre_cliente = str(factura_original["nomcli"] or "").strip()
+        tipid_cliente = str(factura_original["tipid"] or "").strip()
+
+        if not ruc_cliente or not nombre_cliente:
+            raise ValueError(
+                f"NC emitida {numnc}: la factura afectada {numfac} existe en ventas "
+                "pero no tiene identificación/nombre de cliente."
+            )
 
         values = {
             "numnc": numnc,
