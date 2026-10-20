@@ -1903,20 +1903,15 @@ class SriClienteSyncService:
         if tipo_identificacion:
             factura["tipid"] = tipo_identificacion.strip()
 
+        # Solo aceptar la etiqueta del NÚMERO del documento modificado.
+        # No usar búsquedas genéricas como "documento modificado", porque
+        # también coinciden con "Código Documento Modificado" cuyo valor es 01.
         numfac = buscar([
             "Número Documento Modificado",
             "Número de Documento Modificado",
             "Numero Documento Modificado",
             "Numero de Documento Modificado",
-            "Factura Modificada",
-            "Comprobante Modificado",
-            "Documento que Modifica",
-        ], etiquetas_genericas=(
-            "numero documento modificado",
-            "factura modificada",
-            "comprobante modificado",
-            "documento que modifica",
-        ))
+        ])
         fecfac = buscar([
             "fecha emisión sustento",
             "fecha emision sustento",
@@ -3472,15 +3467,12 @@ class SriClienteSyncService:
 
         autfac = str(factura_original["autorizacion"] or "").strip() if factura_original else ""
         fecfac = factura_original["fecfactur"] if factura_original else factura.get("fecfac")
-        # Prioridad: comprador identificado en el PDF oficial de la NC;
-        # respaldo: datos de la factura afectada ya guardada en ventas.
-        ruc_cliente = str(factura.get("identificacion") or "").strip()
-        nombre_cliente = str(factura.get("razon_social") or "").strip()
-        tipid_cliente = str(factura.get("tipid") or "").strip()
-        if not ruc_cliente or not nombre_cliente:
-            ruc_cliente = str(factura_original["ruccedcli"] or "").strip() if factura_original else ""
-            nombre_cliente = str(factura_original["nomcli"] or "").strip() if factura_original else ""
-            tipid_cliente = str(factura_original["tipid"] or "").strip() if factura_original else ""
+        # La NC emitida muestra los datos de nuestra empresa como emisor.
+        # El cliente SIEMPRE se toma de la factura afectada indicada en
+        # Número Documento Modificado, nunca de la cabecera de la propia NC.
+        ruc_cliente = str(factura_original["ruccedcli"] or "").strip() if factura_original else ""
+        nombre_cliente = str(factura_original["nomcli"] or "").strip() if factura_original else ""
+        tipid_cliente = str(factura_original["tipid"] or "").strip() if factura_original else ""
 
         if not ruc_cliente or not nombre_cliente:
             raise ValueError(
