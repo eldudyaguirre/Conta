@@ -3432,17 +3432,15 @@ class SriClienteSyncService:
                 f"{digitos_numfac[6:]}"
             )
 
-        # La nota de crédito emitida identifica al emisor (nuestra empresa).
-        # El cliente correcto se obtiene de la factura afectada indicada por
-        # "Número Documento Modificado", consultando esa factura en ventas.
+        # La nota de crédito muestra como cabecera los datos del emisor.
+        # Primero buscamos el comprobante afectado por Número Documento Modificado.
+        # Si aún no está en ventas, usamos los datos del comprador extraídos del PDF
+        # oficial de la NC (el llamador los incorpora en factura antes de insertar).
         autfac = ""
-        fecfac = None
-        # No usar los datos generales del detalle de la NC como cliente:
-        # esos campos identifican al emisor. El cliente debe venir de la
-        # factura afectada que indica "Número Documento Modificado".
-        ruc_cliente = ""
-        nombre_cliente = ""
-        tipid_cliente = ""
+        fecfac = factura.get("fecfac")
+        ruc_cliente = str(factura.get("identificacion") or "").strip()
+        nombre_cliente = str(factura.get("razon_social") or "").strip()
+        tipid_cliente = str(factura.get("tipid") or "").strip()
 
         if not numfac:
             raise ValueError(
@@ -3465,19 +3463,19 @@ class SriClienteSyncService:
             LIMIT 1
         """), {"numfac_digitos": digitos_numfac}).mappings().first()
 
-        autfac = str(factura_original["autorizacion"] or "").strip() if factura_original else ""
-        fecfac = factura_original["fecfactur"] if factura_original else factura.get("fecfac")
-        # La NC emitida muestra los datos de nuestra empresa como emisor.
-        # El cliente SIEMPRE se toma de la factura afectada indicada en
-        # Número Documento Modificado, nunca de la cabecera de la propia NC.
-        ruc_cliente = str(factura_original["ruccedcli"] or "").strip() if factura_original else ""
-        nombre_cliente = str(factura_original["nomcli"] or "").strip() if factura_original else ""
-        tipid_cliente = str(factura_original["tipid"] or "").strip() if factura_original else ""
+        if factura_original:
+            autfac = str(factura_original["autorizacion"] or "").strip()
+            fecfac = factura_original["fecfactur"] or fecfac
+            # Los datos de la factura afectada tienen prioridad sobre el PDF.
+            ruc_cliente = str(factura_original["ruccedcli"] or "").strip() or ruc_cliente
+            nombre_cliente = str(factura_original["nomcli"] or "").strip() or nombre_cliente
+            tipid_cliente = str(factura_original["tipid"] or "").strip() or tipid_cliente
 
         if not ruc_cliente or not nombre_cliente:
             raise ValueError(
                 f"NC emitida {numnc}: no se pudieron obtener RUC/cédula y nombre del comprador "
-                f"desde el PDF ni desde la factura afectada {numfac}. No se usará el emisor."
+                f"desde el PDF ni desde la factura afectada {numfac}. "
+                "No se usarán los datos del emisor de la nota de crédito."
             )
         if not fecfac:
             raise ValueError(
