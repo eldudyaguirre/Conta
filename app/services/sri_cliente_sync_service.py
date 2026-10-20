@@ -3328,15 +3328,20 @@ class SriClienteSyncService:
                 f"{digitos_numfac[6:]}"
             )
 
-        # Los datos de la factura afectada deben salir del registro original
-        # en ventas: número, autorización y fecha de esa factura.
+        # La nota de crédito emitida identifica al emisor (nuestra empresa).
+        # El cliente correcto se obtiene de la factura afectada indicada por
+        # "Número Documento Modificado", consultando esa factura en ventas.
         autfac = ""
         fecfac = None
+        ruc_cliente = str(factura.get("identificacion") or "").strip()
+        nombre_cliente = str(factura.get("razon_social") or "").strip()
+        tipid_cliente = str(factura.get("tipid") or "").strip()
 
         if numfac:
             digitos_numfac = re.sub(r"\\D", "", numfac)
             factura_original = db.execute(text("""
-                SELECT numfactur, autorizacion, fecfactur
+                SELECT numfactur, autorizacion, fecfactur,
+                       ruccedcli, nomcli, tipid
                 FROM ventas
                 WHERE REGEXP_REPLACE(TRIM(numfactur::text), '[^0-9]', '', 'g') = :numfac_digitos
                 ORDER BY numfactur ASC
@@ -3344,13 +3349,17 @@ class SriClienteSyncService:
             """), {"numfac_digitos": digitos_numfac}).mappings().first()
 
             if factura_original:
-                # Conservar el número normalizado en la nota, y usar la
-                # autorización/fecha de la factura original, no de la NC.
+                # Conservar el número normalizado en la nota, y tomar la
+                # autorización, fecha y datos del comprador desde la factura.
                 autfac = str(factura_original["autorizacion"] or "").strip()
                 fecfac = factura_original["fecfactur"]
+                ruc_cliente = str(factura_original["ruccedcli"] or "").strip()
+                nombre_cliente = str(factura_original["nomcli"] or "").strip()
+                tipid_cliente = str(factura_original["tipid"] or "").strip()
             else:
                 logger.warning(
-                    "NC EMITIDA | no se encontró factura modificada en ventas | "
+                    "NC EMITIDA | no se encontró factura modificada en ventas; "
+                    "se conservan datos del detalle de NC como respaldo | "
                     "numnc=%s | numfac=%s | digitos=%s",
                     numnc,
                     numfac,
@@ -3363,9 +3372,9 @@ class SriClienteSyncService:
             # Las fechas en ncventas se almacenan como VARCHAR dd/mm/aaaa,
             # igual que el formato utilizado por el sistema contable.
             "fecnc": cls._fecha_varchar(factura["fecha"]),
-            "ruccedcli": factura["identificacion"],
-            "nomcli": factura["razon_social"],
-            "tipid": factura.get("tipid") or cls._tipid_emitido(factura["identificacion"]),
+            "ruccedcli": ruc_cliente,
+            "nomcli": nombre_cliente,
+            "tipid": tipid_cliente or cls._tipid_emitido(ruc_cliente),
             "codcomp": "04",
             "numemi": 1,
             "basenoobj": factura["base_no_objeto"],
