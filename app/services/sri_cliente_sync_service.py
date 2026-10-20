@@ -1812,6 +1812,10 @@ class SriClienteSyncService:
             "documento que modifica",
         ])
         fecfac = buscar([
+            "fecha emisión sustento",
+            "fecha emision sustento",
+            "fecha de emisión sustento",
+            "fecha de emision sustento",
             "fecha de emisión documento modificado",
             "fecha de emision documento modificado",
             "fecha documento modificado",
