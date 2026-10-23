@@ -1428,6 +1428,13 @@ class SriClienteSyncService:
 
     @staticmethod
     def _tipid_emitido(identificacion: str) -> str:
+        """Devuelve el tipo SRI según el largo de la identificación.
+
+        05 = cédula ecuatoriana (10 dígitos)
+        04 = RUC (13 dígitos)
+        06 = pasaporte/identificación del exterior (otros largos)
+        07 = consumidor final
+        """
         valor = str(identificacion or "").strip()
         if valor == "9999999999999":
             return "07"
@@ -1435,6 +1442,8 @@ class SriClienteSyncService:
             return "05"
         if len(valor) == 13:
             return "04"
+        if valor:
+            return "06"
         return ""
 
     @classmethod
