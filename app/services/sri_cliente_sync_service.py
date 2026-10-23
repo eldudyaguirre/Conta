@@ -4435,6 +4435,15 @@ class SriClienteSyncService:
             or ""
         ).strip()
 
+        # El código de identificación debe conservar dos dígitos:
+        # cédula = 05, RUC = 04 y cualquier longitud distinta = 06.
+        if len(ruc_emisor) == 10:
+            tipid_emisor = "05"
+        elif len(ruc_emisor) == 13:
+            tipid_emisor = "04"
+        else:
+            tipid_emisor = "06"
+
         existente = db.execute(text("""
             SELECT 1
             FROM ventas
@@ -4463,7 +4472,7 @@ class SriClienteSyncService:
             "fecfactur": cls._fecha_varchar(fecha),
             "ruccedcli": ruc_emisor,
             "nomcli": nombre_emisor,
-            "tipid": "4",
+            "tipid": tipid_emisor,
             "codcomp": "18",
             "numemi": "0",
             "basenoobj": cero,
