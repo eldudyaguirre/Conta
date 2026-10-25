@@ -383,82 +383,114 @@ class SriCertificadoRucService:
 
             logger.info("CERTIFICADO RUC | haciendo clic RUC | ruc=%s", ruc)
 
-            # El SRI devuelve el certificado mediante una respuesta HTTP que
-            # puede provocar una navegación. Hay que leer response.body()
-            # mientras la respuesta sigue disponible. Si esperamos a que la
-            # navegación termine y luego intentamos leerla, Chromium puede
-            # eliminar el identificador de recurso y Playwright produce:
-            # Network.getResponseBody: No resource with given identifier found.
+            # El clic puede generar una descarga del navegador o una respuesta PDF
+            # inline. No debemos leer la respuesta HTML de opciones-certificado.jsf:
+            # ese documento puede navegar y Chromium pierde su body. Capturamos
+            # explícitamente la descarga o una respuesta cuyo Content-Type sea PDF.
             loop = asyncio.get_running_loop()
-            respuesta_pdf: asyncio.Future = loop.create_future()
+            resultado_pdf: asyncio.Future = loop.create_future()
 
-            def _es_respuesta_certificado(response) -> bool:
+            async def _guardar_descarga(download) -> None:
+                if resultado_pdf.done():
+                    return
                 try:
+                    with tempfile.NamedTemporaryFile(
+                        prefix=f"ruc_{ruc}_",
+                        suffix=".pdf",
+                        delete=False,
+                    ) as tmp:
+                        download_path = Path(tmp.name)
+                    try:
+                        await download.save_as(str(download_path))
+                        contenido_descarga = await asyncio.to_thread(download_path.read_bytes)
+                    finally:
+                        download_path.unlink(missing_ok=True)
+                    if not resultado_pdf.done():
+                        resultado_pdf.set_result(("download", None, contenido_descarga, None, None))
+                except Exception as exc:
+                    if not resultado_pdf.done():
+                        resultado_pdf.set_result(("download", None, None, None, exc))
+
+            def _al_descargar(download) -> None:
+                if not resultado_pdf.done():
+                    asyncio.create_task(_guardar_descarga(download))
+
+            def _es_respuesta_pdf(response) -> bool:
+                try:
+                    content_type = response.headers.get("content-type", "").lower()
+                    disposition = response.headers.get("content-disposition", "").lower()
                     return (
                         response.request.method == "POST"
                         and (
-                            "certificado" in response.url.lower()
-                            or "opciones-certificado" in response.url.lower()
+                            "application/pdf" in content_type
+                            or ".pdf" in disposition
+                            or "filename=" in disposition and "pdf" in disposition
                         )
                     )
                 except Exception:
                     return False
 
-            async def _leer_respuesta_antes_de_navegar(response) -> None:
-                if respuesta_pdf.done():
+            async def _leer_respuesta_pdf(response) -> None:
+                if resultado_pdf.done():
                     return
                 try:
-                    # Leer el cuerpo desde el evento de respuesta, no después
-                    # de que el click termine la navegación JSF.
                     cuerpo = await response.body()
-                    if not respuesta_pdf.done():
-                        respuesta_pdf.set_result((response, cuerpo, None))
+                    if not resultado_pdf.done():
+                        resultado_pdf.set_result(("response", response, cuerpo, None, None))
                 except Exception as exc:
-                    if not respuesta_pdf.done():
-                        respuesta_pdf.set_result((response, None, exc))
+                    if not resultado_pdf.done():
+                        resultado_pdf.set_result(("response", response, None, None, exc))
 
             def _al_recibir_respuesta(response) -> None:
-                if _es_respuesta_certificado(response) and not respuesta_pdf.done():
-                    asyncio.create_task(_leer_respuesta_antes_de_navegar(response))
+                if _es_respuesta_pdf(response) and not resultado_pdf.done():
+                    asyncio.create_task(_leer_respuesta_pdf(response))
 
+            page.on("download", _al_descargar)
             page.on("response", _al_recibir_respuesta)
             try:
                 await ruc_button.click()
                 try:
-                    response, contenido, error_cuerpo = await asyncio.wait_for(
-                        asyncio.shield(respuesta_pdf),
+                    origen, response, contenido, _, error_cuerpo = await asyncio.wait_for(
+                        asyncio.shield(resultado_pdf),
                         timeout=60000,
                     )
                 except asyncio.TimeoutError as exc:
                     raise RuntimeError(
-                        "El SRI no devolvió una respuesta de certificado en 60 segundos "
-                        "después de seleccionar RUC."
+                        "El SRI no entregó un archivo PDF ni una respuesta application/pdf "
+                        "en 60 segundos después de seleccionar RUC. "
+                        f"URL actual={page.url!r}; título={await page.title()!r}."
                     ) from exc
             finally:
                 try:
+                    page.remove_listener("download", _al_descargar)
                     page.remove_listener("response", _al_recibir_respuesta)
                 except Exception:
                     pass
 
             if error_cuerpo is not None or contenido is None:
                 raise RuntimeError(
-                    "El SRI respondió, pero Chromium descartó el cuerpo durante la navegación. "
-                    f"URL={response.url!r}; HTTP={response.status}; "
-                    f"detalle={error_cuerpo!s}. "
-                    "Se debe capturar el PDF como descarga del navegador o interceptar la respuesta antes de navegar."
+                    "El SRI indicó que entregaba el PDF, pero no se pudo leer el archivo. "
+                    f"Origen={origen}; URL={getattr(response, 'url', '')!r}; "
+                    f"detalle={error_cuerpo!s}."
                 ) from error_cuerpo
 
-            logger.info(
-                "CERTIFICADO RUC | respuesta HTTP recibida | ruc=%s | status=%s | url=%s | content-type=%s",
-                ruc,
-                response.status,
-                response.url,
-                response.headers.get("content-type", ""),
-            )
-
-            if not response.ok:
-                raise RuntimeError(
-                    f"El SRI respondió HTTP {response.status} al solicitar el Certificado de RUC."
+            if origen == "response":
+                logger.info(
+                    "CERTIFICADO RUC | respuesta PDF recibida | ruc=%s | status=%s | url=%s | content-type=%s",
+                    ruc,
+                    response.status,
+                    response.url,
+                    response.headers.get("content-type", ""),
+                )
+                if not response.ok:
+                    raise RuntimeError(
+                        f"El SRI respondió HTTP {response.status} al solicitar el Certificado de RUC."
+                    )
+            else:
+                logger.info(
+                    "CERTIFICADO RUC | descarga del navegador recibida | ruc=%s | bytes=%s",
+                    ruc,
+                    len(contenido),
                 )
 
             if not contenido.startswith(b"%PDF"):
