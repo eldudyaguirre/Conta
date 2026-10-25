@@ -309,22 +309,48 @@ class SriCertificadoRucService:
             logger.info("CERTIFICADO RUC | buscando botón RUC | ruc=%s", ruc)
 
             async def _buscar_boton_ruc():
+                # SRI cambia ocasionalmente el marcado JSF; buscar también en iframes.
                 selectores = [
                     RUC_SELECTOR,
-                    'a:has-text("RUC")',
+                    'a[href*="RUC" i]',
+                    'a[href*="ruc" i]',
                     'button:has-text("RUC")',
                     '[role="button"]:has-text("RUC")',
-                    'input[value="RUC"]',
+                    'input[value*="RUC" i]',
+                    'img[alt*="RUC" i]',
+                    'img[title*="RUC" i]',
+                    '[aria-label*="RUC" i]',
+                    '[title*="RUC" i]',
                 ]
-                for selector in selectores:
-                    try:
-                        locator = page.locator(selector).first
-                        if await locator.count() and await locator.is_visible():
-                            return locator
-                    except Exception:
-                        continue
+                objetivos = [page] + [frame for frame in page.frames if frame != page.main_frame]
+                for objetivo in objetivos:
+                    for selector in selectores:
+                        try:
+                            locator = objetivo.locator(selector).first
+                            if await locator.count() and await locator.is_visible():
+                                logger.info(
+                                    "CERTIFICADO RUC | opción encontrada por selector | ruc=%s | frame=%s | selector=%s",
+                                    ruc, getattr(objetivo, "url", page.url), selector,
+                                )
+                                return locator
+                        except Exception:
+                            continue
+                    for patron in (
+                        re.compile(r"^\s*RUC\s*$", re.IGNORECASE),
+                        re.compile(r"^\s*Certificado\s+de\s+RUC\s*$", re.IGNORECASE),
+                        re.compile(r"^\s*RUC\s*[:\-]?\s*$", re.IGNORECASE),
+                    ):
+                        try:
+                            locator = objetivo.get_by_text(patron).first
+                            if await locator.count() and await locator.is_visible():
+                                logger.info(
+                                    "CERTIFICADO RUC | opción encontrada por texto | ruc=%s | frame=%s",
+                                    ruc, getattr(objetivo, "url", page.url),
+                                )
+                                return locator
+                        except Exception:
+                            continue
                 return None
-
             ruc_button = await _buscar_boton_ruc()
             if ruc_button is None:
                 # El SRI puede devolver una página intermedia después del login.
@@ -338,22 +364,22 @@ class SriCertificadoRucService:
                 ruc_button = await _buscar_boton_ruc()
 
             if ruc_button is None:
-                # Último recurso: localizar cualquier enlace/botón cuyo texto
-                # normalizado sea exactamente RUC.
-                ruc_button = page.get_by_text(
-                    re.compile(r"^\s*RUC\s*$", re.IGNORECASE)
-                ).first
-                try:
-                    await ruc_button.wait_for(
-                        state="visible",
-                        timeout=min(settings.SRI_NAVIGATION_TIMEOUT_MS, 8000),
-                    )
-                except Exception as exc:
-                    raise RuntimeError(
-                        "El SRI abrió la página de certificados, pero no apareció la opción RUC. "
-                        f"URL={page.url!r}; título={await page.title()!r}. "
-                        "Verifique si cambió la página del SRI o si la sesión requiere validación adicional."
-                    ) from exc
+                diagnostico = []
+                for objetivo in [page] + [frame for frame in page.frames if frame != page.main_frame]:
+                    try:
+                        texto = " ".join((await objetivo.locator("body").inner_text(timeout=1500)).split())
+                        diagnostico.append(
+                            f"frame_url={getattr(objetivo, 'url', page.url)!r}, texto={texto[:700]!r}"
+                        )
+                    except Exception as diag_exc:
+                        diagnostico.append(
+                            f"frame_url={getattr(objetivo, 'url', page.url)!r}, lectura={type(diag_exc).__name__}"
+                        )
+                raise RuntimeError(
+                    "El SRI abrió la página de certificados, pero no apareció la opción RUC. "
+                    f"URL={page.url!r}; título={await page.title()!r}; "
+                    + " | ".join(diagnostico)
+                )
 
             logger.info("CERTIFICADO RUC | haciendo clic RUC | ruc=%s", ruc)
 
