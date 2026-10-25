@@ -71,7 +71,7 @@ class SriCertificadoRucService:
     @classmethod
     def iniciar_uno(cls, ruc: str) -> dict[str, Any]:
         """Inicia la obtención de un certificado para un único RUC."""
-        ruc = re.sub(r"\\D", "", str(ruc))
+        ruc = re.sub(r"\D", "", str(ruc))
         if len(ruc) != 13:
             raise ValueError("El RUC debe contener exactamente 13 dígitos.")
 
@@ -106,7 +106,7 @@ class SriCertificadoRucService:
 
     @classmethod
     def estado_uno(cls, ruc: str) -> dict[str, Any]:
-        ruc = re.sub(r"\\D", "", str(ruc))
+        ruc = re.sub(r"\D", "", str(ruc))
         with cls._single_lock:
             estado = cls._single_status.get(ruc)
             return dict(estado) if estado else {
