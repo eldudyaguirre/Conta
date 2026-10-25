@@ -383,149 +383,48 @@ class SriCertificadoRucService:
 
             logger.info("CERTIFICADO RUC | haciendo clic RUC | ruc=%s", ruc)
 
-            # Capturar el cuerpo en la capa de routing ANTES de que Chromium navegue.
-            # response.body() puede fallar tras una navegación JSF; route.fetch()
-            # conserva el cuerpo de la respuesta original mientras se procesa la ruta.
-            loop = asyncio.get_running_loop()
-            resultado_pdf: asyncio.Future = loop.create_future()
-
-            async def _guardar_descarga(download) -> None:
-                if resultado_pdf.done():
-                    return
-                try:
-                    with tempfile.NamedTemporaryFile(
-                        prefix=f"ruc_{ruc}_",
-                        suffix=".pdf",
-                        delete=False,
-                    ) as tmp:
-                        download_path = Path(tmp.name)
-                    try:
-                        await download.save_as(str(download_path))
-                        contenido_descarga = await asyncio.to_thread(download_path.read_bytes)
-                    finally:
-                        download_path.unlink(missing_ok=True)
-                    if not resultado_pdf.done():
-                        resultado_pdf.set_result(("download", None, contenido_descarga, None, None))
-                except Exception as exc:
-                    if not resultado_pdf.done():
-                        resultado_pdf.set_result(("download", None, None, None, exc))
-
-            def _al_descargar(download) -> None:
-                if not resultado_pdf.done():
-                    asyncio.create_task(_guardar_descarga(download))
-
-            async def _interceptar_respuesta_certificado(route) -> None:
-                request = route.request
-                response = None
-                try:
-                    # Interceptar todos los recursos del módulo de certificados:
-                    # el POST de opciones JSF suele devolver HTML y el PDF puede
-                    # llegar después mediante otro GET o una descarga separada.
-                    response = await route.fetch()
-                    headers = response.headers
-                    content_type = headers.get("content-type", "").lower()
-                    disposition = headers.get("content-disposition", "").lower()
-                    url_lower = request.url.lower()
-                    tipo_recurso = getattr(request, "resource_type", "")
-
-                    revisar_cuerpo = (
-                        "application/pdf" in content_type
-                        or "pdf" in disposition
-                        or (
-                            ("certificado" in url_lower or "ruc" in url_lower)
-                            and tipo_recurso in {"document", "xhr", "fetch"}
-                        )
-                    )
-                    cuerpo = await response.body() if revisar_cuerpo else b""
-                    parece_pdf = (
-                        cuerpo.startswith(b"%PDF")
-                        or b"%PDF" in cuerpo[:1024]
-                        or "application/pdf" in content_type
-                        or ".pdf" in disposition
-                    )
-                    if parece_pdf:
-                        # No asumir PDF solo por el header: validar firma real.
-                        if cuerpo and b"%PDF" in cuerpo[:1024]:
-                            if not resultado_pdf.done():
-                                resultado_pdf.set_result(("response", response, cuerpo, None, None))
-                            logger.info(
-                                "CERTIFICADO RUC | PDF interceptado antes de navegación | ruc=%s | método=%s | status=%s | url=%s | bytes=%s | content-type=%s",
-                                ruc, request.method, response.status, request.url, len(cuerpo), content_type,
-                            )
-                        else:
-                            logger.warning(
-                                "CERTIFICADO RUC | respuesta etiquetada PDF pero firma inválida | ruc=%s | url=%s | content-type=%s | bytes=%s",
-                                ruc, request.url, content_type, len(cuerpo),
-                            )
-                    elif tipo_recurso == "document" and ("certificado" in url_lower or "ruc" in url_lower):
-                        logger.info(
-                            "CERTIFICADO RUC | documento de certificados no PDF | ruc=%s | método=%s | status=%s | url=%s | content-type=%s",
-                            ruc, request.method, response.status, request.url, content_type,
-                        )
-
-                    # Devolver al navegador la respuesta original sin cambiar el flujo JSF.
-                    await route.fulfill(response=response)
-                except Exception as exc:
-                    if not resultado_pdf.done() and (
-                        "certificado" in request.url.lower() or "ruc" in request.url.lower()
-                    ):
-                        logger.warning(
-                            "CERTIFICADO RUC | error al inspeccionar respuesta | ruc=%s | url=%s | error=%s",
-                            ruc, request.url, exc,
-                        )
-                    try:
-                        await route.continue_()
-                    except Exception:
-                        pass
-
-            page.on("download", _al_descargar)
-            patron_rutas_certificado = "**/sri-catastro-tributario-web-internet/**"
-            await page.route(patron_rutas_certificado, _interceptar_respuesta_certificado)
+            # El HAR de una consulta exitosa confirma que el POST JSF devuelve
+            # directamente application/pdf con Content-Disposition: attachment.
+            # Dejar que Chromium gestione esa descarga evita perder el body al navegar.
+            response = None
+            origen = "download"
             try:
-                await ruc_button.click()
-                try:
-                    origen, response, contenido, _, error_cuerpo = await asyncio.wait_for(
-                        asyncio.shield(resultado_pdf),
-                        timeout=60000,
-                    )
-                except asyncio.TimeoutError as exc:
-                    raise RuntimeError(
-                        "El SRI no entregó un PDF ni inició una descarga en 60 segundos. "
-                        f"URL actual={page.url!r}; título={await page.title()!r}. "
-                        "La respuesta POST de la pantalla JSF fue interceptada, pero no contenía un PDF."
-                    ) from exc
-            finally:
-                try:
-                    await page.unroute(patron_rutas_certificado, _interceptar_respuesta_certificado)
-                    page.remove_listener("download", _al_descargar)
-                except Exception:
-                    pass
-
-            if error_cuerpo is not None or contenido is None:
+                async with page.expect_download(timeout=60000) as descarga_pendiente:
+                    await ruc_button.click()
+                descarga = await descarga_pendiente.value
+            except Exception as exc:
                 raise RuntimeError(
-                    "El SRI indicó que entregaba el PDF, pero no se pudo leer el archivo. "
-                    f"Origen={origen}; URL={getattr(response, 'url', '')!r}; "
-                    f"detalle={error_cuerpo!s}."
-                ) from error_cuerpo
+                    "El SRI no inició una descarga de certificado en 60 segundos. "
+                    f"URL actual={page.url!r}; título={await page.title()!r}. "
+                    "No se realizó otra consulta automáticamente para evitar consumir intentos del SRI."
+                ) from exc
 
-            if origen == "response":
-                logger.info(
-                    "CERTIFICADO RUC | respuesta PDF recibida | ruc=%s | status=%s | url=%s | content-type=%s",
-                    ruc,
-                    response.status,
-                    response.url,
-                    response.headers.get("content-type", ""),
-                )
-                if not response.ok:
-                    raise RuntimeError(
-                        f"El SRI respondió HTTP {response.status} al solicitar el Certificado de RUC."
-                    )
-            else:
-                logger.info(
-                    "CERTIFICADO RUC | descarga del navegador recibida | ruc=%s | bytes=%s",
-                    ruc,
-                    len(contenido),
-                )
+            nombre_descarga = descarga.suggested_filename or f"certificado_ruc_{ruc}.pdf"
+            logger.info(
+                "CERTIFICADO RUC | descarga iniciada por Chromium | ruc=%s | nombre=%s | failure=%s",
+                ruc, nombre_descarga, descarga.failure(),
+            )
+
+            with tempfile.NamedTemporaryFile(
+                prefix=f"ruc_{ruc}_",
+                suffix=".pdf",
+                delete=False,
+            ) as tmp:
+                temp_path = Path(tmp.name)
+
+            try:
+                await descarga.save_as(str(temp_path))
+                contenido = await asyncio.to_thread(temp_path.read_bytes)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Chromium detectó la descarga del SRI, pero no pudo guardar el archivo temporal. "
+                    f"nombre={nombre_descarga!r}; detalle={exc}"
+                ) from exc
+
+            logger.info(
+                "CERTIFICADO RUC | descarga guardada temporalmente | ruc=%s | nombre=%s | bytes=%s",
+                ruc, nombre_descarga, len(contenido),
+            )
 
             if not contenido.startswith(b"%PDF"):
                 # Algunas instalaciones del SRI pueden devolver una redirección
@@ -533,7 +432,7 @@ class SriCertificadoRucService:
                 preview = contenido[:200].decode("utf-8", errors="replace")
                 raise ValueError(
                     f"El SRI no devolvió un PDF válido para el RUC {ruc}. "
-                    f"Content-Type={response.headers.get('content-type', '')}; "
+                    f"Content-Type=application/pdf (descarga del navegador); "
                     f"preview={preview!r}"
                 )
 
