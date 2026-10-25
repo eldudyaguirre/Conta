@@ -341,12 +341,19 @@ class SriCertificadoRucService:
                 # Último recurso: localizar cualquier enlace/botón cuyo texto
                 # normalizado sea exactamente RUC.
                 ruc_button = page.get_by_text(
-                    re.compile(r"^\\s*RUC\\s*$", re.IGNORECASE)
+                    re.compile(r"^\s*RUC\s*$", re.IGNORECASE)
                 ).first
-                await ruc_button.wait_for(
-                    state="visible",
-                    timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
-                )
+                try:
+                    await ruc_button.wait_for(
+                        state="visible",
+                        timeout=min(settings.SRI_NAVIGATION_TIMEOUT_MS, 8000),
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "El SRI abrió la página de certificados, pero no apareció la opción RUC. "
+                        f"URL={page.url!r}; título={await page.title()!r}. "
+                        "Verifique si cambió la página del SRI o si la sesión requiere validación adicional."
+                    ) from exc
 
             logger.info("CERTIFICADO RUC | haciendo clic RUC | ruc=%s", ruc)
 
