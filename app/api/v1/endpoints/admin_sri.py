@@ -378,6 +378,36 @@ async def estado_compras(
     }
 
 
+@router.post("/certificados-ruc/{ruc}/descargar")
+async def descargar_certificado_ruc_individual(
+    ruc: str,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Inicia la obtención de un certificado de RUC para un cliente."""
+    from app.services.sri_certificado_ruc_service import SriCertificadoRucService
+    try:
+        resultado = SriCertificadoRucService.iniciar_uno(ruc)
+        return {"usuario": usuario["usrname"], "tipo": "sri_certificado_ruc_individual", **resultado}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error iniciando Certificado de RUC: {exc}")
+
+
+@router.get("/certificados-ruc/{ruc}/estado")
+async def estado_certificado_ruc_individual(
+    ruc: str,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Consulta el resultado real de la obtención del certificado individual."""
+    from app.services.sri_certificado_ruc_service import SriCertificadoRucService
+    try:
+        resultado = SriCertificadoRucService.estado_uno(ruc)
+        return {"usuario": usuario["usrname"], "tipo": "sri_certificado_ruc_estado_individual", **resultado}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/certificados-ruc/descargar-todos")
 async def descargar_certificados_ruc(
     usuario: dict = Depends(get_admin_user),
