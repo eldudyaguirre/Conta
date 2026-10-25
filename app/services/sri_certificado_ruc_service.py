@@ -37,6 +37,8 @@ RUC_SELECTOR = 'img[src*="RUC.svg"], img[src*="ruc.svg"], a[href*="RUC"], a[href
 class SriCertificadoRucService:
     _running = False
     _thread: threading.Thread | None = None
+    _single_status: dict[str, dict[str, Any]] = {}
+    _single_lock = threading.Lock()
     _status: dict[str, Any] = {
         "estado": "detenido",
         "total": 0,
@@ -65,6 +67,81 @@ class SriCertificadoRucService:
             for row in rows
             if str(row["ruccedcli"] or "").strip()
         ]
+
+    @classmethod
+    def iniciar_uno(cls, ruc: str) -> dict[str, Any]:
+        """Inicia la obtención de un certificado para un único RUC."""
+        ruc = re.sub(r"\D", "", str(ruc))
+        if len(ruc) != 13:
+            raise ValueError("El RUC debe contener exactamente 13 dígitos.")
+
+        with cls._single_lock:
+            actual = cls._single_status.get(ruc, {})
+            if actual.get("estado") in {"iniciando", "ejecutando"}:
+                return {
+                    "ruc": ruc,
+                    "estado": actual["estado"],
+                    "mensaje": "Ya existe una solicitud activa para este RUC.",
+                }
+            cls._single_status[ruc] = {
+                "ruc": ruc,
+                "estado": "iniciando",
+                "mensaje": "Conta recibió la solicitud y está preparando el navegador.",
+                "error": "",
+            }
+
+        thread = threading.Thread(
+            target=cls._procesar_uno,
+            args=(ruc,),
+            name=f"Conta-Certificado-RUC-{ruc}",
+            daemon=True,
+        )
+        thread.start()
+        logger.info("CERTIFICADO RUC INDIVIDUAL | solicitud aceptada | ruc=%s", ruc)
+        return {
+            "ruc": ruc,
+            "estado": "iniciando",
+            "mensaje": "Solicitud recibida por Conta. Se consultará el estado hasta confirmar el PDF.",
+        }
+
+    @classmethod
+    def estado_uno(cls, ruc: str) -> dict[str, Any]:
+        ruc = re.sub(r"\D", "", str(ruc))
+        with cls._single_lock:
+            estado = cls._single_status.get(ruc)
+            return dict(estado) if estado else {
+                "ruc": ruc,
+                "estado": "no_iniciado",
+                "mensaje": "No hay una solicitud registrada para este RUC.",
+                "error": "",
+            }
+
+    @classmethod
+    def _procesar_uno(cls, ruc: str) -> None:
+        with cls._single_lock:
+            cls._single_status[ruc].update({
+                "estado": "ejecutando",
+                "mensaje": "Conectando al SRI y solicitando el certificado PDF.",
+            })
+        try:
+            resultado = asyncio.run(cls.descargar_cliente(ruc))
+            with cls._single_lock:
+                cls._single_status[ruc].update({
+                    "estado": "completado",
+                    "mensaje": "Certificado de RUC obtenido y guardado correctamente.",
+                    "resultado": resultado,
+                    "error": "",
+                })
+            logger.info("CERTIFICADO RUC INDIVIDUAL OK | ruc=%s | resultado=%s", ruc, resultado)
+        except Exception as exc:
+            mensaje = f"{type(exc).__name__}: {exc}"
+            with cls._single_lock:
+                cls._single_status[ruc].update({
+                    "estado": "error",
+                    "mensaje": "No se pudo obtener o guardar el Certificado de RUC.",
+                    "error": mensaje,
+                })
+            logger.exception("CERTIFICADO RUC INDIVIDUAL ERROR | ruc=%s", ruc)
 
     @classmethod
     def iniciar_todos(cls) -> dict[str, Any]:
