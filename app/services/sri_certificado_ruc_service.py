@@ -383,10 +383,9 @@ class SriCertificadoRucService:
 
             logger.info("CERTIFICADO RUC | haciendo clic RUC | ruc=%s", ruc)
 
-            # El clic puede generar una descarga del navegador o una respuesta PDF
-            # inline. No debemos leer la respuesta HTML de opciones-certificado.jsf:
-            # ese documento puede navegar y Chromium pierde su body. Capturamos
-            # explícitamente la descarga o una respuesta cuyo Content-Type sea PDF.
+            # Capturar el cuerpo en la capa de routing ANTES de que Chromium navegue.
+            # response.body() puede fallar tras una navegación JSF; route.fetch()
+            # conserva el cuerpo de la respuesta original mientras se procesa la ruta.
             loop = asyncio.get_running_loop()
             resultado_pdf: asyncio.Future = loop.create_future()
 
@@ -415,38 +414,43 @@ class SriCertificadoRucService:
                 if not resultado_pdf.done():
                     asyncio.create_task(_guardar_descarga(download))
 
-            def _es_respuesta_pdf(response) -> bool:
+            async def _interceptar_respuesta_certificado(route) -> None:
+                request = route.request
                 try:
-                    content_type = response.headers.get("content-type", "").lower()
-                    disposition = response.headers.get("content-disposition", "").lower()
-                    return (
-                        response.request.method == "POST"
-                        and (
-                            "application/pdf" in content_type
-                            or ".pdf" in disposition
-                            or "filename=" in disposition and "pdf" in disposition
-                        )
-                    )
-                except Exception:
-                    return False
+                    # Esta ruta es solo para la acción POST de la pantalla JSF.
+                    if request.method.upper() != "POST":
+                        await route.continue_()
+                        return
 
-            async def _leer_respuesta_pdf(response) -> None:
-                if resultado_pdf.done():
-                    return
-                try:
+                    response = await route.fetch()
+                    headers = response.headers
+                    content_type = headers.get("content-type", "").lower()
+                    disposition = headers.get("content-disposition", "").lower()
                     cuerpo = await response.body()
-                    if not resultado_pdf.done():
+
+                    parece_pdf = (
+                        b"%PDF" in cuerpo[:1024]
+                        or "application/pdf" in content_type
+                        or ".pdf" in disposition
+                    )
+                    if parece_pdf and not resultado_pdf.done():
                         resultado_pdf.set_result(("response", response, cuerpo, None, None))
+
+                    # Devolver al navegador exactamente la respuesta original.
+                    await route.fulfill(response=response)
                 except Exception as exc:
                     if not resultado_pdf.done():
-                        resultado_pdf.set_result(("response", response, None, None, exc))
-
-            def _al_recibir_respuesta(response) -> None:
-                if _es_respuesta_pdf(response) and not resultado_pdf.done():
-                    asyncio.create_task(_leer_respuesta_pdf(response))
+                        resultado_pdf.set_result(("response", None, None, None, exc))
+                    try:
+                        await route.continue_()
+                    except Exception:
+                        pass
 
             page.on("download", _al_descargar)
-            page.on("response", _al_recibir_respuesta)
+            await page.route(
+                "**/sri-catastro-tributario-web-internet/pages/certificado/opciones-certificado.jsf**",
+                _interceptar_respuesta_certificado,
+            )
             try:
                 await ruc_button.click()
                 try:
@@ -456,14 +460,17 @@ class SriCertificadoRucService:
                     )
                 except asyncio.TimeoutError as exc:
                     raise RuntimeError(
-                        "El SRI no entregó un archivo PDF ni una respuesta application/pdf "
-                        "en 60 segundos después de seleccionar RUC. "
-                        f"URL actual={page.url!r}; título={await page.title()!r}."
+                        "El SRI no entregó un PDF ni inició una descarga en 60 segundos. "
+                        f"URL actual={page.url!r}; título={await page.title()!r}. "
+                        "La respuesta POST de la pantalla JSF fue interceptada, pero no contenía un PDF."
                     ) from exc
             finally:
                 try:
+                    await page.unroute(
+                        "**/sri-catastro-tributario-web-internet/pages/certificado/opciones-certificado.jsf**",
+                        _interceptar_respuesta_certificado,
+                    )
                     page.remove_listener("download", _al_descargar)
-                    page.remove_listener("response", _al_recibir_respuesta)
                 except Exception:
                     pass
 
