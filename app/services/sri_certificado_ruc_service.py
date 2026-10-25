@@ -416,41 +416,71 @@ class SriCertificadoRucService:
 
             async def _interceptar_respuesta_certificado(route) -> None:
                 request = route.request
+                response = None
                 try:
-                    # Esta ruta es solo para la acción POST de la pantalla JSF.
-                    if request.method.upper() != "POST":
-                        await route.continue_()
-                        return
-
+                    # Interceptar todos los recursos del módulo de certificados:
+                    # el POST de opciones JSF suele devolver HTML y el PDF puede
+                    # llegar después mediante otro GET o una descarga separada.
                     response = await route.fetch()
                     headers = response.headers
                     content_type = headers.get("content-type", "").lower()
                     disposition = headers.get("content-disposition", "").lower()
-                    cuerpo = await response.body()
+                    url_lower = request.url.lower()
+                    tipo_recurso = getattr(request, "resource_type", "")
 
+                    revisar_cuerpo = (
+                        "application/pdf" in content_type
+                        or "pdf" in disposition
+                        or (
+                            ("certificado" in url_lower or "ruc" in url_lower)
+                            and tipo_recurso in {"document", "xhr", "fetch"}
+                        )
+                    )
+                    cuerpo = await response.body() if revisar_cuerpo else b""
                     parece_pdf = (
-                        b"%PDF" in cuerpo[:1024]
+                        cuerpo.startswith(b"%PDF")
+                        or b"%PDF" in cuerpo[:1024]
                         or "application/pdf" in content_type
                         or ".pdf" in disposition
                     )
-                    if parece_pdf and not resultado_pdf.done():
-                        resultado_pdf.set_result(("response", response, cuerpo, None, None))
+                    if parece_pdf:
+                        # No asumir PDF solo por el header: validar firma real.
+                        if cuerpo and b"%PDF" in cuerpo[:1024]:
+                            if not resultado_pdf.done():
+                                resultado_pdf.set_result(("response", response, cuerpo, None, None))
+                            logger.info(
+                                "CERTIFICADO RUC | PDF interceptado antes de navegación | ruc=%s | método=%s | status=%s | url=%s | bytes=%s | content-type=%s",
+                                ruc, request.method, response.status, request.url, len(cuerpo), content_type,
+                            )
+                        else:
+                            logger.warning(
+                                "CERTIFICADO RUC | respuesta etiquetada PDF pero firma inválida | ruc=%s | url=%s | content-type=%s | bytes=%s",
+                                ruc, request.url, content_type, len(cuerpo),
+                            )
+                    elif tipo_recurso == "document" and ("certificado" in url_lower or "ruc" in url_lower):
+                        logger.info(
+                            "CERTIFICADO RUC | documento de certificados no PDF | ruc=%s | método=%s | status=%s | url=%s | content-type=%s",
+                            ruc, request.method, response.status, request.url, content_type,
+                        )
 
-                    # Devolver al navegador exactamente la respuesta original.
+                    # Devolver al navegador la respuesta original sin cambiar el flujo JSF.
                     await route.fulfill(response=response)
                 except Exception as exc:
-                    if not resultado_pdf.done():
-                        resultado_pdf.set_result(("response", None, None, None, exc))
+                    if not resultado_pdf.done() and (
+                        "certificado" in request.url.lower() or "ruc" in request.url.lower()
+                    ):
+                        logger.warning(
+                            "CERTIFICADO RUC | error al inspeccionar respuesta | ruc=%s | url=%s | error=%s",
+                            ruc, request.url, exc,
+                        )
                     try:
                         await route.continue_()
                     except Exception:
                         pass
 
             page.on("download", _al_descargar)
-            await page.route(
-                "**/sri-catastro-tributario-web-internet/pages/certificado/opciones-certificado.jsf**",
-                _interceptar_respuesta_certificado,
-            )
+            patron_rutas_certificado = "**/sri-catastro-tributario-web-internet/**"
+            await page.route(patron_rutas_certificado, _interceptar_respuesta_certificado)
             try:
                 await ruc_button.click()
                 try:
@@ -466,10 +496,7 @@ class SriCertificadoRucService:
                     ) from exc
             finally:
                 try:
-                    await page.unroute(
-                        "**/sri-catastro-tributario-web-internet/pages/certificado/opciones-certificado.jsf**",
-                        _interceptar_respuesta_certificado,
-                    )
+                    await page.unroute(patron_rutas_certificado, _interceptar_respuesta_certificado)
                     page.remove_listener("download", _al_descargar)
                 except Exception:
                     pass
