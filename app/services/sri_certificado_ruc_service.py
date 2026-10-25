@@ -389,19 +389,64 @@ class SriCertificadoRucService:
             # navegación termine y luego intentamos leerla, Chromium puede
             # eliminar el identificador de recurso y Playwright produce:
             # Network.getResponseBody: No resource with given identifier found.
-            async with page.expect_response(
-                lambda response: (
-                    response.request.method == "POST"
-                    and (
-                        "certificado" in response.url.lower()
-                        or "opciones-certificado" in response.url.lower()
-                    )
-                ),
-                timeout=60000,
-            ) as response_info:
-                await ruc_button.click()
+            loop = asyncio.get_running_loop()
+            respuesta_pdf: asyncio.Future = loop.create_future()
 
-            response = await response_info.value
+            def _es_respuesta_certificado(response) -> bool:
+                try:
+                    return (
+                        response.request.method == "POST"
+                        and (
+                            "certificado" in response.url.lower()
+                            or "opciones-certificado" in response.url.lower()
+                        )
+                    )
+                except Exception:
+                    return False
+
+            async def _leer_respuesta_antes_de_navegar(response) -> None:
+                if respuesta_pdf.done():
+                    return
+                try:
+                    # Leer el cuerpo desde el evento de respuesta, no después
+                    # de que el click termine la navegación JSF.
+                    cuerpo = await response.body()
+                    if not respuesta_pdf.done():
+                        respuesta_pdf.set_result((response, cuerpo, None))
+                except Exception as exc:
+                    if not respuesta_pdf.done():
+                        respuesta_pdf.set_result((response, None, exc))
+
+            def _al_recibir_respuesta(response) -> None:
+                if _es_respuesta_certificado(response) and not respuesta_pdf.done():
+                    asyncio.create_task(_leer_respuesta_antes_de_navegar(response))
+
+            page.on("response", _al_recibir_respuesta)
+            try:
+                await ruc_button.click()
+                try:
+                    response, contenido, error_cuerpo = await asyncio.wait_for(
+                        asyncio.shield(respuesta_pdf),
+                        timeout=60000,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(
+                        "El SRI no devolvió una respuesta de certificado en 60 segundos "
+                        "después de seleccionar RUC."
+                    ) from exc
+            finally:
+                try:
+                    page.remove_listener("response", _al_recibir_respuesta)
+                except Exception:
+                    pass
+
+            if error_cuerpo is not None or contenido is None:
+                raise RuntimeError(
+                    "El SRI respondió, pero Chromium descartó el cuerpo durante la navegación. "
+                    f"URL={response.url!r}; HTTP={response.status}; "
+                    f"detalle={error_cuerpo!s}. "
+                    "Se debe capturar el PDF como descarga del navegador o interceptar la respuesta antes de navegar."
+                ) from error_cuerpo
 
             logger.info(
                 "CERTIFICADO RUC | respuesta HTTP recibida | ruc=%s | status=%s | url=%s | content-type=%s",
@@ -415,10 +460,6 @@ class SriCertificadoRucService:
                 raise RuntimeError(
                     f"El SRI respondió HTTP {response.status} al solicitar el Certificado de RUC."
                 )
-
-            # Leer el body inmediatamente, antes de que una navegación posterior
-            # haga que Chromium descarte el recurso.
-            contenido = await response.body()
 
             if not contenido.startswith(b"%PDF"):
                 # Algunas instalaciones del SRI pueden devolver una redirección
