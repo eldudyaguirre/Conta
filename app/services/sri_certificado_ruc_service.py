@@ -383,26 +383,92 @@ class SriCertificadoRucService:
 
             logger.info("CERTIFICADO RUC | haciendo clic RUC | ruc=%s", ruc)
 
-            # El HAR de una consulta exitosa confirma que el POST JSF devuelve
-            # directamente application/pdf con Content-Disposition: attachment.
-            # Dejar que Chromium gestione esa descarga evita perder el body al navegar.
-            response = None
-            origen = "download"
+            # Diagnosticar la respuesta del SRI sin registrar cuerpos ni datos de sesión.
+            # En Chrome conectado por CDP, habilitar descargas explícitamente para esta pestaña.
+            respuestas_sri: list[dict[str, Any]] = []
+
+            async def _registrar_respuesta_sri(resp) -> None:
+                try:
+                    if "srienlinea.sri.gob.ec" not in resp.url:
+                        return
+                    headers = resp.headers
+                    detalle = {
+                        "status": resp.status,
+                        "method": resp.request.method,
+                        "url": resp.url[:240],
+                        "content_type": headers.get("content-type", ""),
+                        "content_disposition": headers.get("content-disposition", ""),
+                    }
+                    respuestas_sri.append(detalle)
+                    if len(respuestas_sri) > 20:
+                        del respuestas_sri[:-20]
+                    logger.info(
+                        "CERTIFICADO RUC | respuesta SRI | ruc=%s | status=%s | method=%s | "
+                        "content_type=%s | content_disposition=%s | url=%s",
+                        ruc, detalle["status"], detalle["method"],
+                        detalle["content_type"], detalle["content_disposition"], detalle["url"],
+                    )
+                except Exception:
+                    logger.debug("No se pudo registrar una respuesta de red del SRI", exc_info=True)
+
+            cdp_session = None
+            page.on("response", _registrar_respuesta_sri)
             try:
+                try:
+                    cdp_session = await context.new_cdp_session(page)
+                    await cdp_session.send(
+                        "Page.setDownloadBehavior",
+                        {
+                            "behavior": "allow",
+                            "downloadPath": tempfile.gettempdir(),
+                        },
+                    )
+                    logger.info(
+                        "CERTIFICADO RUC | descargas habilitadas por CDP | ruc=%s",
+                        ruc,
+                    )
+                except Exception as cdp_exc:
+                    logger.warning(
+                        "CERTIFICADO RUC | no se pudo configurar descarga por CDP | ruc=%s | error=%s: %s",
+                        ruc, type(cdp_exc).__name__, cdp_exc,
+                    )
+                    if cdp_session is not None:
+                        try:
+                            await cdp_session.detach()
+                        except Exception:
+                            pass
+                        cdp_session = None
+
                 async with page.expect_download(timeout=60000) as descarga_pendiente:
                     await ruc_button.click()
                 descarga = await descarga_pendiente.value
             except Exception as exc:
+                page.remove_listener("response", _registrar_respuesta_sri)
+                if cdp_session is not None:
+                    try:
+                        await cdp_session.detach()
+                    except Exception:
+                        pass
+                resumen_respuestas = respuestas_sri[-10:]
                 raise RuntimeError(
                     "El SRI no inició una descarga de certificado en 60 segundos. "
-                    f"URL actual={page.url!r}; título={await page.title()!r}. "
+                    f"URL actual={page.url!r}; título={await page.title()!r}; "
+                    f"últimas respuestas HTTP del SRI={resumen_respuestas!r}. "
                     "No se realizó otra consulta automáticamente para evitar consumir intentos del SRI."
                 ) from exc
+            else:
+                page.remove_listener("response", _registrar_respuesta_sri)
+                if cdp_session is not None:
+                    try:
+                        await cdp_session.detach()
+                    except Exception:
+                        logger.debug("No se pudo cerrar la sesión CDP de diagnóstico", exc_info=True)
 
             nombre_descarga = descarga.suggested_filename or f"certificado_ruc_{ruc}.pdf"
+            fallo_descarga = await descarga.failure()
             logger.info(
                 "CERTIFICADO RUC | descarga iniciada por Chromium | ruc=%s | nombre=%s | failure=%s",
-                ruc, nombre_descarga, descarga.failure(),
+                ruc, nombre_descarga, fallo_descarga,
             )
 
             with tempfile.NamedTemporaryFile(
