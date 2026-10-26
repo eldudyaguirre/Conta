@@ -3952,20 +3952,76 @@ class SriClienteSyncService:
                 + diagnostico
             )
 
+        # Instrumentación temporal: registra únicamente metadatos HTTP de la
+        # consulta. No registra cookies, credenciales, cuerpos POST ni tokens CAPTCHA.
+        from urllib.parse import urlsplit
+
+        solicitudes_consulta = {}
+
+        def _es_peticion_consulta(request):
+            try:
+                partes = urlsplit(request.url)
+                return (
+                    partes.hostname == "srienlinea.sri.gob.ec"
+                    and "comprobantesRecibidos" in partes.path
+                )
+            except Exception:
+                return False
+
+        def _registrar_solicitud(request):
+            if not _es_peticion_consulta(request):
+                return
+            try:
+                partes = urlsplit(request.url)
+                cabeceras = request.headers
+                ajax = (
+                    cabeceras.get("x-requested-with", "").lower() == "xmlhttprequest"
+                    or "javax.faces.partial.ajax" in (request.post_data or "")
+                )
+                solicitudes_consulta[id(request)] = {"ajax": ajax}
+                logger.info(
+                    "SRI HTTP DIAG | solicitud consulta recibidos | metodo=%s | ruta=%s | ajax=%s | recurso=%s",
+                    request.method, partes.path, ajax, request.resource_type,
+                )
+            except Exception as exc:
+                logger.debug("SRI HTTP DIAG | no se pudo registrar solicitud | error=%s", type(exc).__name__)
+
+        async def _registrar_respuesta(response):
+            request = response.request
+            if not _es_peticion_consulta(request):
+                return
+            try:
+                partes = urlsplit(response.url)
+                tipo = response.headers.get("content-type", "").split(";")[0]
+                logger.info(
+                    "SRI HTTP DIAG | respuesta consulta recibidos | metodo=%s | ruta=%s | estado=%s | ok=%s | content_type=%s | ajax=%s",
+                    request.method, partes.path, response.status, response.ok,
+                    tipo, solicitudes_consulta.get(id(request), {}).get("ajax", False),
+                )
+            except Exception as exc:
+                logger.debug("SRI HTTP DIAG | no se pudo registrar respuesta | error=%s", type(exc).__name__)
+
+        page.on("request", _registrar_solicitud)
+        page.on("response", _registrar_respuesta)
+
         # Ejecutamos el click real sobre el botón oficial. Esto permite que
         # el JavaScript del SRI genere el token reCAPTCHA justo antes de la
         # petición AJAX definitiva.
         try:
             await boton.scroll_into_view_if_needed()
             await boton.click(force=True)
+            filas = await esperar_resultado(segundos=45)
         except Exception as exc:
+            if isinstance(exc, RuntimeError):
+                raise
             diagnostico = await cls._diagnostico_consulta(page)
             raise RuntimeError(
-                "No fue posible ejecutar el botón Consultar del SRI. "
+                "No fue posible ejecutar/esperar la consulta del SRI. "
                 + diagnostico
             ) from exc
-
-        filas = await esperar_resultado(segundos=45)
+        finally:
+            page.remove_listener("request", _registrar_solicitud)
+            page.remove_listener("response", _registrar_respuesta)
         if filas <= 0:
             # El SRI puede responder correctamente con una tabla vacía cuando
             # no existen comprobantes para el año/mes/tipo solicitado.
