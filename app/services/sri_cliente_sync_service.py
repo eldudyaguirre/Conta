@@ -3970,7 +3970,7 @@ class SriClienteSyncService:
             try:
                 sri_http_log.parent.mkdir(parents=True, exist_ok=True)
                 detalle = mensaje % args if args else mensaje
-                linea = f"{datetime.now().isoformat(timespec='milliseconds')} | SRI HTTP DIAG | {detalle}\\n"
+                linea = f"{datetime.now().isoformat(timespec='milliseconds')} | SRI HTTP DIAG | {detalle}\n"
                 with sri_http_log.open("a", encoding="utf-8") as fh:
                     fh.write(linea)
             except Exception as exc:
