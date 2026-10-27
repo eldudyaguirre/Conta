@@ -4065,12 +4065,14 @@ class SriClienteSyncService:
         page.on("response", _registrar_respuesta)
         page.on("requestfailed", _registrar_fallo_solicitud)
 
-        # Ejecutamos el click real sobre el botón oficial. Esto permite que
-        # el JavaScript del SRI genere el token reCAPTCHA justo antes de la
-        # petición AJAX definitiva.
+        # Usar el clic normal de Playwright, sin force=True. El modo force
+        # omite comprobaciones de interactividad y podría activar el botón
+        # aunque un overlay/componente del SRI impida la interacción normal.
+        # Dejamos que el JavaScript oficial gestione reCAPTCHA y la secuencia
+        # AJAX; no invocamos rcBuscar() ni fabricamos/reutilizamos tokens.
         try:
             await boton.scroll_into_view_if_needed()
-            await boton.click(force=True)
+            await boton.click(timeout=15000)
             filas = await esperar_resultado(segundos=45)
         except Exception as exc:
             if isinstance(exc, RuntimeError):
