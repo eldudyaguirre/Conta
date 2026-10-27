@@ -4004,6 +4004,42 @@ class SriClienteSyncService:
                     request.method, partes.path, response.status, response.ok,
                     tipo, solicitudes_consulta.get(id(request), {}).get("ajax", False),
                 )
+
+                # En JSF/PrimeFaces un HTTP 200 puede contener un rechazo funcional.
+                # Leer solo la respuesta XML de esta petición y registrar metadatos
+                # seguros: nunca guardar el cuerpo completo, cookies ni tokens.
+                if request.method.upper() == "POST" and "xml" in tipo.lower():
+                    try:
+                        cuerpo = await response.text()
+                        import html
+                        import re
+
+                        ids_update = re.findall(
+                            r'<update\\s+id=["\\']([^"\\']+)["\\']',
+                            cuerpo,
+                            flags=re.IGNORECASE,
+                        )
+                        texto_plano = html.unescape(re.sub(r"<[^>]*>", " ", cuerpo))
+                        texto_plano = " ".join(texto_plano.split()).casefold()
+                        marcadores = (
+                            "captcha incorrecta",
+                            "captcha inválida",
+                            "captcha invalida",
+                            "error de captcha",
+                            "no existen datos",
+                            "tabla de comprobantes",
+                        )
+                        encontrados = [m for m in marcadores if m in texto_plano]
+                        _escribir_http_diag(
+                            "RESUMEN XML | ruta=%s | bytes=%s | update_ids=%s | marcadores=%s",
+                            partes.path, len(cuerpo.encode("utf-8", errors="replace")),
+                            ids_update[:30], encontrados,
+                        )
+                    except Exception as exc_xml:
+                        _escribir_http_diag(
+                            "RESUMEN XML NO DISPONIBLE | ruta=%s | tipo=%s",
+                            partes.path, type(exc_xml).__name__,
+                        )
             except Exception as exc:
                 _escribir_http_diag("ERROR REGISTRANDO RESPUESTA | tipo=%s", type(exc).__name__)
 
