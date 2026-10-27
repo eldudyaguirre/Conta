@@ -324,9 +324,11 @@ class SriClienteSyncService:
             )
             estado_error = "error"
             mensaje_error = (
-                "El SRI rechazó el CAPTCHA. Conta no reintentó automáticamente y "
-                "cerró esta sesión para evitar reutilizar un token rechazado. "
-                "Revise el acceso al SRI y vuelva a iniciar la sincronización."
+                "El SRI rechazó la validación automática reCAPTCHA; no es un reto visual "
+                "que el usuario pueda resolver con una imagen. La consulta se detuvo "
+                "y el navegador se cerró al finalizar el trabajo. Revise "
+                "logs/sri_http_diag.log: ahora registra si la petición AJAX envió "
+                "un campo reCAPTCHA y su longitud, nunca el token."
                 if es_captcha else f"{type(exc).__name__}: {exc}"
             )
             try:
@@ -3647,7 +3649,7 @@ class SriClienteSyncService:
                         "La consulta de comprobantes recibidos superó "
                         f"{timeout_seconds} segundos. El trabajo se cerrará para "
                         "liberar Chrome y permitir continuar con otros clientes. "
-                        "Verifique el CAPTCHA del SRI y vuelva a intentar."
+                        "Revise logs/sri_http_diag.log para comprobar si la petición AJAX envió el campo de reCAPTCHA."
                     )
                 await asyncio.wait({tarea}, timeout=min(2.0, restante))
             return await tarea
@@ -3979,7 +3981,7 @@ class SriClienteSyncService:
         # Diagnóstico HTTP persistente para producción.
         # Registra metadatos de tráfico al dominio del SRI durante la consulta,
         # sin registrar cuerpos, cookies, cabeceras de autorización ni tokens CAPTCHA.
-        from urllib.parse import urlsplit
+        from urllib.parse import parse_qsl, urlsplit
 
         solicitudes_consulta = {}
         sri_http_log = Path(__file__).resolve().parents[2] / "logs" / "sri_http_diag.log"
@@ -4006,13 +4008,37 @@ class SriClienteSyncService:
                 return
             try:
                 partes = urlsplit(request.url)
-                # No leer ni escribir request.post_data ni cabeceras sensibles.
                 ajax = request.headers.get("x-requested-with", "").lower() == "xmlhttprequest"
                 solicitudes_consulta[id(request)] = {"ajax": ajax}
                 _escribir_http_diag(
                     "SOLICITUD | metodo=%s | ruta=%s | recurso=%s | ajax=%s",
                     request.method, partes.path, request.resource_type, ajax,
                 )
+                # Para el POST de comprobantes recibidos, inspeccionamos únicamente
+                # nombres de campos y longitud de los campos reCAPTCHA. Nunca se
+                # registra el valor del token, cookies, clave ni datos del formulario.
+                if request.method.upper() == "POST" and "comprobantesRecibidos.jsf" in partes.path:
+                    try:
+                        pares = parse_qsl(request.post_data or "", keep_blank_values=True, max_num_fields=500)
+                        campos_recaptcha = [
+                            (nombre, len(valor))
+                            for nombre, valor in pares
+                            if "captcha" in nombre.casefold() or "recaptcha" in nombre.casefold()
+                        ]
+                        nombres = sorted({nombre for nombre, _ in pares})
+                        _escribir_http_diag(
+                            "POST RECIBIDOS | campos_formulario=%s | campos_recaptcha=%s | "
+                            "recaptcha_presente=%s | longitudes_recaptcha=%s",
+                            nombres,
+                            [nombre for nombre, _ in campos_recaptcha],
+                            bool(campos_recaptcha),
+                            [longitud for _, longitud in campos_recaptcha],
+                        )
+                    except Exception as exc_payload:
+                        _escribir_http_diag(
+                            "POST RECIBIDOS | no se pudo analizar nombres de campos | tipo=%s",
+                            type(exc_payload).__name__,
+                        )
             except Exception as exc:
                 _escribir_http_diag("ERROR REGISTRANDO SOLICITUD | tipo=%s", type(exc).__name__)
 
@@ -4273,7 +4299,7 @@ class SriClienteSyncService:
         try:
             cls._job_update(job_id, mensaje="Abriendo sesión del SRI.")
             p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"])
-            cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI. Si aparece CAPTCHA, resuélvalo en Chromium.")
+            cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI y ejecutando la validación automática reCAPTCHA. No se espera un reto visual.")
             if operacion in ("ventas", "ventas_reparar", "notas_credito_emitidas", "retenciones_emitidas"):
                 await cls._consultar_emitidos(
                     page,
