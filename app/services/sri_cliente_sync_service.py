@@ -297,6 +297,7 @@ class SriClienteSyncService:
                 estado_final = "finalizado"
                 mensaje_final = mensaje_base
                 logger.info("Trabajo SRI finalizado correctamente | %s", contexto)
+
             resultado_final["estado"] = estado_final
             resultado_final["mensaje"] = mensaje_final
             cls._job_update(job_id, **resultado_final)
@@ -596,7 +597,8 @@ class SriClienteSyncService:
     def _parsear_xml(cls, path: Path) -> dict[str, Any]:
         root = ET.parse(path).getroot()
         raw = root.findtext("comprobante")
-        if not raw:            raise ValueError("El XML no contiene comprobante.")
+        if not raw:
+            raise ValueError("El XML no contiene comprobante.")
         doc = ET.fromstring(raw)
         it = doc.find("infoTributaria")
         cod_doc = cls._txt(it, "codDoc")
@@ -895,7 +897,8 @@ class SriClienteSyncService:
             sock.bind(("127.0.0.1", 0))
             return int(sock.getsockname()[1])
 
-    @staticmethod    def _puerto_cdp_perfil_activo(profile_dir: Path) -> int | None:
+    @staticmethod
+    def _puerto_cdp_perfil_activo(profile_dir: Path) -> int | None:
         """Detecta Chrome ya abierto con este perfil y devuelve su puerto CDP."""
         if os.name != "nt":
             return None
@@ -1194,7 +1197,8 @@ class SriClienteSyncService:
                 log_path=chrome_log_path,
             )
 
-            browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")            context = browser.contexts[0]
+            browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+            context = browser.contexts[0]
             page = context.pages[0] if context.pages else await context.new_page()
 
             # No usamos evasión de automatización. Chrome real + CDP es el navegador
@@ -1493,7 +1497,8 @@ class SriClienteSyncService:
                         "porcentaje" in normalizados or tiene_codigo_porcentaje
                     ):
                         indice_encabezado = indice
-                        encabezados = normalizados                        break
+                        encabezados = normalizados
+                        break
 
             if indice_encabezado is None:
                 continue
@@ -1793,6 +1798,7 @@ class SriClienteSyncService:
                 if abs(esperado - iva_generico) <= Decimal("0.02"):
                     tasa_detectada = tasa
                     break
+
             if tasa_detectada:
                 bases_iva[tasa_detectada] = subtotal_generico
                 ivas[tasa_detectada] = iva_generico
@@ -2091,7 +2097,8 @@ class SriClienteSyncService:
 
         for tabla in tablas_detalle:
             filas = tabla.find_all("tr")
-            encabezado_idx = None            idx = None
+            encabezado_idx = None
+            idx = None
 
             for pos, fila in enumerate(filas):
                 headers = [norm(txt(x)) for x in fila.find_all(["td", "th"])]
@@ -2391,6 +2398,7 @@ class SriClienteSyncService:
                         break
                 if seleccionado:
                     break
+
             if not seleccionado:
                 etiqueta = "Notas de crédito" if tipo_emitido == "nota_credito" else "Comprobante de Retención"
                 raise RuntimeError(
@@ -2689,7 +2697,8 @@ class SriClienteSyncService:
                     or aria == "true"
                     or "ui-state-disabled" in clases
                     or "disabled" in clases
-                ):                    return
+                ):
+                    return
 
                 primera_antes = ""
                 try:
@@ -2988,7 +2997,8 @@ class SriClienteSyncService:
                         else:
                             cls._insertar_venta(db, factura, codcomp=codcomp)
                         db.commit()
-                        result["descargadas"] += 1                        result["guardadas"] += 1
+                        result["descargadas"] += 1
+                        result["guardadas"] += 1
 
                         cls._job_update(
                             job_id,
@@ -3287,7 +3297,8 @@ class SriClienteSyncService:
             cls._iva_debug_log(
                 "RETENCION EMITIDA | UPDATE | compra=%s | retencion=%s | "
                 "doc_sustento=%s | ruc=%s | "
-                "numestret=%s | numptoemiret=%s | numsecret=%s | "                "codret=%s | base=%s | porret=%s | valret=%s | "
+                "numestret=%s | numptoemiret=%s | numsecret=%s | "
+                "codret=%s | base=%s | porret=%s | valret=%s | "
                 "iva10=%s | iva20=%s | iva30=%s | iva70=%s | iva100=%s",
                 row["numcompra"],
                 numret,
@@ -3586,7 +3597,8 @@ class SriClienteSyncService:
             "nomcli": factura["razon_social"],
             "tipid": factura["tipid"],
             "codcomp": codcomp,
-            "numemi": "1",            "basenoobj": factura["base_no_objeto"],
+            "numemi": "1",
+            "basenoobj": factura["base_no_objeto"],
             "baseiva0": factura["base_iva0"],
             "baseiva12": b["12"],
             "baseiva5": b["5"],
@@ -3909,7 +3921,8 @@ class SriClienteSyncService:
                 await page.goto(
                     cls.RECIBIDOS_URL,
                     wait_until="domcontentloaded",
-                    timeout=30000,                )
+                    timeout=30000,
+                )
             except PlaywrightTimeoutError:
                 # Una navegación que excede el timeout puede haber terminado
                 # parcialmente; verificamos el DOM antes de descartarla.
@@ -4208,7 +4221,8 @@ class SriClienteSyncService:
                 f"opciones_tipo={opciones_tipo!r}; parametros={parametros!r}; "
                 f"formulario={formulario!r}; botones={boton_estado!r}; "
                 f"mensajes={mensajes!r}; captcha_elementos={captcha}; texto={body!r}"
-            )        except Exception as exc:
+            )
+        except Exception as exc:
             return f"Diagnóstico adicional no disponible: {exc}"
 
     @classmethod
@@ -4507,7 +4521,8 @@ class SriClienteSyncService:
                                 "num_retencion": numero_retencion,
                                 "proveedor_retencion": proveedor_retencion,
                                 "factura_sustento": factura_sustento,
-                                "detalle": str(exc),                            })
+                                "detalle": str(exc),
+                            })
                             cls._job_update(
                                 job_id,
                                 errores=result["errores"],
@@ -4806,7 +4821,8 @@ class SriClienteSyncService:
         numsecmod = str(factura.get("numsecmod") or "").strip()
         ruc = str(factura.get("ruc") or "").strip()
 
-        numautmod = "9999999999"        if numestmod and numptoemimod and numsecmod and ruc:
+        numautmod = "9999999999"
+        if numestmod and numptoemimod and numsecmod and ruc:
             original = db.execute(text("""
                 SELECT numaut
                 FROM comprasnue
