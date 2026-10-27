@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import subprocess
+import shutil
 import time
 import urllib.request
 import tempfile
@@ -1005,16 +1006,46 @@ class SriClienteSyncService:
         )
 
     @staticmethod
-    def _cerrar_chrome(chrome_process) -> None:
-        """Cierra el árbol de Chrome iniciado por Conta sin afectar otros Chrome."""
-        if chrome_process is None:
-            return
+    def _cerrar_chrome(chrome_process, profile_dir: Path | str | None = None) -> None:
+        """Cierra solo los procesos Chrome que pertenecen al perfil temporal de Conta."""
+        pid = getattr(chrome_process, "pid", None) if chrome_process is not None else None
+        perfil = ""
+        if profile_dir:
+            try:
+                perfil = str(Path(profile_dir).resolve())
+            except Exception:
+                perfil = str(profile_dir)
 
-        pid = getattr(chrome_process, "pid", None)
-
-        # En Windows, finalizar primero el árbol evita dejar procesos renderer/GPU
-        # huérfanos cuando el proceso principal lanzado por Popen ya terminó.
-        if os.name == "nt" and pid:
+        # En Windows, el chrome.exe lanzador puede terminar antes que el proceso
+        # navegador. Por eso no basta con taskkill sobre el PID de Popen: usamos
+        # el perfil único del trabajo para localizar y cerrar únicamente ese Chrome.
+        if os.name == "nt" and perfil:
+            perfil_ps = perfil.replace("'", "''")
+            script = (
+                "$perfil = '" + perfil_ps + "'; "
+                "$procesos = Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" "
+                "| Where-Object { $_.CommandLine -and "
+                "$_.CommandLine.IndexOf($perfil, [StringComparison]::OrdinalIgnoreCase) -ge 0 }; "
+                "foreach ($proceso in $procesos) { "
+                "try { & taskkill.exe /PID $proceso.ProcessId /T /F | Out-Null } catch {} }"
+            )
+            try:
+                subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=15,
+                )
+            except Exception:
+                logger.warning(
+                    "No se pudo cerrar Chrome por perfil temporal %s.",
+                    perfil,
+                    exc_info=True,
+                )
+        elif os.name == "nt" and pid:
+            # Respaldo para llamadas sin perfil: se limita al proceso creado por
+            # Popen y a su árbol, nunca a todos los procesos chrome.exe.
             try:
                 subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
@@ -1024,57 +1055,44 @@ class SriClienteSyncService:
                     timeout=10,
                 )
             except Exception:
-                logger.debug(
-                    "No se pudo finalizar inicialmente el árbol de Chrome PID %s.",
-                    pid,
-                    exc_info=True,
-                )
+                logger.debug("No se pudo cerrar el árbol Chrome PID %s.", pid, exc_info=True)
 
-        try:
-            chrome_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        if chrome_process is not None:
             try:
-                chrome_process.terminate()
                 chrome_process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 try:
-                    chrome_process.kill()
-                    chrome_process.wait(timeout=3)
+                    chrome_process.terminate()
+                    chrome_process.wait(timeout=2)
                 except Exception:
-                    logger.warning(
-                        "No se pudo confirmar el cierre del proceso Chrome PID %s.",
-                        pid,
-                        exc_info=True,
-                    )
+                    try:
+                        chrome_process.kill()
+                        chrome_process.wait(timeout=2)
+                    except Exception:
+                        logger.debug("No se pudo esperar el cierre de Chrome PID %s.", pid, exc_info=True)
             except Exception:
-                logger.warning(
-                    "Error al terminar Chrome PID %s.",
-                    pid,
-                    exc_info=True,
-                )
-        except Exception:
-            logger.debug(
-                "Error esperando el cierre de Chrome PID %s.",
-                pid,
-                exc_info=True,
-            )
+                logger.debug("Error esperando el proceso Chrome PID %s.", pid, exc_info=True)
 
-        # Segunda pasada como respaldo, limitada al PID que abrió Conta.
-        if os.name == "nt" and pid:
-            try:
-                subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    timeout=10,
-                )
-            except Exception:
-                logger.debug(
-                    "No se pudo completar la limpieza del árbol Chrome PID %s.",
-                    pid,
-                    exc_info=True,
-                )
+    @staticmethod
+    def _eliminar_perfil_chrome(profile_dir: Path | str | None) -> None:
+        """Elimina solo el perfil temporal y único creado por una tarea de Conta."""
+        if not profile_dir:
+            return
+        try:
+            profile = Path(profile_dir).resolve()
+            profile_root = str(settings.SRI_USER_DATA_DIR or "").strip()
+            if not profile_root:
+                profile_root = str(Path.cwd() / "sri_profiles")
+            root = Path(profile_root).resolve()
+
+            # Guardia: no borrar perfiles persistentes ni rutas fuera del directorio
+            # configurado. Solo se eliminan los directorios temporales de Conta.
+            if profile.parent != root or not profile.name.startswith("conta_sri_"):
+                logger.warning("Se conserva un perfil Chrome fuera del patrón temporal: %s", profile)
+                return
+            shutil.rmtree(profile, ignore_errors=True)
+        except Exception:
+            logger.warning("No se pudo eliminar el perfil temporal de Chrome.", exc_info=True)
 
     @classmethod
     async def _cerrar_sesion_sri(cls, page, context) -> None:
@@ -1135,62 +1153,56 @@ class SriClienteSyncService:
         if not profile_root:
             profile_root = str(Path.cwd() / "sri_profiles")
 
-        profile_dir = Path(profile_root) / (f"{ruc}_chrome_retry_{uuid.uuid4().hex}" if perfil_aislado else f"{ruc}_chrome")
-        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_root_path = Path(profile_root).resolve()
+        profile_root_path.mkdir(parents=True, exist_ok=True)
+        sufijo_perfil = "retry" if perfil_aislado else "job"
+        profile_dir = profile_root_path / f"conta_sri_{sufijo_perfil}_{uuid.uuid4().hex}"
+        profile_dir.mkdir(parents=False, exist_ok=False)
 
+        # Cada trabajo obtiene un puerto CDP libre y un perfil exclusivo. No
+        # conectar con Chrome anterior evita mezclar sesiones SRI ni dejar ventanas
+        # abiertas pertenecientes a ejecuciones antiguas.
         puerto_preferido = int(settings.SRI_CDP_PORT or 9222)
-        port = cls._puerto_cdp_perfil_activo(profile_dir)
-        reutilizando_chrome = port is not None
-
-        if reutilizando_chrome:
-            logging.getLogger("conta.sri").info(
-                "Reutilizando Chrome existente para RUC %s en puerto CDP %s (perfil %s).",
-                ruc,
+        port = cls._puerto_cdp_disponible(puerto_preferido)
+        if port != puerto_preferido:
+            logging.getLogger("conta.sri").warning(
+                "Puerto CDP %s ocupado; usando puerto disponible %s para RUC %s.",
+                puerto_preferido,
                 port,
-                profile_dir,
+                ruc,
             )
-        else:
-            port = cls._puerto_cdp_disponible(puerto_preferido)
-            if port != puerto_preferido:
-                logging.getLogger("conta.sri").warning(
-                    "Puerto CDP %s ocupado; usando puerto disponible %s para RUC %s.",
-                    puerto_preferido,
-                    port,
-                    ruc,
-                )
 
         try:
             chrome_log_path = Path(__file__).resolve().parents[2] / "logs" / "sri_chrome_cdp.log"
             chrome_log_path.parent.mkdir(parents=True, exist_ok=True)
 
-            if not reutilizando_chrome:
-                chrome_path = cls._chrome_executable()
-                args = [
-                    chrome_path,
-                    f"--user-data-dir={profile_dir}",
-                    f"--remote-debugging-port={port}",
-                    "--remote-debugging-address=127.0.0.1",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--lang=es-EC",
-                    "--window-size=1366,900",
-                ]
-                # En producción, ejecutar Chrome oculto salvo que SRI_HEADLESS=False
-                # esté configurado explícitamente para depuración interactiva.
-                if settings.SRI_HEADLESS:
-                    args.append("--headless=new")
+            chrome_path = cls._chrome_executable()
+            args = [
+                chrome_path,
+                f"--user-data-dir={profile_dir}",
+                f"--remote-debugging-port={port}",
+                "--remote-debugging-address=127.0.0.1",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--lang=es-EC",
+                "--window-size=1366,900",
+            ]
+            # En producción, ejecutar Chrome oculto salvo que SRI_HEADLESS=False
+            # esté configurado explícitamente para depuración interactiva.
+            if settings.SRI_HEADLESS:
+                args.append("--headless=new")
 
-                with chrome_log_path.open("ab") as chrome_log:
-                    chrome_log.write(
-                        f"\n--- Inicio Chrome SRI {datetime.now().isoformat(timespec='seconds')} "
-                        f"| RUC={ruc} | puerto={port} | perfil={profile_dir} ---\n".encode("utf-8")
-                    )
-                    chrome_process = subprocess.Popen(
-                        args,
-                        cwd=str(profile_dir),
-                        stdout=chrome_log,
-                        stderr=subprocess.STDOUT,
-                    )
+            with chrome_log_path.open("ab") as chrome_log:
+                chrome_log.write(
+                    f"\n--- Inicio Chrome SRI {datetime.now().isoformat(timespec='seconds')} "
+                    f"| RUC={ruc} | puerto={port} | perfil={profile_dir} ---\n".encode("utf-8")
+                )
+                chrome_process = subprocess.Popen(
+                    args,
+                    cwd=str(profile_dir),
+                    stdout=chrome_log,
+                    stderr=subprocess.STDOUT,
+                )
 
             await cls._esperar_cdp(
                 port,
@@ -1213,10 +1225,10 @@ class SriClienteSyncService:
                     timeout=settings.SRI_NAVIGATION_TIMEOUT_MS,
                 )
                 if "perfil" not in page.url and "login" not in page.url.lower():
-                    return p, browser, context, page, chrome_process
+                    return p, browser, context, page, chrome_process, profile_dir
             except PlaywrightTimeoutError:
                 if page.url != "about:blank" and "perfil" not in page.url and "login" not in page.url.lower():
-                    return p, browser, context, page, chrome_process
+                    return p, browser, context, page, chrome_process, profile_dir
 
             try:
                 await page.goto(
@@ -1364,7 +1376,7 @@ class SriClienteSyncService:
                     or "comprobantes-electronicos-internet" in url_actual
                     or "perfil" in url_actual
                 ):
-                    return p, browser, context, page, chrome_process
+                    return p, browser, context, page, chrome_process, profile_dir
 
             raise RuntimeError(
                 "El SRI autenticó la sesión pero no permitió acceder al portal "
@@ -1382,7 +1394,8 @@ class SriClienteSyncService:
                     await context.close()
                 except Exception:
                     pass
-            cls._cerrar_chrome(chrome_process)
+            cls._cerrar_chrome(chrome_process, profile_dir)
+            cls._eliminar_perfil_chrome(profile_dir)
             await p.stop()
             raise
 
@@ -4289,7 +4302,7 @@ class SriClienteSyncService:
             ruc, anio, mes, tipo_comprobante, operacion, str(Path(__file__).resolve()),
         )
         cred = cls._credenciales(ruc)
-        p = browser = context = page = chrome_process = None
+        p = browser = context = page = chrome_process = profile_dir = None
         result = {
             "ruc": ruc, "cliente": cred["nombre"], "anio": anio, "mes": mes,
             "tipo_comprobante": cls._tipo(tipo_comprobante),
@@ -4298,7 +4311,7 @@ class SriClienteSyncService:
         }
         try:
             cls._job_update(job_id, mensaje="Abriendo sesión del SRI.")
-            p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"])
+            p, browser, context, page, chrome_process, profile_dir = await cls._login(ruc, cred["clave"])
             cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI y ejecutando la validación automática reCAPTCHA. No se espera un reto visual.")
             if operacion in ("ventas", "ventas_reparar", "notas_credito_emitidas", "retenciones_emitidas"):
                 await cls._consultar_emitidos(
@@ -4337,7 +4350,8 @@ class SriClienteSyncService:
                     except Exception:
                         pass
                     try:
-                        cls._cerrar_chrome(chrome_process)
+                        cls._cerrar_chrome(chrome_process, profile_dir)
+                        cls._eliminar_perfil_chrome(profile_dir)
                     except Exception as cleanup_exc:
                         logger.warning("SRI RECIBIDOS | error cerrando Chrome anterior: %s", cleanup_exc)
                     try:
@@ -4346,13 +4360,13 @@ class SriClienteSyncService:
                     except Exception:
                         pass
 
-                    p = browser = context = page = chrome_process = None
+                    p = browser = context = page = chrome_process = profile_dir = None
                     cls._job_update(
                         job_id,
                         estado="captcha",
                         mensaje="El SRI rechazó el CAPTCHA. Abriendo una sesión nueva para un único reintento.",
                     )
-                    p, browser, context, page, chrome_process = await cls._login(ruc, cred["clave"], perfil_aislado=True)
+                    p, browser, context, page, chrome_process, profile_dir = await cls._login(ruc, cred["clave"], perfil_aislado=True)
                     filas_recibidos = await cls._consultar_recibidos_con_limite(
                         page, anio, mes, tipo_comprobante, job_id=job_id
                     )
@@ -4579,7 +4593,8 @@ class SriClienteSyncService:
                     await context.close()
                 except Exception:
                     pass
-            cls._cerrar_chrome(chrome_process)
+            cls._cerrar_chrome(chrome_process, profile_dir)
+            cls._eliminar_perfil_chrome(profile_dir)
             if p is not None:
                 await p.stop()
 
