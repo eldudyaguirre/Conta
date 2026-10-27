@@ -3952,57 +3952,82 @@ class SriClienteSyncService:
                 + diagnostico
             )
 
-        # Instrumentación temporal: registra únicamente metadatos HTTP de la
-        # consulta. No registra cookies, credenciales, cuerpos POST ni tokens CAPTCHA.
+        # Diagnóstico HTTP persistente para producción.
+        # Registra metadatos de tráfico al dominio del SRI durante la consulta,
+        # sin registrar cuerpos, cookies, cabeceras de autorización ni tokens CAPTCHA.
         from urllib.parse import urlsplit
 
         solicitudes_consulta = {}
+        sri_http_log = Path(__file__).resolve().parents[2] / "logs" / "sri_http_diag.log"
 
-        def _es_peticion_consulta(request):
+        def _es_peticion_sri(request):
             try:
-                partes = urlsplit(request.url)
-                return (
-                    partes.hostname == "srienlinea.sri.gob.ec"
-                    and "comprobantesRecibidos" in partes.path
-                )
+                return urlsplit(request.url).hostname == "srienlinea.sri.gob.ec"
             except Exception:
                 return False
 
+        def _escribir_http_diag(mensaje, *args):
+            try:
+                sri_http_log.parent.mkdir(parents=True, exist_ok=True)
+                detalle = mensaje % args if args else mensaje
+                linea = f"{datetime.now().isoformat(timespec='milliseconds')} | SRI HTTP DIAG | {detalle}\\n"
+                with sri_http_log.open("a", encoding="utf-8") as fh:
+                    fh.write(linea)
+            except Exception as exc:
+                # El diagnóstico no debe detener una sincronización.
+                logger.warning("SRI HTTP DIAG | no se pudo escribir archivo | error=%s", type(exc).__name__)
+
         def _registrar_solicitud(request):
-            if not _es_peticion_consulta(request):
+            if not _es_peticion_sri(request):
                 return
             try:
                 partes = urlsplit(request.url)
-                cabeceras = request.headers
-                ajax = (
-                    cabeceras.get("x-requested-with", "").lower() == "xmlhttprequest"
-                    or "javax.faces.partial.ajax" in (request.post_data or "")
-                )
+                # No leer ni escribir request.post_data ni cabeceras sensibles.
+                ajax = request.headers.get("x-requested-with", "").lower() == "xmlhttprequest"
                 solicitudes_consulta[id(request)] = {"ajax": ajax}
-                logger.info(
-                    "SRI HTTP DIAG | solicitud consulta recibidos | metodo=%s | ruta=%s | ajax=%s | recurso=%s",
-                    request.method, partes.path, ajax, request.resource_type,
+                _escribir_http_diag(
+                    "SOLICITUD | metodo=%s | ruta=%s | recurso=%s | ajax=%s",
+                    request.method, partes.path, request.resource_type, ajax,
                 )
             except Exception as exc:
-                logger.debug("SRI HTTP DIAG | no se pudo registrar solicitud | error=%s", type(exc).__name__)
+                _escribir_http_diag("ERROR REGISTRANDO SOLICITUD | tipo=%s", type(exc).__name__)
 
         async def _registrar_respuesta(response):
             request = response.request
-            if not _es_peticion_consulta(request):
+            if not _es_peticion_sri(request):
                 return
             try:
                 partes = urlsplit(response.url)
                 tipo = response.headers.get("content-type", "").split(";")[0]
-                logger.info(
-                    "SRI HTTP DIAG | respuesta consulta recibidos | metodo=%s | ruta=%s | estado=%s | ok=%s | content_type=%s | ajax=%s",
+                _escribir_http_diag(
+                    "RESPUESTA | metodo=%s | ruta=%s | estado=%s | ok=%s | content_type=%s | ajax=%s",
                     request.method, partes.path, response.status, response.ok,
                     tipo, solicitudes_consulta.get(id(request), {}).get("ajax", False),
                 )
             except Exception as exc:
-                logger.debug("SRI HTTP DIAG | no se pudo registrar respuesta | error=%s", type(exc).__name__)
+                _escribir_http_diag("ERROR REGISTRANDO RESPUESTA | tipo=%s", type(exc).__name__)
 
+        def _registrar_fallo_solicitud(request):
+            if not _es_peticion_sri(request):
+                return
+            try:
+                partes = urlsplit(request.url)
+                # request.failure es metadato de transporte; no incluye credenciales.
+                _escribir_http_diag(
+                    "SOLICITUD FALLIDA | metodo=%s | ruta=%s | recurso=%s | fallo=%s",
+                    request.method, partes.path, request.resource_type,
+                    getattr(request, "failure", None),
+                )
+            except Exception as exc:
+                _escribir_http_diag("ERROR REGISTRANDO FALLO | tipo=%s", type(exc).__name__)
+
+        _escribir_http_diag(
+            "INICIO CONSULTA | url=%s | anio=%s | mes=%s | tipo=%s | log=%s",
+            urlsplit(page.url).path, anio, mes, tipo_comprobante, sri_http_log,
+        )
         page.on("request", _registrar_solicitud)
         page.on("response", _registrar_respuesta)
+        page.on("requestfailed", _registrar_fallo_solicitud)
 
         # Ejecutamos el click real sobre el botón oficial. Esto permite que
         # el JavaScript del SRI genere el token reCAPTCHA justo antes de la
@@ -4022,6 +4047,7 @@ class SriClienteSyncService:
         finally:
             page.remove_listener("request", _registrar_solicitud)
             page.remove_listener("response", _registrar_respuesta)
+            page.remove_listener("requestfailed", _registrar_fallo_solicitud)
         if filas <= 0:
             # El SRI puede responder correctamente con una tabla vacía cuando
             # no existen comprobantes para el año/mes/tipo solicitado.
