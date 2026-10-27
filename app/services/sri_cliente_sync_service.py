@@ -4015,7 +4015,7 @@ class SriClienteSyncService:
                         import re
 
                         ids_update = re.findall(
-                            r"<update\\s+id=['\\"]([^'\\"]+)['\\"]",
+                            r"<update\s+id=[\"']([^\"']+)[\"']",
                             cuerpo,
                             flags=re.IGNORECASE,
                         )
