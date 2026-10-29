@@ -5,6 +5,7 @@ import hashlib
 import logging
 import mimetypes
 import re
+import shutil
 import tempfile
 import threading
 import urllib.error
@@ -283,6 +284,7 @@ class SriCertificadoRucService:
 
         p = browser = context = page = chrome_process = None
         temp_path: Path | None = None
+        download_dir: Path | None = None
 
         try:
             logger.info("CERTIFICADO RUC | login SRI | ruc=%s", ruc)
@@ -411,6 +413,10 @@ class SriCertificadoRucService:
                 except Exception:
                     logger.debug("No se pudo registrar una respuesta de red del SRI", exc_info=True)
 
+            # Chrome conectado por CDP guarda el archivo descargado en disco.
+            # Usamos un directorio exclusivo por RUC para leer el archivo real
+            # de Chromium sin mezclarlo con descargas previas ni otros procesos.
+            download_dir = Path(tempfile.mkdtemp(prefix=f"conta_ruc_{ruc}_"))
             cdp_session = None
             page.on("response", _registrar_respuesta_sri)
             try:
@@ -420,7 +426,7 @@ class SriCertificadoRucService:
                         "Page.setDownloadBehavior",
                         {
                             "behavior": "allow",
-                            "downloadPath": tempfile.gettempdir(),
+                            "downloadPath": str(download_dir),
                         },
                     )
                     logger.info(
@@ -464,42 +470,91 @@ class SriCertificadoRucService:
                     except Exception:
                         logger.debug("No se pudo cerrar la sesión CDP de diagnóstico", exc_info=True)
 
-            nombre_descarga = descarga.suggested_filename or f"certificado_ruc_{ruc}.pdf"
+            nombre_descarga = Path(
+                descarga.suggested_filename or f"certificado_ruc_{ruc}.pdf"
+            ).name
             fallo_descarga = await descarga.failure()
             logger.info(
                 "CERTIFICADO RUC | descarga iniciada por Chromium | ruc=%s | nombre=%s | failure=%s",
                 ruc, nombre_descarga, fallo_descarga,
             )
-
-            with tempfile.NamedTemporaryFile(
-                prefix=f"ruc_{ruc}_",
-                suffix=".pdf",
-                delete=False,
-            ) as tmp:
-                temp_path = Path(tmp.name)
-
-            try:
-                await descarga.save_as(str(temp_path))
-                contenido = await asyncio.to_thread(temp_path.read_bytes)
-            except Exception as exc:
+            if fallo_descarga:
                 raise RuntimeError(
-                    "Chromium detectó la descarga del SRI, pero no pudo guardar el archivo temporal. "
-                    f"nombre={nombre_descarga!r}; detalle={exc}"
-                ) from exc
+                    f"Chromium informó un fallo al descargar el certificado: {fallo_descarga}"
+                )
+
+            contenido = b""
+            origen_contenido = ""
+            # Con connect_over_cdp, Playwright puede recibir el evento de descarga
+            # pero save_as() no siempre recupera el cuerpo. Primero leemos el
+            # archivo que Chrome guardó en el downloadPath de CDP.
+            if download_dir is not None and download_dir.is_dir():
+                limite = asyncio.get_running_loop().time() + 10
+                while asyncio.get_running_loop().time() < limite:
+                    try:
+                        ruta_esperada = download_dir / nombre_descarga
+                        if ruta_esperada.is_file():
+                            candidato = ruta_esperada
+                        else:
+                            candidatos = [
+                                ruta for ruta in download_dir.iterdir()
+                                if ruta.is_file()
+                                and not ruta.name.lower().endswith(".crdownload")
+                            ]
+                            candidato = max(
+                                candidatos,
+                                key=lambda ruta: ruta.stat().st_mtime,
+                                default=None,
+                            )
+                        if candidato is not None:
+                            datos_chrome = await asyncio.to_thread(candidato.read_bytes)
+                            if datos_chrome:
+                                contenido = datos_chrome
+                                origen_contenido = f"archivo Chromium: {candidato.name}"
+                                if contenido.startswith(b"%PDF"):
+                                    break
+                    except OSError:
+                        logger.debug(
+                            "Esperando a que Chromium termine de escribir el PDF | ruc=%s",
+                            ruc,
+                            exc_info=True,
+                        )
+                    await asyncio.sleep(0.25)
+
+            # Respaldo: pedir a Playwright que guarde su copia administrada.
+            # Se usa también si el archivo directo de Chrome está vacío o no es PDF.
+            if not contenido.startswith(b"%PDF"):
+                with tempfile.NamedTemporaryFile(
+                    prefix=f"ruc_{ruc}_",
+                    suffix=".pdf",
+                    delete=False,
+                ) as tmp:
+                    temp_path = Path(tmp.name)
+                try:
+                    await descarga.save_as(str(temp_path))
+                    contenido_playwright = await asyncio.to_thread(temp_path.read_bytes)
+                    if contenido_playwright.startswith(b"%PDF") or len(contenido_playwright) > len(contenido):
+                        contenido = contenido_playwright
+                        origen_contenido = "copia administrada por Playwright"
+                except Exception as exc:
+                    logger.warning(
+                        "CERTIFICADO RUC | respaldo save_as falló | ruc=%s | error=%s: %s",
+                        ruc, type(exc).__name__, exc,
+                    )
 
             logger.info(
-                "CERTIFICADO RUC | descarga guardada temporalmente | ruc=%s | nombre=%s | bytes=%s",
-                ruc, nombre_descarga, len(contenido),
+                "CERTIFICADO RUC | descarga leída | ruc=%s | bytes=%s | origen=%s",
+                ruc, len(contenido), origen_contenido or "sin archivo",
             )
 
             if not contenido.startswith(b"%PDF"):
-                # Algunas instalaciones del SRI pueden devolver una redirección
-                # HTML o una página de error. Dejamos trazabilidad del contenido.
                 preview = contenido[:200].decode("utf-8", errors="replace")
+                cabecera_hex = contenido[:24].hex()
                 raise ValueError(
                     f"El SRI no devolvió un PDF válido para el RUC {ruc}. "
-                    f"Content-Type=application/pdf (descarga del navegador); "
-                    f"preview={preview!r}"
+                    f"bytes={len(contenido)}; origen={origen_contenido or 'desconocido'}; "
+                    f"cabecera_hex={cabecera_hex!r}; preview={preview!r}; "
+                    f"últimas respuestas HTTP del SRI={respuestas_sri[-5:]!r}"
                 )
 
             logger.info(
@@ -507,19 +562,6 @@ class SriCertificadoRucService:
                 ruc,
                 len(contenido),
             )
-
-            with tempfile.NamedTemporaryFile(
-                prefix=f"ruc_{ruc}_",
-                suffix=".pdf",
-                delete=False,
-            ) as tmp:
-                tmp.write(contenido)
-                temp_path = Path(tmp.name)
-
-            if not contenido.startswith(b"%PDF"):
-                raise ValueError(
-                    f"El SRI no devolvió un PDF válido para el RUC {ruc}."
-                )
 
             logger.info("CERTIFICADO RUC | subiendo a TtCWeb | ruc=%s | bytes=%s", ruc, len(contenido))
             respuesta = cls._subir_a_ttcweb(
@@ -542,6 +584,16 @@ class SriCertificadoRucService:
                     temp_path.unlink(missing_ok=True)
                 except Exception:
                     pass
+
+            if download_dir is not None:
+                try:
+                    await asyncio.to_thread(shutil.rmtree, download_dir, True)
+                except Exception:
+                    logger.debug(
+                        "No se pudo limpiar el directorio temporal de descarga | ruc=%s",
+                        ruc,
+                        exc_info=True,
+                    )
 
             try:
                 SriClienteSyncService._cerrar_chrome(chrome_process)
