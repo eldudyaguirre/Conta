@@ -267,7 +267,7 @@ class SriDeclaracionesService:
             for tipo_declaracion, ejercicio in obligaciones:
                 descripcion = "IVA" if tipo_declaracion == "iva" else "Renta Naturales"
                 cls._actualizar(
-                    ruc, anio, tipo_solicitado, tipo_solicitado,
+                    ruc, anio, tipo_solicitado,
                     mensaje=f"Consultando {descripcion}, período fiscal {ejercicio}.",
                 )
                 try:
