@@ -261,7 +261,26 @@ class SriDeclaracionesService:
                     mensaje=f"{descripcion} {ejercicio}: {len(registros)} declaración(es) localizada(s).",
                 )
 
+                # Las filas del SRI se paginan en el navegador. Volvemos a la primera
+                # página antes de descargar y avanzamos en el mismo orden capturado.
+                pagina_actual = 0
+                if registros:
+                    paginador = page.locator('[id="formPresentada:tblConsultaDeclaracion_paginator_bottom"]')
+                    primera = paginador.locator(".ui-paginator-first").first
+                    if await primera.count() and "ui-state-disabled" not in (await primera.get_attribute("class") or ""):
+                        await primera.click()
+                        await page.wait_for_timeout(400)
+
                 for registro in registros:
+                    while pagina_actual < int(registro.get("pagina", 0)):
+                        paginador = page.locator('[id="formPresentada:tblConsultaDeclaracion_paginator_bottom"]')
+                        siguiente = paginador.locator(".ui-paginator-next").first
+                        if await siguiente.count() == 0 or "ui-state-disabled" in (await siguiente.get_attribute("class") or ""):
+                            break
+                        await siguiente.click()
+                        await page.wait_for_timeout(450)
+                        pagina_actual += 1
+
                     serie = registro["serie"]
                     if not serie:
                         resultado["errores"] += 1
@@ -454,6 +473,7 @@ class SriDeclaracionesService:
                     continue
                 registros.append({
                     "fila": int(await fila.get_attribute("data-ri") or idx),
+                    "pagina": pagina,
                     "serie": serie,
                     "formulario": celdas[0],
                     "descripcion": descripcion,
@@ -533,7 +553,8 @@ class SriDeclaracionesService:
             await asyncio.sleep(0.25)
 
         if not contenido.startswith(b"%PDF"):
-            temporario = Path(tempfile.mkstemp(prefix=f"decl_{ruc}_", suffix=".pdf")[1])
+            with tempfile.NamedTemporaryFile(prefix=f"decl_{ruc}_", suffix=".pdf", delete=False) as tmp:
+                temporario = Path(tmp.name)
             try:
                 await descarga.save_as(str(temporario))
                 contenido = await asyncio.to_thread(temporario.read_bytes)
