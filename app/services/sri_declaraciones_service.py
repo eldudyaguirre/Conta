@@ -571,11 +571,17 @@ class SriDeclaracionesService:
 
         # El nombre original se incluye solo en el registro interno; el archivo
         # final se normaliza a Declaracion_<serie>.pdf para evitar duplicados.
-        if destino_sri.is_file():
+        # Deja limpia la carpeta entre descargas; así un archivo anterior no
+        # puede confundirse con el PDF de la siguiente declaración.
+        for archivo_temporal in download_dir.iterdir():
             try:
-                destino_sri.unlink(missing_ok=True)
+                if archivo_temporal.is_file():
+                    archivo_temporal.unlink(missing_ok=True)
             except OSError:
-                pass
+                logger.debug(
+                    "No se pudo retirar archivo temporal de descarga | ruc=%s | archivo=%s",
+                    ruc, archivo_temporal.name, exc_info=True,
+                )
         return contenido, nombre_sri
 
     @staticmethod
