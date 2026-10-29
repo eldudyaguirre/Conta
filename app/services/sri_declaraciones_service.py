@@ -67,33 +67,45 @@ class SriDeclaracionesService:
     _trabajos: dict[str, dict[str, Any]] = {}
 
     @classmethod
-    def _clave_trabajo(cls, ruc: str, anio: int) -> str:
-        return f"{ruc}:{anio}"
+    def _clave_trabajo(cls, ruc: str, anio: int, tipo: str = "ambos") -> str:
+        return f"{ruc}:{anio}:{tipo}"
 
     @classmethod
-    def iniciar(cls, ruc: str, anio: int) -> dict[str, Any]:
+    def iniciar(cls, ruc: str, anio: int, tipo: str = "ambos") -> dict[str, Any]:
         ruc = re.sub(r"\D", "", str(ruc))
         anio = int(anio)
+        tipo = str(tipo or "ambos").strip().lower()
         if len(ruc) != 13:
             raise ValueError("El RUC debe contener exactamente 13 dígitos.")
         if anio < 2011 or anio > 2100:
-            raise ValueError("El año debe estar entre 2011 y 2100 para consultar IVA y Renta.")
+            raise ValueError("El año fiscal debe estar entre 2011 y 2100.")
+        if tipo not in {"iva", "renta", "ambos"}:
+            raise ValueError("Tipo de declaración inválido; use iva o renta.")
 
-        key = cls._clave_trabajo(ruc, anio)
+        key = cls._clave_trabajo(ruc, anio, tipo)
+        renta_anio = anio if tipo == "renta" else anio - 1
+        if tipo == "iva":
+            mensaje = f"Preparando consulta de declaraciones IVA del año fiscal {anio}."
+        elif tipo == "renta":
+            mensaje = f"Preparando consulta de declaraciones de Renta Naturales del ejercicio {anio}."
+        else:
+            mensaje = f"Preparando consulta: IVA {anio} y Renta del ejercicio {anio - 1}."
+
         with cls._lock:
             actual = cls._trabajos.get(key, {})
             if actual.get("estado") in {"iniciando", "ejecutando"}:
                 return {
                     **actual,
-                    "mensaje": "Ya existe una sincronización activa para este RUC y año.",
+                    "mensaje": "Ya existe una sincronización activa para este RUC, año y tipo.",
                 }
             cls._trabajos[key] = {
                 "ruc": ruc,
                 "anio": anio,
-                "iva_anio": anio,
-                "renta_anio": anio - 1,
+                "tipo": tipo,
+                "iva_anio": anio if tipo in {"iva", "ambos"} else None,
+                "renta_anio": renta_anio if tipo in {"renta", "ambos"} else None,
                 "estado": "iniciando",
-                "mensaje": f"Preparando consulta: IVA {anio} y Renta del ejercicio {anio - 1}.",
+                "mensaje": mensaje,
                 "encontradas": 0,
                 "ya_existian": 0,
                 "descargadas": 0,
@@ -104,21 +116,23 @@ class SriDeclaracionesService:
 
         worker = threading.Thread(
             target=cls._trabajo,
-            args=(ruc, anio),
-            name=f"Conta-Declaraciones-SRI-{ruc}-{anio}",
+            args=(ruc, anio, tipo),
+            name=f"Conta-Declaraciones-SRI-{tipo}-{ruc}-{anio}",
             daemon=True,
         )
         worker.start()
         logger.info(
-            "SINCRONIZACIÓN DECLARACIONES | solicitud aceptada | ruc=%s | iva=%s | renta=%s",
-            ruc, anio, anio - 1,
+            "SINCRONIZACIÓN DECLARACIONES | solicitud aceptada | ruc=%s | tipo=%s | año=%s",
+            ruc, tipo, anio,
         )
-        return cls.estado(ruc, anio)
+        return cls.estado(ruc, anio, tipo)
 
     @classmethod
-    def estado(cls, ruc: str, anio: int) -> dict[str, Any]:
+    def estado(cls, ruc: str, anio: int, tipo: str = "ambos") -> dict[str, Any]:
         ruc = re.sub(r"\D", "", str(ruc))
-        key = cls._clave_trabajo(ruc, int(anio))
+        tipo = str(tipo or "ambos").strip().lower()
+        key = cls._clave_trabajo(ruc, int(anio), tipo)
+        renta_anio = int(anio) if tipo == "renta" else int(anio) - 1
         with cls._lock:
             actual = cls._trabajos.get(key)
             if actual:
@@ -126,10 +140,11 @@ class SriDeclaracionesService:
         return {
             "ruc": ruc,
             "anio": int(anio),
-            "iva_anio": int(anio),
-            "renta_anio": int(anio) - 1,
+            "tipo": tipo,
+            "iva_anio": int(anio) if tipo in {"iva", "ambos"} else None,
+            "renta_anio": renta_anio if tipo in {"renta", "ambos"} else None,
             "estado": "no_iniciado",
-            "mensaje": "No se ha iniciado una sincronización para este RUC y año.",
+            "mensaje": f"No se ha iniciado sincronización de {tipo} para este RUC y año.",
             "encontradas": 0,
             "ya_existian": 0,
             "descargadas": 0,
@@ -139,22 +154,22 @@ class SriDeclaracionesService:
         }
 
     @classmethod
-    def _actualizar(cls, ruc: str, anio: int, **campos: Any) -> None:
-        key = cls._clave_trabajo(ruc, anio)
+    def _actualizar(cls, ruc: str, anio: int, tipo: str = "ambos", **campos: Any) -> None:
+        key = cls._clave_trabajo(ruc, anio, tipo)
         with cls._lock:
             if key in cls._trabajos:
                 cls._trabajos[key].update(campos)
 
     @classmethod
-    def _incrementar(cls, ruc: str, anio: int, campo: str, cantidad: int = 1) -> None:
-        key = cls._clave_trabajo(ruc, anio)
+    def _incrementar(cls, ruc: str, anio: int, campo: str, cantidad: int = 1, tipo: str = "ambos") -> None:
+        key = cls._clave_trabajo(ruc, anio, tipo)
         with cls._lock:
             if key in cls._trabajos:
                 cls._trabajos[key][campo] = int(cls._trabajos[key].get(campo, 0)) + cantidad
 
     @classmethod
-    def _agregar_error(cls, ruc: str, anio: int, mensaje: str) -> None:
-        key = cls._clave_trabajo(ruc, anio)
+    def _agregar_error(cls, ruc: str, anio: int, tipo: str, mensaje: str) -> None:
+        key = cls._clave_trabajo(ruc, anio, tipo)
         with cls._lock:
             if key in cls._trabajos:
                 cls._trabajos[key]["errores"] = int(cls._trabajos[key].get("errores", 0)) + 1
@@ -163,13 +178,17 @@ class SriDeclaracionesService:
                     errores.append(mensaje)
 
     @classmethod
-    def _trabajo(cls, ruc: str, anio: int) -> None:
+    def _trabajo(cls, ruc: str, anio: int, tipo: str) -> None:
         try:
-            cls._actualizar(
-                ruc, anio, estado="ejecutando",
-                mensaje=f"Conectando al SRI. IVA {anio}; Renta del ejercicio {anio - 1}.",
+            mensaje_inicio = (
+                f"Conectando al SRI para declaraciones de IVA del año {anio}."
+                if tipo == "iva" else
+                f"Conectando al SRI para declaraciones de Renta Naturales del ejercicio {anio}."
+                if tipo == "renta" else
+                f"Conectando al SRI. IVA {anio}; Renta del ejercicio {anio - 1}."
             )
-            resultado = asyncio.run(cls._procesar(ruc, anio))
+            cls._actualizar(ruc, anio, tipo, estado="ejecutando", mensaje=mensaje_inicio)
+            resultado = asyncio.run(cls._procesar(ruc, anio, tipo))
             errores = int(resultado.get("errores", 0))
             descargas = int(resultado.get("descargadas", 0))
             existentes = int(resultado.get("ya_existian", 0))
@@ -179,7 +198,7 @@ class SriDeclaracionesService:
                 f"descargadas: {descargas}; ya existentes: {existentes}; errores: {errores}."
             )
             cls._actualizar(
-                ruc, anio,
+                ruc, anio, tipo,
                 estado="completado" if errores == 0 else "error",
                 mensaje=mensaje,
                 encontradas=encontradas,
@@ -190,19 +209,19 @@ class SriDeclaracionesService:
                 detalle_errores=resultado.get("detalle_errores", []),
             )
             logger.info(
-                "SINCRONIZACIÓN DECLARACIONES | finalizada | ruc=%s | iva=%s | renta=%s | encontradas=%s | descargadas=%s | existentes=%s | errores=%s",
-                ruc, anio, anio - 1, encontradas, descargas, existentes, errores,
+                "SINCRONIZACIÓN DECLARACIONES | finalizada | ruc=%s | tipo=%s | año=%s | encontradas=%s | descargadas=%s | existentes=%s | errores=%s",
+                ruc, tipo, anio, encontradas, descargas, existentes, errores,
             )
         except Exception as exc:
-            logger.exception("SINCRONIZACIÓN DECLARACIONES | error general | ruc=%s | año=%s", ruc, anio)
-            cls._agregar_error(ruc, anio, f"{type(exc).__name__}: {exc}")
+            logger.exception("SINCRONIZACIÓN DECLARACIONES | error general | ruc=%s | tipo=%s | año=%s", ruc, tipo, anio)
+            cls._agregar_error(ruc, anio, tipo, f"{type(exc).__name__}: {exc}")
             cls._actualizar(
-                ruc, anio, estado="error",
+                ruc, anio, tipo, estado="error",
                 mensaje=f"No se pudo completar la sincronización: {type(exc).__name__}: {exc}",
             )
 
     @classmethod
-    async def _procesar(cls, ruc: str, anio: int) -> dict[str, Any]:
+    async def _procesar(cls, ruc: str, anio: int, tipo_solicitado: str) -> dict[str, Any]:
         cred = await asyncio.to_thread(SriClienteSyncService._credenciales, ruc)
         p = browser = context = page = chrome_process = profile_dir = None
         download_dir: Path | None = None
@@ -238,24 +257,31 @@ class SriDeclaracionesService:
             existing_keys = [str(item.get("key", "")) for item in existing]
             existing_names = [str(item.get("nombre", "")) for item in existing]
 
-            for tipo, ejercicio in (("iva", anio), ("renta", anio - 1)):
-                descripcion = "IVA" if tipo == "iva" else "Renta Naturales"
+            if tipo_solicitado == "iva":
+                obligaciones = [("iva", anio)]
+            elif tipo_solicitado == "renta":
+                obligaciones = [("renta", anio)]
+            else:
+                obligaciones = [("iva", anio), ("renta", anio - 1)]
+
+            for tipo_declaracion, ejercicio in obligaciones:
+                descripcion = "IVA" if tipo_declaracion == "iva" else "Renta Naturales"
                 cls._actualizar(
-                    ruc, anio,
+                    ruc, anio, tipo_solicitado, tipo_solicitado,
                     mensaje=f"Consultando {descripcion}, período fiscal {ejercicio}.",
                 )
                 try:
-                    registros = await cls._consultar_obligacion(page, tipo, ejercicio)
+                    registros = await cls._consultar_obligacion(page, tipo_declaracion, ejercicio)
                 except Exception as exc:
                     resultado["errores"] += 1
                     error_txt = f"{descripcion} {ejercicio}: {type(exc).__name__}: {exc}"
                     resultado["detalle_errores"].append(error_txt)
-                    logger.exception("DECLARACIONES SRI | fallo consultando obligación | ruc=%s | tipo=%s | ejercicio=%s", ruc, tipo, ejercicio)
+                    logger.exception("DECLARACIONES SRI | fallo consultando obligación | ruc=%s | tipo_declaracion=%s | ejercicio=%s", ruc, tipo_declaracion, ejercicio)
                     continue
 
                 resultado["encontradas"] += len(registros)
                 cls._actualizar(
-                    ruc, anio,
+                    ruc, anio, tipo_solicitado,
                     encontradas=resultado["encontradas"],
                     total=resultado["encontradas"],
                     mensaje=f"{descripcion} {ejercicio}: {len(registros)} declaración(es) localizada(s).",
@@ -294,7 +320,7 @@ class SriDeclaracionesService:
                     if ya_guardada:
                         resultado["ya_existian"] += 1
                         cls._actualizar(
-                            ruc, anio,
+                            ruc, anio, tipo_solicitado,
                             ya_existian=resultado["ya_existian"],
                             mensaje=f"{descripcion} {ejercicio}: {serie} ya está guardada; se omite.",
                         )
@@ -311,7 +337,7 @@ class SriDeclaracionesService:
                         respuesta = await asyncio.to_thread(
                             cls._guardar_en_ttcweb,
                             ruc,
-                            tipo,
+                            tipo_declaracion,
                             ejercicio,
                             registro["mes"],
                             nombre_archivo,
@@ -322,26 +348,26 @@ class SriDeclaracionesService:
                         existing_names.append(nombre_archivo)
                         if respuesta.get("existia"):
                             resultado["ya_existian"] += 1
-                            cls._actualizar(ruc, anio, ya_existian=resultado["ya_existian"])
+                            cls._actualizar(ruc, anio, tipo_solicitado, ya_existian=resultado["ya_existian"])
                         else:
                             resultado["descargadas"] += 1
-                            cls._actualizar(ruc, anio, descargadas=resultado["descargadas"])
+                            cls._actualizar(ruc, anio, tipo_solicitado, descargadas=resultado["descargadas"])
                         cls._actualizar(
-                            ruc, anio,
+                            ruc, anio, tipo_solicitado,
                             mensaje=f"{descripcion} {ejercicio}: procesada declaración {serie}.",
                         )
                         logger.info(
-                            "DECLARACIONES SRI | documento guardado | ruc=%s | tipo=%s | ejercicio=%s | serie=%s | archivo_sri=%s | key=%s",
-                            ruc, tipo, ejercicio, serie, nombre_sri, key_guardada,
+                            "DECLARACIONES SRI | documento guardado | ruc=%s | tipo_declaracion=%s | ejercicio=%s | serie=%s | archivo_sri=%s | key=%s",
+                            ruc, tipo_declaracion, ejercicio, serie, nombre_sri, key_guardada,
                         )
                     except Exception as exc:
                         resultado["errores"] += 1
                         error_txt = f"{descripcion} {ejercicio}, serie {serie}: {type(exc).__name__}: {exc}"
                         resultado["detalle_errores"].append(error_txt)
-                        cls._actualizar(ruc, anio, errores=resultado["errores"])
+                        cls._actualizar(ruc, anio, tipo_solicitado, errores=resultado["errores"])
                         logger.exception(
-                            "DECLARACIONES SRI | fallo descargando declaración | ruc=%s | tipo=%s | ejercicio=%s | serie=%s",
-                            ruc, tipo, ejercicio, serie,
+                            "DECLARACIONES SRI | fallo descargando declaración | ruc=%s | tipo_declaracion=%s | ejercicio=%s | serie=%s",
+                            ruc, tipo_declaracion, ejercicio, serie,
                         )
 
             return resultado
