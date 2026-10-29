@@ -440,3 +440,54 @@ async def estado_certificados_ruc(
         "tipo": "sri_certificados_ruc_estado",
         **SriCertificadoRucService.estado(),
     }
+
+
+class SincronizarDeclaracionesRequest(BaseModel):
+    # El año indicado se usa para IVA; el impuesto a la renta consulta el
+    # ejercicio fiscal anterior, por ejemplo IVA 2026 y Renta 2025.
+    anio: int = Field(ge=2011, le=2100)
+
+
+@router.post("/declaraciones/{ruc}/sincronizar")
+async def sincronizar_declaraciones_sri(
+    ruc: str,
+    request: SincronizarDeclaracionesRequest,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Sincroniza PDFs de declaraciones presentadas, sin enviar formularios nuevos."""
+    from app.services.sri_declaraciones_service import SriDeclaracionesService
+
+    try:
+        resultado = SriDeclaracionesService.iniciar(ruc, request.anio)
+        return {
+            "usuario": usuario["usrname"],
+            "tipo": "sri_declaraciones",
+            **resultado,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error iniciando sincronización de declaraciones: {exc}",
+        )
+
+
+@router.get("/declaraciones/{ruc}/estado")
+async def estado_declaraciones_sri(
+    ruc: str,
+    anio: int = 2026,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Consulta el estado de la sincronización de IVA y renta de un cliente."""
+    from app.services.sri_declaraciones_service import SriDeclaracionesService
+
+    try:
+        resultado = SriDeclaracionesService.estado(ruc, anio)
+        return {
+            "usuario": usuario["usrname"],
+            "tipo": "sri_declaraciones_estado",
+            **resultado,
+        }
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"RUC o año inválido: {exc}")
