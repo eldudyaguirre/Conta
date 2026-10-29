@@ -458,7 +458,7 @@ class SriDeclaracionesService:
         if not ya_seleccionada:
             await check.click(timeout=15000)
         logger.info(
-            "DECLARACIONES SRI | obligación seleccionada | ruc_page=%s | tipo=%s | data-rk=%s | ya_seleccionada=%s",
+            "DECLARACIONES SRI | obligación seleccionada | tipo=%s | data-rk=%s | ya_seleccionada=%s",
             tipo, obligacion["data_rk"], ya_seleccionada,
         )
 
