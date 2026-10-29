@@ -282,13 +282,15 @@ class SriCertificadoRucService:
         logger.info("CERTIFICADO RUC | credenciales | ruc=%s", ruc)
         cred = SriClienteSyncService._credenciales(ruc)
 
-        p = browser = context = page = chrome_process = None
+        p = browser = context = page = chrome_process = profile_dir = None
         temp_path: Path | None = None
         download_dir: Path | None = None
 
         try:
             logger.info("CERTIFICADO RUC | login SRI | ruc=%s", ruc)
-            p, browser, context, page, chrome_process = await SriClienteSyncService._login(ruc, cred["clave"])
+            (
+                p, browser, context, page, chrome_process, profile_dir
+            ) = await SriClienteSyncService._login(ruc, cred["clave"])
             logger.info("CERTIFICADO RUC | login OK | ruc=%s | url=%s", ruc, page.url)
 
             logger.info("CERTIFICADO RUC | abriendo certificados | ruc=%s", ruc)
@@ -586,9 +588,10 @@ class SriCertificadoRucService:
                     pass
 
             try:
-                SriClienteSyncService._cerrar_chrome(chrome_process)
+                SriClienteSyncService._cerrar_chrome(chrome_process, profile_dir)
                 if p is not None:
                     await p.stop()
+                SriClienteSyncService._eliminar_perfil_chrome(profile_dir)
             except Exception:
                 logger.exception(
                     "No se pudo cerrar correctamente Chrome | ruc=%s",
