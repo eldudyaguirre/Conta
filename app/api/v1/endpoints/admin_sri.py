@@ -443,9 +443,10 @@ async def estado_certificados_ruc(
 
 
 class SincronizarDeclaracionesRequest(BaseModel):
-    # El año indicado se usa para IVA; el impuesto a la renta consulta el
-    # ejercicio fiscal anterior, por ejemplo IVA 2026 y Renta 2025.
+    # La página de IVA sincroniza el año fiscal de IVA; la de renta, el
+    # año del ejercicio que el usuario seleccionó. "ambos" conserva el modo antiguo.
     anio: int = Field(ge=2011, le=2100)
+    tipo: str = Field(default="iva", pattern="^(iva|renta|ambos)$")
 
 
 @router.post("/declaraciones/{ruc}/sincronizar")
@@ -458,7 +459,7 @@ async def sincronizar_declaraciones_sri(
     from app.services.sri_declaraciones_service import SriDeclaracionesService
 
     try:
-        resultado = SriDeclaracionesService.iniciar(ruc, request.anio)
+        resultado = SriDeclaracionesService.iniciar(ruc, request.anio, request.tipo)
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_declaraciones",
@@ -477,13 +478,16 @@ async def sincronizar_declaraciones_sri(
 async def estado_declaraciones_sri(
     ruc: str,
     anio: int = 2026,
+    tipo: str = "iva",
     usuario: dict = Depends(get_admin_user),
 ):
     """Consulta el estado de la sincronización de IVA y renta de un cliente."""
     from app.services.sri_declaraciones_service import SriDeclaracionesService
 
     try:
-        resultado = SriDeclaracionesService.estado(ruc, anio)
+        if tipo not in {"iva", "renta", "ambos"}:
+            raise ValueError("Tipo de declaración inválido.")
+        resultado = SriDeclaracionesService.estado(ruc, anio, tipo)
         return {
             "usuario": usuario["usrname"],
             "tipo": "sri_declaraciones_estado",
