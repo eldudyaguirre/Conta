@@ -268,8 +268,7 @@ class SriDeclaracionesService:
                     paginador = page.locator('[id="formPresentada:tblConsultaDeclaracion_paginator_bottom"]')
                     primera = paginador.locator(".ui-paginator-first").first
                     if await primera.count() and "ui-state-disabled" not in (await primera.get_attribute("class") or ""):
-                        await primera.click()
-                        await page.wait_for_timeout(400)
+                        await cls._cambiar_pagina(page, ".ui-paginator-first")
 
                 for registro in registros:
                     while pagina_actual < int(registro.get("pagina", 0)):
@@ -277,8 +276,7 @@ class SriDeclaracionesService:
                         siguiente = paginador.locator(".ui-paginator-next").first
                         if await siguiente.count() == 0 or "ui-state-disabled" in (await siguiente.get_attribute("class") or ""):
                             break
-                        await siguiente.click()
-                        await page.wait_for_timeout(450)
+                        await cls._cambiar_pagina(page, ".ui-paginator-next")
                         pagina_actual += 1
 
                     serie = registro["serie"]
@@ -365,6 +363,34 @@ class SriDeclaracionesService:
                     await asyncio.to_thread(shutil.rmtree, download_dir, True)
                 except Exception:
                     logger.debug("No se pudo limpiar la carpeta temporal de declaraciones.", exc_info=True)
+
+    @staticmethod
+    async def _cambiar_pagina(page, selector: str) -> None:
+        """Pulsa un control del paginador y espera a que el SRI cambie la página."""
+        paginador = page.locator('[id="formPresentada:tblConsultaDeclaracion_paginator_bottom"]')
+        control = paginador.locator(selector).first
+        if await control.count() == 0:
+            raise RuntimeError("No se encontró el control de paginación de las declaraciones.")
+        clase = await control.get_attribute("class") or ""
+        if "ui-state-disabled" in clase:
+            return
+        etiqueta = paginador.locator(".ui-paginator-current").first
+        anterior = (await etiqueta.inner_text()).strip() if await etiqueta.count() else ""
+        await control.click()
+        if anterior:
+            await page.wait_for_function(
+                """(args) => {
+                    const el = document.querySelector(args.selector);
+                    return !!el && el.textContent.trim() !== args.previous;
+                }""",
+                arg={
+                    "selector": '[id="formPresentada:tblConsultaDeclaracion_paginator_bottom"] .ui-paginator-current',
+                    "previous": anterior,
+                },
+                timeout=TIMEOUT_MS,
+            )
+        else:
+            await page.wait_for_timeout(700)
 
     @classmethod
     async def _consultar_obligacion(cls, page, tipo: str, anio: int) -> list[dict[str, Any]]:
@@ -491,8 +517,7 @@ class SriDeclaracionesService:
             if before in paginas_vistas or pagina > 20:
                 break
             paginas_vistas.add(before)
-            await next_page.click()
-            await page.wait_for_timeout(500)
+            await cls._cambiar_pagina(page, ".ui-paginator-next")
             pagina += 1
 
         # No devolver duplicados si el SRI repite una fila al paginar.
