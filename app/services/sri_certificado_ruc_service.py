@@ -585,16 +585,6 @@ class SriCertificadoRucService:
                 except Exception:
                     pass
 
-            if download_dir is not None:
-                try:
-                    await asyncio.to_thread(shutil.rmtree, download_dir, True)
-                except Exception:
-                    logger.debug(
-                        "No se pudo limpiar el directorio temporal de descarga | ruc=%s",
-                        ruc,
-                        exc_info=True,
-                    )
-
             try:
                 SriClienteSyncService._cerrar_chrome(chrome_process)
                 if p is not None:
@@ -604,6 +594,18 @@ class SriCertificadoRucService:
                     "No se pudo cerrar correctamente Chrome | ruc=%s",
                     ruc,
                 )
+
+            # Elimina el directorio de descargas después de cerrar Chrome para
+            # no competir con el proceso si el SRI dejó una descarga pendiente.
+            if download_dir is not None:
+                try:
+                    await asyncio.to_thread(shutil.rmtree, download_dir, True)
+                except Exception:
+                    logger.debug(
+                        "No se pudo limpiar el directorio temporal de descarga | ruc=%s",
+                        ruc,
+                        exc_info=True,
+                    )
 
     @classmethod
     def _subir_a_ttcweb(
