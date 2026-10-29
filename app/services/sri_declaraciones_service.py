@@ -445,7 +445,22 @@ class SriDeclaracionesService:
         check = fila_obligacion.locator(".ui-chkbox-box").first
         if await check.count() == 0:
             raise RuntimeError(f"No se encontró la casilla para {obligacion['titulo']}.")
-        await check.click(timeout=15000)
+        # El SRI conserva a veces la selección anterior. Solo pulsamos la casilla
+        # cuando la obligación todavía no está seleccionada, para evitar desmarcarla.
+        clases_fila = await fila_obligacion.get_attribute("class") or ""
+        aria_seleccionada = (await fila_obligacion.get_attribute("aria-selected") or "").lower() == "true"
+        clases_casilla = await check.get_attribute("class") or ""
+        ya_seleccionada = (
+            aria_seleccionada
+            or "ui-state-highlight" in clases_fila
+            or "ui-state-active" in clases_casilla
+        )
+        if not ya_seleccionada:
+            await check.click(timeout=15000)
+        logger.info(
+            "DECLARACIONES SRI | obligación seleccionada | ruc_page=%s | tipo=%s | data-rk=%s | ya_seleccionada=%s",
+            tipo, obligacion["data_rk"], ya_seleccionada,
+        )
 
         await page.locator('[id="formPresentada:btnBuscarGrupoObligacion"]').click(timeout=15000)
         await page.locator('[id="formPresentada:dlgPeriodoSeleccion"]').wait_for(
@@ -559,11 +574,18 @@ class SriDeclaracionesService:
         fila = page.locator(
             f'[id="formPresentada:tblConsultaDeclaracion_data"] tr[data-ri="{registro["fila"]}"]'
         )
-        boton = fila.locator('button[title="Declaración completa"]').first
+        # Según las peticiones capturadas en el HAR del SRI, el botón
+        # «Declaración perfilada» es el que devuelve el PDF como attachment.
+        # «Declaración completa» no fue el botón registrado en esas descargas.
+        boton = fila.locator('button[title="Declaración perfilada"]').first
         if await boton.count() == 0:
             raise RuntimeError(
-                f"No se encontró el botón «Declaración completa» para la serie {registro['serie']}."
+                f"No se encontró el botón «Declaración perfilada» para la serie {registro['serie']}."
             )
+        logger.info(
+            "DECLARACIONES SRI | descargando PDF | ruc=%s | serie=%s | botón=Declaración perfilada | fila=%s | página=%s",
+            ruc, registro["serie"], registro["fila"], registro.get("pagina", 0),
+        )
 
         async with page.expect_download(timeout=TIMEOUT_MS) as espera:
             await boton.click(timeout=20000)
