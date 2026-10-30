@@ -55,7 +55,7 @@ class SriVentasValidatorService:
             "detalle_reparaciones": [],
         }
 
-        p = browser = context = page = chrome_process = None
+        p = browser = context = page = chrome_process = profile_dir = None
         db = None
 
         try:
@@ -63,7 +63,9 @@ class SriVentasValidatorService:
                 job_id,
                 mensaje="Validador: abriendo sesión del SRI.",
             )
-            p, browser, context, page, chrome_process = await SriClienteSyncService._login(
+            # _login devuelve seis elementos: Playwright, browser,
+            # context, page, proceso Chrome y directorio del perfil temporal.
+            p, browser, context, page, chrome_process, profile_dir = await SriClienteSyncService._login(
                 ruc, cred["clave"]
             )
             SriClienteSyncService._job_update(
@@ -293,7 +295,8 @@ class SriVentasValidatorService:
                     await context.close()
                 except Exception:
                     pass
-            SriClienteSyncService._cerrar_chrome(chrome_process)
+            SriClienteSyncService._cerrar_chrome(chrome_process, profile_dir)
+            SriClienteSyncService._eliminar_perfil_chrome(profile_dir)
             if p is not None:
                 await p.stop()
 
