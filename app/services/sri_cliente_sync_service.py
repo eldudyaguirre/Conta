@@ -580,7 +580,7 @@ class SriClienteSyncService:
     def _credenciales(cls, ruc: str) -> dict[str, str]:
         with engine.connect() as db:
             row = db.execute(text("""
-                SELECT ruccedcli, nomclient, activo, clavesri
+                SELECT ruccedcli, nomclient, activo, clavesri, tipo_contribuyente
                 FROM clientes
                 WHERE ruccedcli = :ruc
                 LIMIT 1
