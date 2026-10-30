@@ -208,7 +208,7 @@ class SriClienteSyncService:
             # Validar el cliente después de comprobar si ya tiene trabajo activo,
             # usando la misma transacción protegida por el bloqueo del RUC.
             fila_cliente = db.execute(text("""
-                SELECT ruccedcli, nomclient, activo, clavesri
+                SELECT ruccedcli, nomclient, activo, clavesri, tipo_contribuyente
                 FROM clientes
                 WHERE TRIM(ruccedcli::text) = :ruc
                 LIMIT 1
@@ -594,7 +594,12 @@ class SriClienteSyncService:
         if not clave:
             raise ValueError("El cliente no tiene clave SRI configurada.")
 
-        return {"ruc": str(row["ruccedcli"]), "nombre": str(row["nomclient"] or ""), "clave": clave}
+        return {
+            "ruc": str(row["ruccedcli"]),
+            "nombre": str(row["nomclient"] or ""),
+            "clave": clave,
+            "tipo_contribuyente": str(row["tipo_contribuyente"] or "").strip(),
+        }
 
     @classmethod
     def _parsear_xml(cls, path: Path) -> dict[str, Any]:
