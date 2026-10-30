@@ -28,20 +28,26 @@ def postgres_client(monkeypatch):
                 ruccedcli VARCHAR(13) PRIMARY KEY,
                 nomclient TEXT NOT NULL DEFAULT '',
                 activo BOOLEAN NOT NULL DEFAULT TRUE,
-                clavesri TEXT NOT NULL DEFAULT ''
+                clavesri TEXT NOT NULL DEFAULT '',
+                tipo_contribuyente TEXT NOT NULL DEFAULT 'PERSONA NATURAL'
             )
+        """))
+        db.execute(text("""
+            ALTER TABLE clientes
+            ADD COLUMN IF NOT EXISTS tipo_contribuyente TEXT NOT NULL DEFAULT 'PERSONA NATURAL'
         """))
         db.execute(
             text("DELETE FROM conta_sri_jobs WHERE TRIM(ruc) = :ruc"),
             {"ruc": TEST_RUC},
         )
         db.execute(text("""
-            INSERT INTO clientes (ruccedcli, nomclient, activo, clavesri)
-            VALUES (:ruc, 'Cliente de integración', TRUE, 'clave-ficticia')
+            INSERT INTO clientes (ruccedcli, nomclient, activo, clavesri, tipo_contribuyente)
+            VALUES (:ruc, 'Cliente de integración', TRUE, 'clave-ficticia', 'PERSONA NATURAL')
             ON CONFLICT (ruccedcli) DO UPDATE
             SET nomclient = EXCLUDED.nomclient,
                 activo = TRUE,
-                clavesri = EXCLUDED.clavesri
+                clavesri = EXCLUDED.clavesri,
+                tipo_contribuyente = EXCLUDED.tipo_contribuyente
         """), {"ruc": TEST_RUC})
 
     # Prepare schema once before racing, then exercise the actual transaction,
