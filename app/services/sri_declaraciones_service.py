@@ -363,6 +363,7 @@ class SriDeclaracionesService:
                             download_dir=download_dir,
                             registro=registro,
                             ruc=ruc,
+                            tipo_declaracion=tipo_declaracion,
                         )
                         nombre_archivo = f"Declaracion_{serie}.pdf"
                         respuesta = await asyncio.to_thread(
@@ -603,22 +604,26 @@ class SriDeclaracionesService:
         return list(unicos.values())
 
     @classmethod
-    async def _descargar_declaracion(cls, page, download_dir: Path, registro: dict[str, Any], ruc: str) -> tuple[bytes, str]:
+    async def _descargar_declaracion(
+        cls, page, download_dir: Path, registro: dict[str, Any], ruc: str,
+        tipo_declaracion: str,
+    ) -> tuple[bytes, str]:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
         fila = page.locator(
             f'[id="formPresentada:tblConsultaDeclaracion_data"] tr[data-ri="{registro["fila"]}"]'
         )
-        # Usar «Declaración completa» para obtener el documento íntegro del SRI.
-        # La declaración perfilada puede presentar inconsistencias en ciertos casos.
-        boton = fila.locator('button[title="Declaración completa"]').first
+        # Para IVA usamos «Declaración completa», porque la perfilada puede
+        # presentar inconsistencias. Para Renta se conserva el comportamiento previo.
+        boton_titulo = "Declaración completa" if tipo_declaracion == "iva" else "Declaración perfilada"
+        boton = fila.locator(f'button[title="{boton_titulo}"]').first
         if await boton.count() == 0:
             raise RuntimeError(
-                f"No se encontró el botón «Declaración completa» para la serie {registro['serie']}."
+                f"No se encontró el botón «{boton_titulo}» para la serie {registro['serie']}."
             )
         logger.info(
-            "DECLARACIONES SRI | descargando PDF | ruc=%s | serie=%s | botón=Declaración completa | fila=%s | página=%s",
-            ruc, registro["serie"], registro["fila"], registro.get("pagina", 0),
+            "DECLARACIONES SRI | descargando PDF | ruc=%s | serie=%s | botón=%s | fila=%s | página=%s",
+            ruc, registro["serie"], boton_titulo, registro["fila"], registro.get("pagina", 0),
         )
 
         async with page.expect_download(timeout=TIMEOUT_MS) as espera:
