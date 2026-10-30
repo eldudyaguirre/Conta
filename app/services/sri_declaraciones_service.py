@@ -544,7 +544,9 @@ class SriDeclaracionesService:
                 periodo = celdas[2]
                 norma_desc = _sin_acentos(descripcion)
                 norma_periodo = _sin_acentos(periodo)
-                if tipo == "iva" and "declaracion de iva" not in norma_desc:
+                if tipo == "iva" and not (
+                    "declaracion" in norma_desc and "iva" in norma_desc
+                ):
                     continue
                 if tipo == "renta_natural" and not (
                     "renta" in norma_desc and "naturales" in norma_desc
@@ -563,13 +565,28 @@ class SriDeclaracionesService:
 
                 mes = "00"
                 if tipo == "iva":
-                    mes = next(
-                        (numero for nombre, numero in MESES.items() if re.search(rf"\b{nombre}\b", norma_periodo)),
-                        "",
-                    )
-                    if not mes:
-                        logger.warning("No se pudo reconocer el mes fiscal | ruc fila | período=%s", periodo)
-                        continue
+                    # El SRI presenta IVA mensual por nombre de mes y el IVA
+                    # semestral como PRIMER/SEGUNDO SEMESTRE. Guardamos estos
+                    # últimos como S1/S2 para no confundirlos con meses.
+                    if "semestre" in norma_periodo or "semestral" in norma_desc:
+                        if re.search(r"\b(primer|primero|1er|primer semestre)\b", norma_periodo):
+                            mes = "S1"
+                        elif re.search(r"\b(segundo|segunda|2do)\b", norma_periodo):
+                            mes = "S2"
+                        else:
+                            logger.warning(
+                                "No se pudo reconocer el semestre fiscal | período=%s | descripción=%s",
+                                periodo, descripcion,
+                            )
+                            continue
+                    else:
+                        mes = next(
+                            (numero for nombre, numero in MESES.items() if re.search(rf"\b{nombre}\b", norma_periodo)),
+                            "",
+                        )
+                        if not mes:
+                            logger.warning("No se pudo reconocer el mes fiscal | período=%s", periodo)
+                            continue
 
                 serie = re.sub(r"\D", "", celdas[4])
                 if not serie:
