@@ -34,7 +34,8 @@ SRI_DECLARACIONES_URL = SRI_DECLARACIONES_PAGE + "?" + urllib.parse.urlencode({
 TIMEOUT_MS = 60_000
 OBLIGACIONES = {
     "iva": {"data_rk": "1", "titulo": "IVA"},
-    "renta": {"data_rk": "14", "titulo": "RENTA NATURALES"},
+    "renta_natural": {"data_rk": "14", "titulo": "RENTA NATURALES"},
+    "renta_sociedades": {"data_rk": "101", "titulo": "RENTA SOCIEDADES"},
 }
 MESES = {
     "enero": "01",
@@ -58,6 +59,19 @@ def _sin_acentos(valor: str) -> str:
         caracter for caracter in unicodedata.normalize("NFKD", str(valor or ""))
         if not unicodedata.combining(caracter)
     ).lower().strip()
+
+
+def _obligacion_renta_por_tipo_contribuyente(tipo_contribuyente: str) -> str:
+    """Mapea el tipo BDTotal a la obligación real de Renta que ofrece el SRI."""
+    tipo = _sin_acentos(tipo_contribuyente)
+    if "juridic" in tipo or "sociedad" in tipo:
+        return "renta_sociedades"
+    if "natural" in tipo:
+        return "renta_natural"
+    raise ValueError(
+        "No se pudo determinar si el cliente es persona natural o jurídica "
+        f"a partir de tipo_contribuyente={tipo_contribuyente!r} en BdTotal.clientes."
+    )
 
 
 class SriDeclaracionesService:
@@ -257,15 +271,32 @@ class SriDeclaracionesService:
             existing_keys = [str(item.get("key", "")) for item in existing]
             existing_names = [str(item.get("nombre", "")) for item in existing]
 
+            # BdTotal.clientes.tipo_contribuyente determina qué opción de Renta
+            # se consulta: RENTA NATURALES (data-rk=14) o RENTA SOCIEDADES (101).
+            obligacion_renta = None
+            if tipo_solicitado in {"renta", "ambos"}:
+                obligacion_renta = _obligacion_renta_por_tipo_contribuyente(
+                    cred.get("tipo_contribuyente", "")
+                )
+                logger.info(
+                    "DECLARACIONES SRI | clasificación tributaria | ruc=%s | tipo_contribuyente=%s | obligación=%s",
+                    ruc, cred.get("tipo_contribuyente", ""), obligacion_renta,
+                )
+
             if tipo_solicitado == "iva":
                 obligaciones = [("iva", anio)]
             elif tipo_solicitado == "renta":
-                obligaciones = [("renta", anio)]
+                obligaciones = [(obligacion_renta, anio)]
             else:
-                obligaciones = [("iva", anio), ("renta", anio - 1)]
+                obligaciones = [("iva", anio), (obligacion_renta, anio - 1)]
 
             for tipo_declaracion, ejercicio in obligaciones:
-                descripcion = "IVA" if tipo_declaracion == "iva" else "Renta Naturales"
+                if tipo_declaracion == "iva":
+                    descripcion = "IVA"
+                elif tipo_declaracion == "renta_sociedades":
+                    descripcion = "Renta Sociedades"
+                else:
+                    descripcion = "Renta Naturales"
                 cls._actualizar(
                     ruc, anio, tipo_solicitado,
                     mensaje=f"Consultando {descripcion}, período fiscal {ejercicio}.",
@@ -337,7 +368,7 @@ class SriDeclaracionesService:
                         respuesta = await asyncio.to_thread(
                             cls._guardar_en_ttcweb,
                             ruc,
-                            tipo_declaracion,
+                            "iva" if tipo_declaracion == "iva" else "renta",
                             ejercicio,
                             registro["mes"],
                             nombre_archivo,
@@ -514,9 +545,13 @@ class SriDeclaracionesService:
                 norma_periodo = _sin_acentos(periodo)
                 if tipo == "iva" and "declaracion de iva" not in norma_desc:
                     continue
-                if tipo == "renta" and not (
+                if tipo == "renta_natural" and not (
                     "renta" in norma_desc and "naturales" in norma_desc
                     and "herencias" not in norma_desc
+                ):
+                    continue
+                if tipo == "renta_sociedades" and not (
+                    "renta" in norma_desc and "sociedades" in norma_desc
                 ):
                     continue
 
