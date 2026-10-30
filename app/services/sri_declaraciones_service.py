@@ -609,16 +609,15 @@ class SriDeclaracionesService:
         fila = page.locator(
             f'[id="formPresentada:tblConsultaDeclaracion_data"] tr[data-ri="{registro["fila"]}"]'
         )
-        # Según las peticiones capturadas en el HAR del SRI, el botón
-        # «Declaración perfilada» es el que devuelve el PDF como attachment.
-        # «Declaración completa» no fue el botón registrado en esas descargas.
-        boton = fila.locator('button[title="Declaración perfilada"]').first
+        # Usar «Declaración completa» para obtener el documento íntegro del SRI.
+        # La declaración perfilada puede presentar inconsistencias en ciertos casos.
+        boton = fila.locator('button[title="Declaración completa"]').first
         if await boton.count() == 0:
             raise RuntimeError(
-                f"No se encontró el botón «Declaración perfilada» para la serie {registro['serie']}."
+                f"No se encontró el botón «Declaración completa» para la serie {registro['serie']}."
             )
         logger.info(
-            "DECLARACIONES SRI | descargando PDF | ruc=%s | serie=%s | botón=Declaración perfilada | fila=%s | página=%s",
+            "DECLARACIONES SRI | descargando PDF | ruc=%s | serie=%s | botón=Declaración completa | fila=%s | página=%s",
             ruc, registro["serie"], registro["fila"], registro.get("pagina", 0),
         )
 
