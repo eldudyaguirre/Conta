@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     # Si es True, esta instancia solo procesa trabajos creados por el Worker Pool.
     # Mantener False para conservar el procesamiento normal de la cola.
     SRI_WORKER_POOL_ONLY: bool = False
+    # NSSM procesa ventas; el agente interactivo procesa compras.
+    SRI_WORKER_OPERATIONS: str = "ventas,ventas_validar,ventas_reparar,notas_credito_emitidas,retenciones_emitidas"
     SRI_WORKER_USER: str = ""
     SRI_WORKER_HEARTBEAT_SECONDS: int = 10
 
