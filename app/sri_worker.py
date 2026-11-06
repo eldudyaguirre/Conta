@@ -76,7 +76,7 @@ async def _procesar_trabajo(worker_numero: int) -> None:
     worker_id = usuario_worker if max(1, settings.SRI_WORKER_CONCURRENCY) == 1 else f"{usuario_worker}-{worker_numero}"
     SriClienteSyncService.registrar_worker(worker_id, usuario_worker)
     ultimo_heartbeat = 0.0
-    logger.info("Worker SRI %s iniciado para usuario %s.", worker_id, usuario_worker)
+    logger.info("Worker SRI %s iniciado para usuario %s. Operaciones: %s", worker_id, usuario_worker, settings.SRI_WORKER_OPERATIONS)
 
     while True:
         trabajo = None
@@ -86,8 +86,15 @@ async def _procesar_trabajo(worker_numero: int) -> None:
                 SriClienteSyncService.registrar_worker(worker_id, usuario_worker)
                 ultimo_heartbeat = ahora
 
+            operaciones = [
+                item.strip().lower()
+                for item in settings.SRI_WORKER_OPERATIONS.split(",")
+                if item.strip()
+            ]
             trabajo = SriClienteSyncService.obtener_trabajo_pendiente(
-                worker_id, solo_pool=settings.SRI_WORKER_POOL_ONLY
+                worker_id,
+                solo_pool=settings.SRI_WORKER_POOL_ONLY,
+                operaciones=operaciones or None,
             )
             if trabajo:
                 SriClienteSyncService._iva_debug_log(
