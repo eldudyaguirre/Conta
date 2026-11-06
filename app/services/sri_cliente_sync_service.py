@@ -437,20 +437,31 @@ class SriClienteSyncService:
         worker_id: str | None = None,
         *,
         solo_pool: bool = False,
+        operaciones: list[str] | None = None,
     ) -> dict[str, Any] | None:
-        """Reclama un trabajo; opcionalmente limita la selección al Worker Pool."""
+        """Reclama un trabajo de la cola, filtrando operaciones si se indica."""
         cls._ensure_jobs_table()
         filtro_pool = "AND grupo_id IS NOT NULL" if solo_pool else ""
+        filtro_operaciones = ""
+        params: dict[str, Any] = {}
+        if operaciones:
+            nombres = []
+            for indice, operacion in enumerate(operaciones):
+                clave = f"operacion_{indice}"
+                nombres.append(f":{clave}")
+                params[clave] = operacion
+            filtro_operaciones = f"AND operacion IN ({', '.join(nombres)})"
         with engine.begin() as db:
             row = db.execute(text(f"""
                 SELECT job_id, ruc, anio, mes, tipo_comprobante, operacion
                 FROM {cls.JOB_TABLE}
                 WHERE estado = 'pendiente'
                   {filtro_pool}
+                  {filtro_operaciones}
                 ORDER BY creado
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
-            """)).mappings().first()
+            """), params).mappings().first()
             if not row:
                 return None
             db.execute(text(f"""
