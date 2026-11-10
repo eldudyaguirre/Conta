@@ -71,6 +71,20 @@ def _enviar_alerta_error_worker(worker_id: str, usuario: str, trabajo: dict | No
     except Exception:
         logger.exception("No se pudo enviar el reporte de error a TtCWeb.")
 
+async def _mantener_heartbeat(worker_id: str, usuario: str) -> None:
+    """Renueva el heartbeat mientras el worker ejecuta un trabajo largo."""
+    intervalo = max(5, int(settings.SRI_WORKER_HEARTBEAT_SECONDS))
+    while True:
+        await asyncio.sleep(intervalo)
+        try:
+            SriClienteSyncService.registrar_worker(worker_id, usuario)
+        except Exception:
+            logger.exception(
+                "No se pudo renovar el heartbeat del worker %s durante el trabajo.",
+                worker_id,
+            )
+
+
 async def _procesar_trabajo(worker_numero: int) -> None:
     usuario_worker = (settings.SRI_WORKER_USER or os.getenv("USERNAME") or socket.gethostname()).strip()
     worker_id = usuario_worker if max(1, settings.SRI_WORKER_CONCURRENCY) == 1 else f"{usuario_worker}-{worker_numero}"
@@ -112,14 +126,21 @@ async def _procesar_trabajo(worker_numero: int) -> None:
                     trabajo["mes"],
                     trabajo["tipo_comprobante"],
                 )
-                await SriClienteSyncService._ejecutar_job(
-                    trabajo["job_id"],
-                    trabajo["ruc"],
-                    int(trabajo["anio"]),
-                    int(trabajo["mes"]),
-                    int(trabajo["tipo_comprobante"]),
-                    str(trabajo.get("operacion") or "compras"),
+                tarea_heartbeat = asyncio.create_task(
+                    _mantener_heartbeat(worker_id, usuario_worker)
                 )
+                try:
+                    await SriClienteSyncService._ejecutar_job(
+                        trabajo["job_id"],
+                        trabajo["ruc"],
+                        int(trabajo["anio"]),
+                        int(trabajo["mes"]),
+                        int(trabajo["tipo_comprobante"]),
+                        str(trabajo.get("operacion") or "compras"),
+                    )
+                finally:
+                    tarea_heartbeat.cancel()
+                    await asyncio.gather(tarea_heartbeat, return_exceptions=True)
                 logger.info("Worker %s terminó trabajo %s.", worker_id, trabajo["job_id"])
             else:
                 await asyncio.sleep(max(1, settings.SRI_WORKER_POLL_SECONDS))
