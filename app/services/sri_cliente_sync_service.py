@@ -490,6 +490,7 @@ class SriClienteSyncService:
             db.execute(text(f"""
                 UPDATE {cls.WORKER_TABLE}
                 SET job_actual = NULL,
+                    estado = 'activo',
                     ultimo_heartbeat = CURRENT_TIMESTAMP
                 WHERE worker_id = :worker_id
                   AND job_actual = :job_id
