@@ -260,6 +260,11 @@ class SriClienteSyncService:
                 resultado = await SriVentasValidatorService.sincronizar_mes(
                     ruc, anio, mes, tipo_comprobante, job_id=job_id
                 )
+            elif operacion == "notas_credito_emitidas_validar":
+                from app.services.sri_notas_credito_emitidas_validator_service import SriNotasCreditoEmitidasValidatorService
+                resultado = await SriNotasCreditoEmitidasValidatorService.sincronizar_mes(
+                    ruc, anio, mes, tipo_comprobante, job_id=job_id
+                )
             else:
                 resultado = await cls.sincronizar_mes(
                     ruc, anio, mes, tipo_comprobante, job_id=job_id,
@@ -4339,12 +4344,12 @@ class SriClienteSyncService:
             cls._job_update(job_id, mensaje="Abriendo sesión del SRI.")
             p, browser, context, page, chrome_process, profile_dir = await cls._login(ruc, cred["clave"])
             cls._job_update(job_id, estado="captcha", mensaje="Consultando comprobantes en el SRI y ejecutando la validación automática reCAPTCHA. No se espera un reto visual.")
-            if operacion in ("ventas", "ventas_reparar", "notas_credito_emitidas", "retenciones_emitidas"):
+            if operacion in ("ventas", "ventas_reparar", "notas_credito_emitidas", "notas_credito_emitidas_validar", "retenciones_emitidas"):
                 await cls._consultar_emitidos(
                     page,
                     anio,
                     mes,
-                    tipo_emitido=("retencion" if operacion == "retenciones_emitidas" else "nota_credito" if operacion == "notas_credito_emitidas" else "factura"),
+                    tipo_emitido=("retencion" if operacion == "retenciones_emitidas" else "nota_credito" if operacion in ("notas_credito_emitidas", "notas_credito_emitidas_validar") else "factura"),
                 )
             else:
                 try:

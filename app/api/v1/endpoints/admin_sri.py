@@ -185,6 +185,44 @@ async def sincronizar_notas_credito_emitidas(
         )
 
 
+@router.post("/ventas/notas-credito/validar")
+async def validar_notas_credito_emitidas(
+    request: SincronizarVentasRequest,
+    usuario: dict = Depends(get_admin_user),
+):
+    """Valida notas de crédito emitidas comparando SRI vs ncventas día por día."""
+    try:
+        resultado = SriClienteSyncService.iniciar_sincronizacion(
+            ruc=request.ruc,
+            anio=request.anio,
+            mes=request.mes,
+            tipo_comprobante=3,
+            operacion="notas_credito_emitidas_validar",
+        )
+        if resultado.get("duplicado"):
+            raise HTTPException(
+                status_code=409,
+                detail=resultado.get(
+                    "aviso",
+                    "Ya existe una solicitud SRI activa para este RUC. No se creó otra solicitud.",
+                ),
+            )
+        return {
+            "usuario": usuario["usrname"],
+            "tipo": "sri_validar_notas_credito_emitidas",
+            **resultado,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error iniciando validador de notas de crédito emitidas: {exc}",
+        )
+
+
 @router.post("/compras/retenciones/sincronizar")
 async def sincronizar_retenciones_recibidas(
     request: SincronizarComprasRequest,
