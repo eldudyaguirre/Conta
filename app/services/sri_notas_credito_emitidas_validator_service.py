@@ -141,7 +141,7 @@ class SriNotasCreditoEmitidasValidatorService:
                         "anio": str(anio),
                     }).scalar_one()
                     dia_info["base_datos"] = int(cantidad_final)
-                    dia_info["faltantes"] = max(0, int(cantidad_sri) - int(cantidad_bd))
+                    dia_info["faltantes"] = int(proceso["guardadas"])
                     dia_info["estado"] = (
                         "OK" if int(cantidad_final) == int(cantidad_sri) else "DIFERENCIA"
                     )
