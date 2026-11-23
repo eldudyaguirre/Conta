@@ -139,6 +139,7 @@ class SriVentasValidatorService:
                       AND TRIM(mes::text) = :mes
                       AND TRIM(año::text) = :anio
                       AND TRIM(codcomp::text) = '18'
+                      AND BTRIM(numfactur::text) <> 'RECAP'
                 """), {
                     "fecha": fecha_ui,
                     "mes": f"{mes:02d}",
@@ -232,6 +233,7 @@ class SriVentasValidatorService:
                               AND TRIM(mes::text) = :mes
                               AND TRIM(año::text) = :anio
                               AND TRIM(codcomp::text) = '18'
+                              AND BTRIM(numfactur::text) <> 'RECAP'
                         """), {
                             "fecha": fecha_ui,
                             "mes": f"{mes:02d}",
@@ -367,6 +369,7 @@ class SriVentasValidatorService:
         db.execute(text(f"""
             UPDATE ventas SET {asignaciones}
             WHERE TRIM(autorizacion::text) = :clave
+              AND BTRIM(numfactur::text) <> 'RECAP'
         """), {**nuevos, "clave": clave})
         return {"clave_acceso": clave, "diferencias": diferencias}
 
@@ -526,6 +529,7 @@ class SriVentasValidatorService:
                         SELECT *
                         FROM ventas
                         WHERE TRIM(autorizacion::text) = :clave
+                          AND BTRIM(numfactur::text) <> 'RECAP'
                         LIMIT 1
                         FOR UPDATE
                     """), {"clave": clave}).mappings().first()
@@ -658,6 +662,7 @@ class SriVentasValidatorService:
               AND TRIM(mes::text) = :mes
               AND TRIM(año::text) = :anio
               AND TRIM(codcomp::text) = '18'
+              AND BTRIM(numfactur::text) <> 'RECAP'
               AND COALESCE(TRIM(autorizacion::text), '') <> ''
         """), {
             "fecha": fecha.strftime("%d/%m/%Y"),
