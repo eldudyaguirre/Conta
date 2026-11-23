@@ -3015,6 +3015,7 @@ class SriClienteSyncService:
                             existe = db.execute(text("""
                                 SELECT 1 FROM ventas
                                 WHERE TRIM(autorizacion::text) = :clave
+                                  AND BTRIM(numfactur::text) <> 'RECAP'
                                 LIMIT 1
                             """), {"clave": clave}).first()
 
@@ -4641,10 +4642,20 @@ class SriClienteSyncService:
         legacy estas retenciones se representan como una fila con numfactur
         = RECAP y conservan la retención para el ATS.
         """
-        numero_retencion = (
-            f"{retencion['numest']}-{retencion['numptoemi']}-{retencion['numsec']}"
-        )
+        partes_numero = [
+            str(retencion.get("numest") or "").strip(),
+            str(retencion.get("numptoemi") or "").strip(),
+            str(retencion.get("numsec") or "").strip(),
+        ]
+        if not all(partes_numero):
+            raise ValueError("La retención RECAP no tiene un número completo.")
+
+        numero_retencion = "-".join(partes_numero)
         autorizacion = str(retencion.get("numero_autorizacion") or "").strip()
+        if not autorizacion:
+            raise ValueError(
+                f"La retención RECAP {numero_retencion} no contiene autorización."
+            )
         fecha = retencion["fecha"].strftime("%Y-%m-%d")
 
         # En ventas, para un RECAP se registra como cliente/emisor al
@@ -4727,10 +4738,24 @@ class SriClienteSyncService:
         cols = ", ".join(f'"{k}"' if k == "año" else k for k in values)
         params = ", ".join(f":{k}" for k in values)
 
-        db.execute(
-            text(f"INSERT INTO ventas ({cols}) VALUES ({params})"),
+        insert_result = db.execute(
+            text(
+                f"INSERT INTO ventas ({cols}) VALUES ({params}) "
+                "ON CONFLICT DO NOTHING"
+            ),
             values,
         )
+
+        # La restricción única parcial protege también frente a dos workers
+        # que intenten registrar simultáneamente la misma retención.
+        if not insert_result.rowcount:
+            logger.info(
+                "RETENCION RECAP | ya registrada por otro proceso | "
+                "retencion=%s | autorizacion=%s",
+                numero_retencion,
+                autorizacion,
+            )
+            return False
 
         logger.info(
             "RETENCION RECAP | insertada | retencion=%s | autorizacion=%s | "
