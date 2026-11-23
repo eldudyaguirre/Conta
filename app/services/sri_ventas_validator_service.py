@@ -233,7 +233,7 @@ class SriVentasValidatorService:
                               AND TRIM(mes::text) = :mes
                               AND TRIM(año::text) = :anio
                               AND TRIM(codcomp::text) = '18'
-                      AND BTRIM(numfactur::text) <> 'RECAP'
+                              AND BTRIM(numfactur::text) <> 'RECAP'
                         """), {
                             "fecha": fecha_ui,
                             "mes": f"{mes:02d}",
