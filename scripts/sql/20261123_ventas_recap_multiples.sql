@@ -30,6 +30,7 @@ BEGIN
         FROM pg_constraint
         WHERE conrelid = 'public.ventas'::regclass
           AND contype = 'p'
+          AND conname = 'ventas_pkey'
           AND pg_get_constraintdef(oid) = 'PRIMARY KEY (numfactur)'
     ) THEN
         RAISE EXCEPTION
